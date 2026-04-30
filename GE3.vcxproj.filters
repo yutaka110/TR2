@@ -1,0 +1,598 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="ソース ファイル">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="ヘッダー ファイル">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="リソース ファイル">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="imgui">
+      <UniqueIdentifier>{8705e94b-cb0c-4718-ad74-a28a7fd80c8b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\Receiver">
+      <UniqueIdentifier>{e903d54d-f3f0-4721-8362-8ff29fefba0a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\Reciever">
+      <UniqueIdentifier>{65d749a4-a102-45b9-ba54-b302db2078e7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\engine">
+      <UniqueIdentifier>{24dc3997-b7b0-40ea-b5c8-44a4c4aa2b2e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\engine\core">
+      <UniqueIdentifier>{2b44849d-61fd-4771-8c11-8bdb11569fdb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\engine\input">
+      <UniqueIdentifier>{f4c17340-cf39-4082-9c68-10ff834a94bd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\engine\utils">
+      <UniqueIdentifier>{093da0a0-f3a0-4ba5-b3f1-3b15f040b3d4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\engine\graphics">
+      <UniqueIdentifier>{a1bb6a87-2c82-4754-94ec-01216f6d503a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\engine\resources">
+      <UniqueIdentifier>{e0bb9f23-a177-4a35-9f1e-70c9831cc9dc}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ソース ファイル\engine\platform">
+      <UniqueIdentifier>{0458d46a-9ffa-45f1-9a3c-81e6cf89d6df}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\engine">
+      <UniqueIdentifier>{de762e9f-75d9-4d23-9453-6f03227de327}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\engine\core">
+      <UniqueIdentifier>{1d8de56e-c2e4-4e56-8f27-0404ab1d410a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\engine\input">
+      <UniqueIdentifier>{2747dd06-6927-47e1-bd23-efd921793d99}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\engine\graphics">
+      <UniqueIdentifier>{1d92c2be-3548-4cc3-b594-6f8252f4931d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\engine\resources">
+      <UniqueIdentifier>{789345bd-2fb4-4d8e-9c62-02385071ee4d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\engine\utils">
+      <UniqueIdentifier>{ca3ef45f-31c4-49d8-a9c2-22519d5007d6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ヘッダー ファイル\engine\platform">
+      <UniqueIdentifier>{1d035f3e-0c1d-411e-9a47-8d303e97f76d}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="Matrix4x4.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="externals\imgui\imgui.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="externals\imgui\imgui_demo.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="externals\imgui\imgui_draw.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="externals\imgui\imgui_impl_dx12.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="externals\imgui\imgui_impl_win32.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="externals\imgui\imgui_tables.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="externals\imgui\imgui_widgets.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="KeyInput.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="WinApp.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="NetworkManager.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="TextureUploader.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="TextureHelper.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="MfH264Receiver.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="CustomByteStream.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="UdpByteStream.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="MfH264Sender.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="H264Encoder.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="ColorConverter.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="CameraCapture.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="NalUtils.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\Receiver\startTcpReciverRgb32.cpp">
+      <Filter>ソース ファイル\Receiver</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\core\CommandListPool.cpp">
+      <Filter>ソース ファイル\engine\core</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\graphics\SwapChain.cpp">
+      <Filter>ソース ファイル\engine\graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\input\Input.cpp">
+      <Filter>ソース ファイル\engine\input</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\platform\Win32App.cpp">
+      <Filter>ソース ファイル\engine\platform</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\platform\Window.cpp">
+      <Filter>ソース ファイル\engine\platform</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\utils\Checked.cpp">
+      <Filter>ソース ファイル\engine\utils</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\utils\StringConv.cpp">
+      <Filter>ソース ファイル\engine\utils</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\utils\utill.cpp">
+      <Filter>ソース ファイル\engine\utils</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\utils\Logger.cpp">
+      <Filter>ソース ファイル\engine\utils</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\core\DescriptorHeap.cpp">
+      <Filter>ソース ファイル\engine\core</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\core\Device.cpp">
+      <Filter>ソース ファイル\engine\core</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\core\ShaderCompiler.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\graphics\PipelineBuilder.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\graphics\RenderContext.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\graphics\RenderGraph.cpp">
+      <Filter>ソース ファイル\engine\graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\resources\ResourceRegistry.cpp">
+      <Filter>ソース ファイル\engine\resources</Filter>
+    </ClCompile>
+    <ClCompile Include="application\src\renderer\DebugSceneRenderer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\graphics\SpriteRenderer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\camera\debugCamera.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\utils\math\MathUtils.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\utils\dx12\BufferHelper.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\assets\ObjLoader.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\graphics\DxHelpers.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\particle\ParticleSystemCpu.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\utils\DebugTools.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppMain.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppPipelines.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\EngineContext.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\ModelLoaderAssimp.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\src\audio\AudioWave.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppAudio.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppBootstrap.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppFrameGraphBuilder.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppPostProcessPipeline.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppSceneRenderPipeline.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppVfxRenderPipeline.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\EffectAssetLoader.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\EffectRuntime.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\EffectSystem.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppGpuParticleSystem.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\PostProcessStack.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppVfxRenderTargets.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppFrameRenderer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppRenderResources.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppRunLoop.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppRuntimeUtils.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppImGuiLayer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppParticleSystem.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\AppSceneResources.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\src\vfx\DistortionRenderer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\src\vfx\BeamRenderer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\src\vfx\ParticleRenderer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\src\vfx\TrailRenderer.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="application\src\vfx\VfxComponentDraw.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="Object3D.VS.hlsl" />
+    <FxCompile Include="Object3D.PS.hlsl" />
+    <FxCompile Include="Resources\Particle.PS.hlsl" />
+    <FxCompile Include="Resources\Particle.VS.hlsl" />
+    <FxCompile Include="Resources\Sprite.PS.hlsl" />
+    <FxCompile Include="Resources\Sprite.VS.hlsl" />
+    <FxCompile Include="Resources\Beam3D.VS.hlsl" />
+    <FxCompile Include="Resources\Beam3D.PS.hlsl" />
+    <FxCompile Include="Resources\ParticleSim.CS.hlsl" />
+    <FxCompile Include="Resources\FullscreenComposite.VS.hlsl" />
+    <FxCompile Include="Resources\FullscreenComposite.PS.hlsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Matrix4x4.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imconfig.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imgui.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imgui_impl_dx12.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imgui_impl_win32.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imgui_internal.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imstb_rectpack.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imstb_textedit.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="externals\imgui\imstb_truetype.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="Vertex.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="KeyInput.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="WinApp.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="NetworkManager.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="TextureUploader.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="TextureHelper.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="MfH264Receiver.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomByteStream.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="UdpByteStream.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="MfH264Sender.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="H264Encoder.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="ColorConverter.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="CameraCapture.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="NalUtils.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppRunLoop.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppFrameState.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\Receiver\FrameProto.h">
+      <Filter>ヘッダー ファイル\Reciever</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\Receiver\startTcpReceiverRgb32.h">
+      <Filter>ヘッダー ファイル\Reciever</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\core\CommandListPool.h">
+      <Filter>ヘッダー ファイル\engine\core</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\Checked.h">
+      <Filter>ヘッダー ファイル\engine\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\input\Input.h">
+      <Filter>ヘッダー ファイル\engine\input</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\core\DescriptorHeap.h">
+      <Filter>ヘッダー ファイル\engine\core</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\core\Device.h">
+      <Filter>ヘッダー ファイル\engine\core</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\Logger.h">
+      <Filter>ヘッダー ファイル\engine\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\StringConv.h">
+      <Filter>ヘッダー ファイル\engine\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\utill.h">
+      <Filter>ヘッダー ファイル\engine\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\platform\Win32App.h">
+      <Filter>ヘッダー ファイル\engine\platform</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\platform\Window.h">
+      <Filter>ヘッダー ファイル\engine\platform</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\SwapChain.h">
+      <Filter>ヘッダー ファイル\engine\graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\core\ShaderCompiler.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\pipelineBuilder.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\ProjectSettings.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\RenderContext.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\RenderGraph.h">
+      <Filter>ヘッダー ファイル\engine\graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\MaterialBinding.h">
+      <Filter>ヘッダー ファイル\engine\graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\resources\ResourceRegistry.h">
+      <Filter>ヘッダー ファイル\engine\resources</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\renderer\DebugSceneRenderer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\SpriteRenderer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\Sprite.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\math\Vector.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\math\MathUtils.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\camera\debugCamera.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\dx12\BufferHelper.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\utils\DebugTools.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\particle\ParticleSystemCpu.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\media\CpuTransferCtx.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\graphics\DxHelpers.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\audio\AudioWave.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\assets\ObjLoader.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppMain.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppPipelines.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\EngineContext.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\ModelLoaderAssimp.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\include\audio\WaveAudio.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppAudio.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppBootstrap.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppFrameGraphBuilder.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppPostProcessPipeline.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppSceneRenderPipeline.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppVfxRenderPipeline.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\EffectAssetLoader.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\EffectComponentViews.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\EffectRuntime.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\EffectSystem.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppGpuParticleSystem.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\PostProcessStack.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppVfxRenderTargets.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppFrameRenderer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppRenderResources.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppRuntimeUtils.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppImGuiLayer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppParticleSystem.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppRuntimeState.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\AppSceneResources.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\vfx\AppVfxRendererSet.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\vfx\BeamRenderer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\vfx\DistortionRenderer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\vfx\ParticleRenderer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\vfx\TrailRenderer.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\vfx\VfxRenderContext.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\include\vfx\VfxRenderInputs.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\src\vfx\VfxComponentDraw.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="externals\imgui\LICENSE.txt">
+      <Filter>imgui</Filter>
+    </Text>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Particle.hlsli" />
+    <None Include="Resources\effects\WarpCore.effect" />
+  </ItemGroup>
+</Project>

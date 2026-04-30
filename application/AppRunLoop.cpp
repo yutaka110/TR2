@@ -1,0 +1,557 @@
+#include "AppRunLoop.h"
+
+#include "../../externals/imgui/imgui.h"
+#include <DirectXMath.h>
+
+#include "AppFrameRenderer.h"
+#include "AppImGuiLayer.h"
+#include "AppParticleSystem.h"
+#include "AppPipelines.h"
+#include "AppRenderResources.h"
+#include "AppRuntimeState.h"
+#include "AppSceneResources.h"
+#include "EngineContext.h"
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+using namespace DirectX;
+using namespace Microsoft::WRL;
+
+namespace {
+void TransitionSceneDepthIfNeeded(
+    ID3D12GraphicsCommandList* commandList,
+    ID3D12Resource* depthResource,
+    D3D12_RESOURCE_STATES& currentState,
+    D3D12_RESOURCE_STATES nextState) {
+    if (commandList == nullptr || depthResource == nullptr || currentState == nextState) {
+        return;
+    }
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = depthResource;
+    barrier.Transition.StateBefore = currentState;
+    barrier.Transition.StateAfter = nextState;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    commandList->ResourceBarrier(1, &barrier);
+    currentState = nextState;
+}
+
+bool IsSameAuthoredComponent(
+    const EffectComponentCommon* source,
+    const EffectComponentCommon* destination) {
+    if (source == nullptr || destination == nullptr) {
+        return false;
+    }
+    if (source->id != 0 && source->id == destination->id) {
+        return true;
+    }
+    return source->name == destination->name && source->type == destination->type;
+}
+
+void ApplyLiveTuningToComponent(
+    const ParticleComponentAssetView& source,
+    EffectParticleSettings& destination) {
+    destination.depthFadeSoftness = source.settings->depthFadeSoftness;
+    destination.edgeSoftness = source.settings->edgeSoftness;
+}
+
+void ApplyLiveTuningToComponent(
+    const TrailComponentAssetView& source,
+    EffectTrailSettings& destination) {
+    destination.depthFadeSoftness = source.settings->depthFadeSoftness;
+    destination.trailTailFade = source.settings->trailTailFade;
+}
+
+void ApplyLiveTuningToComponent(
+    const DistortionComponentAssetView& source,
+    EffectDistortionSettings& destination) {
+    destination.depthFadeSoftness = source.settings->depthFadeSoftness;
+    destination.depthAttenuation = source.settings->depthAttenuation;
+}
+
+void PreserveParticleLiveTuning(
+    const EffectAsset& currentAsset,
+    EffectAsset& reloadedAsset) {
+    std::vector<ParticleComponentAsset> replacements;
+    ForEachParticleComponent(reloadedAsset.Components().ParticleStorageView(), [&currentAsset, &replacements](const ParticleComponentAssetView& reloadedParticle) {
+        bool applied = false;
+        ForEachParticleComponent(currentAsset.Components().ParticleStorageView(), [&applied, &reloadedParticle, &replacements](const ParticleComponentAssetView& currentParticle) {
+            if (applied) {
+                return;
+            }
+            if (IsSameAuthoredComponent(currentParticle.common, reloadedParticle.common)) {
+                ParticleComponentAsset replacement{*reloadedParticle.common, *reloadedParticle.settings};
+                ApplyLiveTuningToComponent(currentParticle, replacement.settings);
+                replacements.push_back(replacement);
+                applied = true;
+            }
+        });
+    });
+
+    const MutableParticleComponentStorageView storage = reloadedAsset.MutableComponents().MutableParticleStorageView();
+    for (const ParticleComponentAsset& replacement : replacements) {
+        ReplaceParticleComponentAndSyncPacked(storage, replacement);
+    }
+}
+
+void PreserveTrailLiveTuning(
+    const EffectAsset& currentAsset,
+    EffectAsset& reloadedAsset) {
+    std::vector<TrailComponentAsset> replacements;
+    ForEachTrailComponent(reloadedAsset.Components().TrailStorageView(), [&currentAsset, &replacements](const TrailComponentAssetView& reloadedTrail) {
+        bool applied = false;
+        ForEachTrailComponent(currentAsset.Components().TrailStorageView(), [&applied, &reloadedTrail, &replacements](const TrailComponentAssetView& currentTrail) {
+            if (applied) {
+                return;
+            }
+            if (IsSameAuthoredComponent(currentTrail.common, reloadedTrail.common)) {
+                TrailComponentAsset replacement{*reloadedTrail.common, *reloadedTrail.settings};
+                ApplyLiveTuningToComponent(currentTrail, replacement.settings);
+                replacements.push_back(replacement);
+                applied = true;
+            }
+        });
+    });
+
+    const MutableTrailComponentStorageView storage = reloadedAsset.MutableComponents().MutableTrailStorageView();
+    for (const TrailComponentAsset& replacement : replacements) {
+        ReplaceTrailComponentAndSyncPacked(storage, replacement);
+    }
+}
+
+void PreserveDistortionLiveTuning(
+    const EffectAsset& currentAsset,
+    EffectAsset& reloadedAsset) {
+    std::vector<DistortionComponentAsset> replacements;
+    ForEachDistortionComponent(reloadedAsset.Components().DistortionStorageView(), [&currentAsset, &replacements](const DistortionComponentAssetView& reloadedDistortion) {
+        bool applied = false;
+        ForEachDistortionComponent(currentAsset.Components().DistortionStorageView(), [&applied, &reloadedDistortion, &replacements](const DistortionComponentAssetView& currentDistortion) {
+            if (applied) {
+                return;
+            }
+            if (IsSameAuthoredComponent(currentDistortion.common, reloadedDistortion.common)) {
+                DistortionComponentAsset replacement{*reloadedDistortion.common, *reloadedDistortion.settings};
+                ApplyLiveTuningToComponent(currentDistortion, replacement.settings);
+                replacements.push_back(replacement);
+                applied = true;
+            }
+        });
+    });
+
+    const MutableDistortionComponentStorageView storage = reloadedAsset.MutableComponents().MutableDistortionStorageView();
+    for (const DistortionComponentAsset& replacement : replacements) {
+        ReplaceDistortionComponentAndSyncPacked(storage, replacement);
+    }
+}
+
+void PreserveLiveTuning(
+    const EffectAsset& currentAsset,
+    EffectAsset& reloadedAsset) {
+    reloadedAsset.defaultParticle = currentAsset.defaultParticle;
+    reloadedAsset.defaultTrail = currentAsset.defaultTrail;
+    reloadedAsset.defaultBeam = currentAsset.defaultBeam;
+    reloadedAsset.defaultDistortion = currentAsset.defaultDistortion;
+
+    PreserveParticleLiveTuning(currentAsset, reloadedAsset);
+    PreserveTrailLiveTuning(currentAsset, reloadedAsset);
+    PreserveDistortionLiveTuning(currentAsset, reloadedAsset);
+}
+} // namespace
+
+AppRunLoop::AppRunLoop(
+    DebugCamera& debugCamera,
+    AppRuntimeState& runtimeState,
+    AppSceneResources& scene,
+    AppParticleSystem& particleSystem,
+    AppImGuiLayer& imguiLayer,
+    AppFrameRenderer& frameRenderer,
+    AppPipelines& appPipelines,
+    AppRenderResources& renderResources,
+    graphics::SwapChain& swapChain,
+    core::CommandListPool& clPool,
+    EngineContext& engineContext,
+    ge3::core::DescriptorHeapSet& heaps,
+    core::Device& dev,
+    ComPtr<ID3D12DescriptorHeap> srvDescriptorHeap,
+    Matrix4x4* wvpData,
+    uint32_t windowWidth,
+    uint32_t windowHeight,
+    FrameLoopState& frameState,
+    ID3D12CommandQueue* commandQueue,
+    ID3D12Fence* fence,
+    HANDLE fenceEvent)
+    : debugCamera_(debugCamera),
+      runtimeState_(runtimeState),
+      scene_(scene),
+      particleSystem_(particleSystem),
+      imguiLayer_(imguiLayer),
+      frameRenderer_(frameRenderer),
+      appPipelines_(appPipelines),
+      renderResources_(renderResources),
+      swapChain_(swapChain),
+      clPool_(clPool),
+      engineContext_(engineContext),
+      heaps_(heaps),
+      dev_(dev),
+      srvDescriptorHeap_(srvDescriptorHeap),
+      wvpData_(wvpData),
+      windowWidth_(windowWidth),
+      windowHeight_(windowHeight),
+      frameState_(frameState),
+      commandQueue_(commandQueue),
+      fence_(fence),
+      fenceEvent_(fenceEvent) {
+    postProcessStack_.ResetToVfxDefaults();
+
+    EffectAsset additiveParticle{};
+    additiveParticle.name = "particle_additive";
+    additiveParticle.shader = "Particle";
+    additiveParticle.texture = "default";
+    additiveParticle.passState.blend = ge3::graphics::BlendMode::Additive;
+    additiveParticle.passState.depth = ge3::graphics::DepthMode::ReadOnly;
+    additiveParticle.layer = EffectLayer::AdditiveFx;
+    additiveParticle.lifetime = 2.0f;
+    additiveParticle.defaultParticle.emissive = 1.5f;
+    additiveParticle.defaultBeam.emissive = additiveParticle.defaultParticle.emissive;
+    effectSystem_.RegisterAsset(std::move(additiveParticle));
+    effectRuntime_.AttachSystem(&effectSystem_);
+
+    loadedEffectAssets_ = effectAssetLoader_.LoadDirectory("Resources/effects");
+    for (const LoadedEffectAsset& loaded : loadedEffectAssets_) {
+        effectSystem_.RegisterAsset(loaded.asset);
+    }
+}
+
+void AppRunLoop::InitializeBeam(
+    ID3D12Device* device,
+    ID3D12DescriptorHeap* srvDescriptorHeap,
+    uint32_t descriptorSizeSRV,
+    DXGI_FORMAT rtvFormat,
+    DXGI_FORMAT dsvFormat) {
+    beam_.Initialize(
+        device,
+        srvDescriptorHeap,
+        descriptorSizeSRV,
+        scene_.textureSrvHandleCPU,
+        scene_.textureSrvHandleCPU2,
+        rtvFormat,
+        dsvFormat);
+}
+
+void AppRunLoop::Shutdown() {
+    beam_.Shutdown();
+}
+
+void AppRunLoop::UpdateFrame() {
+    appPipelines_.HotReloadIfNeeded(dev_.GetDevice());
+    runtimeState_.viewport.Width = static_cast<float>(windowWidth_);
+    runtimeState_.viewport.Height = static_cast<float>(windowHeight_);
+    runtimeState_.viewport.TopLeftX = 0.0f;
+    runtimeState_.viewport.TopLeftY = 0.0f;
+    runtimeState_.viewport.MinDepth = 0.0f;
+    runtimeState_.viewport.MaxDepth = 1.0f;
+    runtimeState_.scissorRect.left = 0;
+    runtimeState_.scissorRect.top = 0;
+    runtimeState_.scissorRect.right = static_cast<LONG>(windowWidth_);
+    runtimeState_.scissorRect.bottom = static_cast<LONG>(windowHeight_);
+
+    if (runtimeState_.autoPlayVfxDemo) {
+        runtimeState_.enableParticles = true;
+        runtimeState_.autoPlayVfxTimer -= 0.016f;
+        runtimeState_.autoPlayVfxAngle += 0.9f * 0.016f;
+        if (runtimeState_.autoPlayVfxTimer <= 0.0f) {
+            const float radius = (std::max)(0.0f, runtimeState_.autoPlayVfxRadius);
+            const float angle = runtimeState_.autoPlayVfxAngle;
+            const Vector3 effectPosition = {
+                std::cos(angle) * radius,
+                std::sin(angle * 1.7f) * 0.65f,
+                std::sin(angle) * radius
+            };
+            effectRuntime_.PlayEffectWithParams(
+                "warp_core",
+                effectPosition,
+                {1.0f, 0.8f, 0.45f, 1.0f},
+                {1.15f, 1.15f, 1.15f});
+            runtimeState_.autoPlayVfxTimer = (std::max)(0.1f, runtimeState_.autoPlayVfxInterval);
+        }
+    }
+
+    debugCamera_.Update();
+    runtimeState_.cameraWorldPosition = debugCamera_.translation_;
+    scene_.UpdateCameraWorldPosition(runtimeState_.cameraWorldPosition);
+    frameState_.viewMatrix = debugCamera_.GetViewMatrix();
+    frameState_.projMatrix = debugCamera_.GetProjectionMatrix();
+
+    beamTime_ += 0.016f;
+    beam_.SetTime(beamTime_);
+    effectRuntime_.Update(0.016f);
+
+    for (LoadedEffectAsset& loaded : loadedEffectAssets_) {
+        if (!std::filesystem::exists(loaded.path)) {
+            continue;
+        }
+
+        const std::filesystem::file_time_type lastWriteTime =
+            std::filesystem::last_write_time(loaded.path);
+        if (lastWriteTime == loaded.lastWriteTime) {
+            continue;
+        }
+
+        LoadedEffectAsset reloaded{};
+        if (effectAssetLoader_.LoadFile(loaded.path, reloaded)) {
+            if (const EffectAsset* currentAsset = effectSystem_.FindAsset(reloaded.asset.name)) {
+                PreserveLiveTuning(*currentAsset, reloaded.asset);
+            }
+            effectSystem_.RegisterAsset(reloaded.asset);
+            loaded = std::move(reloaded);
+        }
+    }
+
+    BYTE key[256] = {};
+    (void)key;
+
+    frameState_.viewProjectionMatrix = Multiply(frameState_.viewMatrix, frameState_.projMatrix);
+    frameState_.deltaTime += 0.016f;
+    frameState_.drawCount = particleSystem_.UpdateInstances(
+        frameState_.viewProjectionMatrix,
+        frameState_.deltaTime);
+}
+
+void AppRunLoop::BeginFrameSystems() {
+    imguiLayer_.BeginFrame();
+    frameTransientAllocator_.BeginFrame();
+    resourceRegistry_.Clear();
+    effectResourceCache_.BeginFrame();
+    renderGraph_.Clear();
+    renderGraph_.ClearResources();
+}
+
+void AppRunLoop::SignalAndWaitGpu() {
+    uint64_t fenceValue = engineContext_.GetFenceValue() + 1;
+    engineContext_.SetFenceValue(fenceValue);
+    commandQueue_->Signal(fence_, fenceValue);
+    if (fence_->GetCompletedValue() < fenceValue) {
+        fence_->SetEventOnCompletion(fenceValue, fenceEvent_);
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+}
+
+void AppRunLoop::RenderFrame() {
+    BeginFrameSystems();
+
+    UINT backBufferIndex = swapChain_.CurrentIndex();
+    ComPtr<ID3D12GraphicsCommandList> commandList =
+        clPool_.Begin(backBufferIndex, appPipelines_.GetMainPSO());
+    gpuParticleSystem_.Initialize(
+        dev_.GetDevice(),
+        commandList.Get(),
+        heaps_);
+
+    ID3D12Resource* backBuffer = swapChain_.BackBuffer(backBufferIndex);
+    auto dsvHandle = heaps_.dsv.GetHandle(engineContext_.GetMainDsvIndex()).cpu;
+    auto readOnlyDsvHandle = heaps_.dsv.GetHandle(engineContext_.GetReadOnlyDsvIndex()).cpu;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = swapChain_.RTV(backBufferIndex);
+
+    UpdateFrame();
+
+    scene_.UpdateTransforms(
+        runtimeState_,
+        wvpData_,
+        frameState_.viewMatrix,
+        frameState_.projMatrix,
+        windowWidth_,
+        windowHeight_);
+
+    const PostProcessExecutionPlan postExecutionPlan = postProcessStack_.BuildExecutionPlan();
+
+    imguiLayer_.BuildUi(
+        runtimeState_,
+        effectRuntime_,
+        postProcessStack_,
+        lastRenderGraphDescription_,
+        lastRenderGraphError_,
+        lastRenderPassDebugInfo_,
+        lastTransientTargetCount_,
+        lastTransientTargetStorageCount_,
+        lastTransientBufferCount_,
+        lastTransientBufferStorageCount_,
+        vfxRenderTargets_.GetSrvHandle("SceneColor"),
+        vfxRenderTargets_.GetSrvHandle("VfxAccumulation"),
+        vfxRenderTargets_.GetSrvHandle(postExecutionPlan.finalOutputResource),
+        vfxRenderTargets_.GetSrvHandle("DebugDepthPreview"),
+        vfxRenderTargets_.GetSrvHandle("DebugEmissivePreview"),
+        [&]() {
+        Emitter emitterState{};
+        emitterState.transform = runtimeState_.emitter.transform;
+        emitterState.count = runtimeState_.emitter.count;
+        emitterState.frequency = runtimeState_.emitter.frequency;
+        emitterState.frequencyTime = runtimeState_.emitter.frequencyTime;
+        particleSystem_.Emit(emitterState);
+        });
+    imguiLayer_.EndFrame();
+
+    scene_.SyncRuntimeState(runtimeState_, frameState_.deltaTime);
+    particleSystem_.SetAccelerationField({
+        runtimeState_.accelerationField.acceleration,
+        {runtimeState_.accelerationField.area.min, runtimeState_.accelerationField.area.max}
+    });
+
+    effectResourceCache_.RegisterTexture({"default", scene_.textureSrvHandleCPU, scene_.textureSrvHandleGPU, 1, 1});
+    effectResourceCache_.RegisterTexture({"monsterBall", scene_.textureSrvHandleCPU2, scene_.textureSrvHandleGPU2, 1, 1});
+    effectResourceCache_.RegisterTexture({"streakNoise", scene_.textureSrvHandleCPU, scene_.textureSrvHandleGPU, 1, 1});
+
+    const D3D12_GPU_DESCRIPTOR_HANDLE spriteTextureHandle =
+        runtimeState_.useMonsterBall ? scene_.textureSrvHandleGPU2 : scene_.textureSrvHandleGPU;
+    const EffectRuntimeFrame effectRuntimeFrame = effectRuntime_.BuildFrame();
+    const ParticleRenderQueue& particleQueue = effectRuntimeFrame.particleQueue;
+    const ParticleRenderFallback primaryParticleFx =
+        !particleQueue.empty() ? effectRuntimeFrame.PrimaryParticleFallback()
+                               : effectRuntime_.FindPrimaryParticleFallback();
+    const D3D12_GPU_DESCRIPTOR_HANDLE vfxTextureHandle =
+        primaryParticleFx.common != nullptr
+            ? effectResourceCache_.ResolveTexture(primaryParticleFx.common->texture, spriteTextureHandle)
+            : spriteTextureHandle;
+
+    AppFrameGraphBuildContext graphContext{};
+    graphContext.renderGraph = &renderGraph_;
+    graphContext.runtimeState = &runtimeState_;
+    graphContext.frameRenderer = &frameRenderer_;
+    graphContext.imguiLayer = &imguiLayer_;
+    graphContext.appPipelines = &appPipelines_;
+    graphContext.renderResources = &renderResources_;
+    graphContext.scene = &scene_;
+    graphContext.vfxRenderTargets = &vfxRenderTargets_;
+    graphContext.gpuParticleSystem = &gpuParticleSystem_;
+    graphContext.vfxRenderers = &vfxRenderers_;
+    graphContext.postProcessStack = &postProcessStack_;
+    graphContext.frameState = &frameState_;
+    graphContext.srvDescriptorHeap = srvDescriptorHeap_.Get();
+    graphContext.backBuffer = backBuffer;
+    graphContext.rtv = rtv;
+    graphContext.dsv = dsvHandle;
+    graphContext.spriteTextureHandle = spriteTextureHandle;
+    graphContext.vfxTextureHandle = vfxTextureHandle;
+    graphContext.depthTextureHandle = engineContext_.GetDepthSrvGpuHandle();
+    graphContext.effectRuntime = &effectRuntimeFrame;
+    graphContext.primaryParticleFx = primaryParticleFx;
+    graphContext.beamTime = beamTime_;
+    frameGraphBuilder_.Build(graphContext);
+    gpuParticleSystem_.EnsureGraphBuffers(dev_.GetDevice(), renderGraph_);
+
+    const std::vector<ge3::graphics::TransientRenderTargetDesc> transientRenderTargetPlan =
+        renderGraph_.BuildTransientRenderTargetPlan();
+    const std::vector<ge3::graphics::TransientBufferDesc> transientBufferPlan =
+        renderGraph_.BuildTransientBufferPlan();
+    std::unordered_set<std::string> transientTargetStorages;
+    std::unordered_set<std::string> transientBufferStorages;
+    for (const auto& target : transientRenderTargetPlan) {
+        if (target.transient) {
+            transientTargetStorages.insert(target.storageName);
+        }
+    }
+    for (const auto& buffer : transientBufferPlan) {
+        if (buffer.transient) {
+            transientBufferStorages.insert(buffer.storageName);
+        }
+    }
+
+    vfxRenderTargets_.ResetRequests();
+    for (const auto& renderTarget : transientRenderTargetPlan) {
+        if (renderTarget.transient) {
+            vfxRenderTargets_.RequestTransientTarget(
+                renderTarget,
+                renderTarget.clearColor,
+                renderTarget.initialState,
+                renderTarget.name.find("PostColor") == 0);
+            continue;
+        }
+
+        vfxRenderTargets_.RequestTarget(
+            renderTarget.name,
+            renderTarget.resolutionScale,
+            renderTarget.format,
+            renderTarget.clearColor,
+            renderTarget.initialState);
+    }
+    vfxRenderTargets_.Initialize(
+        dev_.GetDevice(),
+        heaps_,
+        windowWidth_,
+        windowHeight_);
+
+    resourceRegistry_.RegisterRenderTarget({
+        "BackBuffer",
+        {},
+        rtv,
+        {},
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        windowWidth_,
+        windowHeight_
+    });
+    vfxRenderTargets_.Register(resourceRegistry_);
+
+    TransitionSceneDepthIfNeeded(
+        commandList.Get(),
+        engineContext_.GetDepthStencil(),
+        sceneDepthState_,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
+    frameRenderer_.BeginFrame(
+        commandList.Get(),
+        backBuffer,
+        rtv,
+        dsvHandle,
+        runtimeState_.clearColor);
+    vfxRenderTargets_.BeginScene(commandList.Get(), dsvHandle);
+    renderGraph_.RegisterResource("BackBuffer", backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    renderGraph_.RegisterResource(
+        "SceneDepth",
+        engineContext_.GetDepthStencil(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    renderGraph_.RegisterRenderTargetBinding("BackBuffer", rtv, windowWidth_, windowHeight_);
+    vfxRenderTargets_.RegisterGraphResources(renderGraph_);
+    vfxRenderTargets_.RegisterDepthBinding(renderGraph_, dsvHandle);
+    renderGraph_.RegisterDepthTargetBinding("SceneDepthReadOnly", readOnlyDsvHandle);
+    gpuParticleSystem_.RegisterGraphResources(renderGraph_);
+    renderGraph_.SetResourceStateChangedCallback(
+        [&](std::string_view name, D3D12_RESOURCE_STATES state) {
+            if (name == "SceneDepth") {
+                sceneDepthState_ = state;
+            }
+            vfxRenderTargets_.SetResourceState(name, state);
+            gpuParticleSystem_.SetResourceState(name, state);
+        });
+
+    std::string renderGraphError;
+    if (!renderGraph_.Validate(&renderGraphError)) {
+        OutputDebugStringA("[RenderGraph] ");
+        OutputDebugStringA(renderGraphError.c_str());
+        OutputDebugStringA("\n");
+    }
+    lastRenderPassDebugInfo_ = renderGraph_.BuildPassDebugInfo();
+    lastRenderGraphDescription_ = renderGraph_.Describe();
+    lastRenderGraphError_ = renderGraphError;
+    lastTransientTargetCount_ = static_cast<uint32_t>(std::count_if(
+        transientRenderTargetPlan.begin(),
+        transientRenderTargetPlan.end(),
+        [](const auto& target) { return target.transient; }));
+    lastTransientTargetStorageCount_ = static_cast<uint32_t>(transientTargetStorages.size());
+    lastTransientBufferCount_ = static_cast<uint32_t>(std::count_if(
+        transientBufferPlan.begin(),
+        transientBufferPlan.end(),
+        [](const auto& buffer) { return buffer.transient; }));
+    lastTransientBufferStorageCount_ = static_cast<uint32_t>(transientBufferStorages.size());
+    renderGraph_.Execute(commandList.Get());
+    frameRenderer_.EndFrame(commandList.Get(), backBuffer);
+
+    clPool_.EndAndExecute(dev_);
+    swapChain_.Present(dev_, 1);
+
+    SignalAndWaitGpu();
+}
