@@ -248,6 +248,10 @@ void AppRunLoop::Shutdown() {
     beam_.Shutdown();
 }
 
+void AppRunLoop::SetNetworkStatsProvider(std::function<net::NetworkStatsSnapshot()> provider) {
+    networkStatsProvider_ = std::move(provider);
+}
+
 void AppRunLoop::UpdateFrame() {
     appPipelines_.HotReloadIfNeeded(dev_.GetDevice());
     runtimeState_.viewport.Width = static_cast<float>(windowWidth_);
@@ -370,6 +374,13 @@ void AppRunLoop::RenderFrame() {
 
     const PostProcessExecutionPlan postExecutionPlan = postProcessStack_.BuildExecutionPlan();
 
+    net::NetworkStatsSnapshot networkStatsSnapshot{};
+    const net::NetworkStatsSnapshot* networkStatsPtr = nullptr;
+    if (networkStatsProvider_) {
+        networkStatsSnapshot = networkStatsProvider_();
+        networkStatsPtr = &networkStatsSnapshot;
+    }
+
     imguiLayer_.BuildUi(
         runtimeState_,
         effectRuntime_,
@@ -386,6 +397,7 @@ void AppRunLoop::RenderFrame() {
         vfxRenderTargets_.GetSrvHandle(postExecutionPlan.finalOutputResource),
         vfxRenderTargets_.GetSrvHandle("DebugDepthPreview"),
         vfxRenderTargets_.GetSrvHandle("DebugEmissivePreview"),
+        networkStatsPtr,
         [&]() {
         Emitter emitterState{};
         emitterState.transform = runtimeState_.emitter.transform;

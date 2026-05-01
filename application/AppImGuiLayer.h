@@ -10,7 +10,9 @@
 struct AppRuntimeState;
 class EffectRuntime;
 class PostProcessStack;
-
+namespace net {
+    struct NetworkStatsSnapshot;
+}
 class AppImGuiLayer {
 public:
     bool Initialize(HWND hwnd, ID3D12Device* device, int bufferCount,
@@ -33,6 +35,7 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE postColorPreview,
         D3D12_GPU_DESCRIPTOR_HANDLE depthPreview,
         D3D12_GPU_DESCRIPTOR_HANDLE emissivePreview,
+        const net::NetworkStatsSnapshot* networkStats,
         const std::function<void()>& onAddParticle);
     void EndFrame();
 

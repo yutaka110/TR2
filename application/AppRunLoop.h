@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include <d3d12.h>
@@ -28,6 +29,7 @@
 #include "vfx/DistortionRenderer.h"
 #include "vfx/ParticleRenderer.h"
 #include "vfx/TrailRenderer.h"
+#include "../network/NetworkStats.h"
 
 class AppFrameRenderer;
 class AppImGuiLayer;
@@ -72,6 +74,7 @@ public:
     void UpdateFrame();
     void RenderFrame();
     void Shutdown();
+    void SetNetworkStatsProvider(std::function<net::NetworkStatsSnapshot()> provider);
 
 private:
     void BeginFrameSystems();
@@ -124,4 +127,6 @@ private:
     uint32_t lastTransientBufferStorageCount_ = 0;
     D3D12_RESOURCE_STATES sceneDepthState_ = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     float beamTime_ = 0.0f;
+
+    std::function<net::NetworkStatsSnapshot()> networkStatsProvider_;
 };

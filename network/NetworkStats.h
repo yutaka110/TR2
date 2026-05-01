@@ -1,0 +1,177 @@
+#pragma once
+
+#include <cstdint>
+#include <mutex>
+
+namespace net {
+
+	struct NetworkStatsSnapshot {
+		// ============================================================
+		// Packet / Byte
+		// ============================================================
+		uint64_t receivedPackets = 0;
+		uint64_t receivedBytes = 0;
+
+		// RNVP sequence欠番から推定した欠損パケット数
+		uint64_t missingPackets = 0;
+
+		uint64_t duplicatePackets = 0;
+		uint64_t reorderedPackets = 0;
+
+		// ============================================================
+		// Frame
+		// ============================================================
+		uint64_t completedFrames = 0;
+		uint64_t droppedFrames = 0;
+		uint64_t decodedFrames = 0;
+		uint64_t displayedFrames = 0;
+
+		double receiveFps = 0.0;
+		double decodeFps = 0.0;
+		double displayFps = 0.0;
+
+		// ============================================================
+		// Latency
+		// ============================================================
+		double currentLatencyMs = 0.0;
+		double averageLatencyMs = 0.0;
+		double maxLatencyMs = 0.0;
+
+		// ============================================================
+		// RTT
+		// ============================================================
+		double currentRttMs = 0.0;
+		double averageRttMs = 0.0;
+		double maxRttMs = 0.0;
+		uint64_t rttSamples = 0;
+
+		// ============================================================
+        // Sender ACK
+        // ------------------------------------------------------------
+        // 送信側が受け取ったACK情報。
+        // NetworkManager側のACK受信結果をUIに渡すために使う。
+        // ============================================================
+		uint64_t ackCount = 0;
+		uint32_t lastAckFrameId = 0;
+		uint32_t lastAckReceivedChunks = 0;
+		uint32_t lastAckMissingChunks = 0;
+		double lastAckMissingRate = 0.0;
+
+		// ============================================================
+		// Jitter
+		// ------------------------------------------------------------
+		// 連続するフレーム到着間隔の揺れ。
+		// RFC3550風の厳密計算ではなく、作品用に分かりやすい
+		// 平均絶対変動として扱う。
+		// ============================================================
+		double currentJitterMs = 0.0;
+		double averageJitterMs = 0.0;
+		double maxJitterMs = 0.0;
+
+		// ============================================================
+		// Bandwidth
+		// ============================================================
+		double bitrateMbps = 0.0;     // 受信ペイロード/フレームベースの推定bitrate
+		double throughputMbps = 0.0;  // 実際に受信したUDP packet byteベース
+
+		// ============================================================
+		// Loss
+		// ============================================================
+		double packetLossRate = 0.0;
+		double frameDropRate = 0.0;
+
+		// ============================================================
+		// Debug / Time
+		// ============================================================
+		uint32_t latestFrameId = 0;
+		uint64_t lastUpdateTimeUs = 0;
+	};
+
+	class NetworkStats {
+	public:
+		NetworkStats();
+
+		void Reset();
+
+		// UDP packetを1つ受け取ったときに呼ぶ
+		void OnPacketReceived(uint32_t packetBytes);
+
+		// フレーム再構成が完了したときに呼ぶ
+		void OnFrameCompleted(
+			uint32_t frameId,
+			uint64_t frameBytes,
+			uint64_t sendTimeUs,
+			uint64_t receiveTimeUs
+		);
+
+		// Ping/PongでRTTが取れたときに呼ぶ
+		void OnRttSample(double rttMs);
+
+		// 欠損や破棄を観測したときに呼ぶ
+		void OnDroppedFrame();
+
+		// 重複packetを観測したときに呼ぶ
+		void OnDuplicatePacket();
+
+		// sequenceの逆転など、順序入れ替えを観測したときに呼ぶ
+		void OnReorderedPacket();
+
+		// デコード成功時に呼ぶ。MJPEG/H.264対応時に使う
+		void OnDecodeFrame();
+
+		// 画面表示成功時に呼ぶ。DX12表示側で使う
+		void OnDisplayFrame();
+
+		// RNVP sequence の欠番を検出したときに呼ぶ
+		void OnMissingPackets(uint64_t missingCount);
+
+		NetworkStatsSnapshot GetSnapshot() const;
+
+	private:
+		uint64_t NowMicroseconds() const;
+
+		void UpdateReceiveFps(uint64_t nowUs);
+		void UpdateDecodeFps(uint64_t nowUs);
+		void UpdateDisplayFps(uint64_t nowUs);
+
+		void UpdateThroughput(uint64_t nowUs);
+		void UpdateBitrate(uint64_t nowUs);
+
+	private:
+		mutable std::mutex mutex_;
+		NetworkStatsSnapshot snapshot_;
+
+		// ============================================================
+		// Internal counters
+		// ============================================================
+		uint64_t startTimeUs_ = 0;
+
+		uint64_t lastFpsUpdateTimeUs_ = 0;
+		uint64_t lastDecodeFpsUpdateTimeUs_ = 0;
+		uint64_t lastDisplayFpsUpdateTimeUs_ = 0;
+
+		uint64_t framesAtLastFpsUpdate_ = 0;
+		uint64_t decodedFramesAtLastFpsUpdate_ = 0;
+		uint64_t displayedFramesAtLastFpsUpdate_ = 0;
+
+		uint64_t bytesAtLastThroughputUpdate_ = 0;
+		uint64_t frameBytesAtLastBitrateUpdate_ = 0;
+
+		uint64_t totalFrameBytes_ = 0;
+
+		// latency average
+		double latencySumMs_ = 0.0;
+
+		// jitter
+		bool hasPreviousFrameArrival_ = false;
+		uint64_t previousFrameReceiveTimeUs_ = 0;
+		double jitterSumMs_ = 0.0;
+		uint64_t jitterSamples_ = 0;
+
+		// rtt
+		double rttSumMs_ = 0.0;
+
+
+	};
+
+} // namespace net

@@ -3,7 +3,7 @@
 #include "AppRuntimeState.h"
 #include "EffectRuntime.h"
 #include "PostProcessStack.h"
-
+#include "../network/NetworkStats.h"
 #include "../../externals/imgui/imgui.h"
 #include "../../externals/imgui/imgui_impl_dx12.h"
 #include "../../externals/imgui/imgui_impl_win32.h"
@@ -13,6 +13,91 @@
 #include <vector>
 
 namespace {
+
+    void DrawNetworkMonitorWindow(const net::NetworkStatsSnapshot& stats) {
+        ImGui::Begin("Network Monitor");
+
+        if (ImGui::CollapsingHeader("Packet", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Received Packets: %llu",
+                static_cast<unsigned long long>(stats.receivedPackets));
+
+            ImGui::Text("Missing Packets: %llu",
+                static_cast<unsigned long long>(stats.missingPackets));
+
+            ImGui::Text("Duplicate Packets: %llu",
+                static_cast<unsigned long long>(stats.duplicatePackets));
+
+            ImGui::Text("Reordered Packets: %llu",
+                static_cast<unsigned long long>(stats.reorderedPackets));
+
+            ImGui::Text("Received Bytes: %llu",
+                static_cast<unsigned long long>(stats.receivedBytes));
+
+            ImGui::Text("Packet Loss Rate: %.2f %%", stats.packetLossRate * 100.0);
+        }
+
+        if (ImGui::CollapsingHeader("Frame", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Latest Frame ID: %u", stats.latestFrameId);
+
+            ImGui::Text("Completed Frames: %llu",
+                static_cast<unsigned long long>(stats.completedFrames));
+
+            ImGui::Text("Dropped Frames: %llu",
+                static_cast<unsigned long long>(stats.droppedFrames));
+
+            ImGui::Text("Frame Drop Rate: %.2f %%", stats.frameDropRate * 100.0);
+        }
+
+        if (ImGui::CollapsingHeader("Latency", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Latency Now: %.2f ms", stats.currentLatencyMs);
+            ImGui::Text("Latency Avg: %.2f ms", stats.averageLatencyMs);
+            ImGui::Text("Latency Max: %.2f ms", stats.maxLatencyMs);
+        }
+
+        if (ImGui::CollapsingHeader("RTT", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("RTT Now: %.2f ms", stats.currentRttMs);
+            ImGui::Text("RTT Avg: %.2f ms", stats.averageRttMs);
+            ImGui::Text("RTT Max: %.2f ms", stats.maxRttMs);
+
+            ImGui::Text("RTT Samples: %llu",
+                static_cast<unsigned long long>(stats.rttSamples));
+        }
+
+        if (ImGui::CollapsingHeader("Sender ACK", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("ACK Count: %llu",
+                static_cast<unsigned long long>(stats.ackCount));
+
+            ImGui::Text("Last ACK Frame ID: %u", stats.lastAckFrameId);
+
+            ImGui::Text("ACK Received Chunks: %u", stats.lastAckReceivedChunks);
+
+            ImGui::Text("ACK Missing Chunks: %u", stats.lastAckMissingChunks);
+
+            ImGui::Text("ACK Missing Rate: %.2f %%", stats.lastAckMissingRate * 100.0);
+        }
+
+        if (ImGui::CollapsingHeader("Jitter", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Jitter Now: %.2f ms", stats.currentJitterMs);
+            ImGui::Text("Jitter Avg: %.2f ms", stats.averageJitterMs);
+            ImGui::Text("Jitter Max: %.2f ms", stats.maxJitterMs);
+        }
+
+        if (ImGui::CollapsingHeader("FPS", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Receive FPS: %.2f", stats.receiveFps);
+            ImGui::Text("Decode FPS: %.2f", stats.decodeFps);
+            ImGui::Text("Display FPS: %.2f", stats.displayFps);
+        }
+
+        if (ImGui::CollapsingHeader("Bandwidth", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Bitrate: %.2f Mbps", stats.bitrateMbps);
+            ImGui::Text("Throughput: %.2f Mbps", stats.throughputMbps);
+        }
+
+
+
+        ImGui::End();
+    }
+
 const char* EffectTypeLabel(EffectComponentType type) {
     switch (type) {
     case EffectComponentType::Particle:
@@ -412,6 +497,7 @@ void AppImGuiLayer::BuildUi(
     D3D12_GPU_DESCRIPTOR_HANDLE postColorPreview,
     D3D12_GPU_DESCRIPTOR_HANDLE depthPreview,
     D3D12_GPU_DESCRIPTOR_HANDLE emissivePreview,
+    const net::NetworkStatsSnapshot* networkStats,
     const std::function<void()>& onAddParticle) {
     if (!initialized_) {
         return;
@@ -483,6 +569,10 @@ void AppImGuiLayer::BuildUi(
     ImGui::DragFloat("Point Decay", &runtimeState.pointLightData.decay, 0.05f, 0.1f, 8.0f);
 
     ImGui::End();
+
+    if (networkStats) {
+        DrawNetworkMonitorWindow(*networkStats);
+    }
 
     ImGui::Begin("VFX Engine");
     bool runtimePaused = effectRuntime.IsPaused();
