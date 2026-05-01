@@ -188,9 +188,6 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="application\src\vfx\ParticleRenderer.cpp" />
     <ClCompile Include="application\src\vfx\TrailRenderer.cpp" />
     <ClCompile Include="application\src\vfx\VfxComponentDraw.cpp" />
-    <ClCompile Include="CameraCapture.cpp" />
-    <ClCompile Include="ColorConverter.cpp" />
-    <ClCompile Include="CustomByteStream.cpp" />
     <ClCompile Include="engine\src\assets\ObjLoader.cpp" />
     <ClCompile Include="engine\src\audio\AudioWave.cpp" />
     <ClCompile Include="engine\src\camera\debugCamera.cpp" />
@@ -223,7 +220,6 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="externals\imgui\imgui_impl_win32.cpp" />
     <ClCompile Include="externals\imgui\imgui_tables.cpp" />
     <ClCompile Include="externals\imgui\imgui_widgets.cpp" />
-    <ClCompile Include="H264Encoder.cpp" />
     <ClCompile Include="KeyInput.cpp" />
     <ClCompile Include="lib\Receiver\startTcpReciverRgb32.cpp" />
     <ClCompile Include="main.cpp">
@@ -231,13 +227,20 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
       <WholeProgramOptimization Condition="'$(Configuration)|$(Platform)'=='Development|x64'">true</WholeProgramOptimization>
     </ClCompile>
     <ClCompile Include="Matrix4x4.cpp" />
-    <ClCompile Include="MfH264Receiver.cpp" />
-    <ClCompile Include="MfH264Sender.cpp" />
-    <ClCompile Include="NalUtils.cpp" />
-    <ClCompile Include="NetworkManager.cpp" />
-    <ClCompile Include="TextureHelper.cpp" />
-    <ClCompile Include="TextureUploader.cpp" />
-    <ClCompile Include="UdpByteStream.cpp" />
+    <ClCompile Include="media\CameraCapture.cpp" />
+    <ClCompile Include="media\ColorConverter.cpp" />
+    <ClCompile Include="media\TextureHelper.cpp" />
+    <ClCompile Include="media\TextureUploader.cpp" />
+    <ClCompile Include="network\CustomByteStream.cpp" />
+    <ClCompile Include="network\FrameReassembler.cpp" />
+    <ClCompile Include="network\H264Encoder.cpp" />
+    <ClCompile Include="network\MfH264Receiver.cpp" />
+    <ClCompile Include="network\MfH264Sender.cpp" />
+    <ClCompile Include="network\NalUtils.cpp" />
+    <ClCompile Include="network\NetworkManager.cpp" />
+    <ClCompile Include="network\NetworkStats.cpp" />
+    <ClCompile Include="network\UdpByteStream.cpp" />
+    <ClCompile Include="network\UdpReceiver.cpp" />
     <ClCompile Include="WinApp.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -372,9 +375,6 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="application\include\vfx\VfxRenderInputs.h" />
     <ClInclude Include="application\src\vfx\VfxComponentDraw.h" />
     <ClInclude Include="application\ModelLoaderAssimp.h" />
-    <ClInclude Include="CameraCapture.h" />
-    <ClInclude Include="ColorConverter.h" />
-    <ClInclude Include="CustomByteStream.h" />
     <ClInclude Include="engine\include\assets\ObjLoader.h" />
     <ClInclude Include="engine\include\audio\AudioWave.h" />
     <ClInclude Include="engine\include\audio\WaveAudio.h" />
@@ -414,18 +414,25 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="externals\imgui\imstb_rectpack.h" />
     <ClInclude Include="externals\imgui\imstb_textedit.h" />
     <ClInclude Include="externals\imgui\imstb_truetype.h" />
-    <ClInclude Include="H264Encoder.h" />
     <ClInclude Include="KeyInput.h" />
     <ClInclude Include="lib\Receiver\FrameProto.h" />
     <ClInclude Include="lib\Receiver\startTcpReceiverRgb32.h" />
     <ClInclude Include="Matrix4x4.h" />
-    <ClInclude Include="MfH264Receiver.h" />
-    <ClInclude Include="MfH264Sender.h" />
-    <ClInclude Include="NalUtils.h" />
-    <ClInclude Include="NetworkManager.h" />
-    <ClInclude Include="TextureHelper.h" />
-    <ClInclude Include="TextureUploader.h" />
-    <ClInclude Include="UdpByteStream.h" />
+    <ClInclude Include="media\CameraCapture.h" />
+    <ClInclude Include="media\ColorConverter.h" />
+    <ClInclude Include="media\TextureHelper.h" />
+    <ClInclude Include="media\TextureUploader.h" />
+    <ClInclude Include="network\CustomByteStream.h" />
+    <ClInclude Include="network\FrameReassembler.h" />
+    <ClInclude Include="network\H264Encoder.h" />
+    <ClInclude Include="network\MfH264Receiver.h" />
+    <ClInclude Include="network\MfH264Sender.h" />
+    <ClInclude Include="network\NalUtils.h" />
+    <ClInclude Include="network\NetworkManager.h" />
+    <ClInclude Include="network\NetworkStats.h" />
+    <ClInclude Include="network\PacketProtocol.h" />
+    <ClInclude Include="network\UdpByteStream.h" />
+    <ClInclude Include="network\UdpReceiver.h" />
     <ClInclude Include="Vertex.h" />
     <ClInclude Include="WinApp.h" />
   </ItemGroup>
