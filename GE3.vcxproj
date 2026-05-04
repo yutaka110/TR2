@@ -231,6 +231,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="media\ColorConverter.cpp" />
     <ClCompile Include="media\TextureHelper.cpp" />
     <ClCompile Include="media\TextureUploader.cpp" />
+    <ClCompile Include="network\AdaptiveStreamingController.cpp" />
     <ClCompile Include="network\CustomByteStream.cpp" />
     <ClCompile Include="network\FrameReassembler.cpp" />
     <ClCompile Include="network\H264Encoder.cpp" />
@@ -422,6 +423,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="media\ColorConverter.h" />
     <ClInclude Include="media\TextureHelper.h" />
     <ClInclude Include="media\TextureUploader.h" />
+    <ClInclude Include="network\AdaptiveStreamingController.h" />
     <ClInclude Include="network\CustomByteStream.h" />
     <ClInclude Include="network\FrameReassembler.h" />
     <ClInclude Include="network\H264Encoder.h" />

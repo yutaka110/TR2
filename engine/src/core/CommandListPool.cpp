@@ -97,5 +97,5 @@ void CommandListPool::EndAndExecute(Device& dev)
     dev.GetCommandQueue()->ExecuteCommandLists(1, lists);
 
     // Trace が無いようなので Info に落とす or 削除
-    Logger::Info("[CommandListPool] CommandList executed.\n");
+    //Logger::Info("[CommandListPool] CommandList executed.\n");
 }

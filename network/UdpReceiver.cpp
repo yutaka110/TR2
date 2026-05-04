@@ -203,7 +203,19 @@ namespace net {
                 &ackInfo
             );
 
-            if (ackInfo.valid) {
+            // ============================================================
+            // ACK policy
+            // ------------------------------------------------------------
+            // 以前はData packetを1つ受け取るたびにACKを返していた。
+            // それだとACK数が多すぎて逆方向の通信負荷が増える。
+            //
+            // まずは低遅延映像向けに、
+            // 「LastChunkを受け取ったときだけACKを返す」方式にする。
+            // ============================================================
+            const bool isLastChunk =
+                (header.flags & PacketFlag_LastChunk) != 0;
+
+            if (ackInfo.valid && isLastChunk) {
                 SendRnvpAck(header, ackInfo, fromAddr);
             }
 
