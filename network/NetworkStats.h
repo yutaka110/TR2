@@ -58,6 +58,26 @@ namespace net {
 		double lastAckMissingRate = 0.0;
 
 		// ============================================================
+        // Adaptive Streaming
+        // ------------------------------------------------------------
+        // AdaptiveStreamingController の現在の制御目標。
+        // UI表示用。実際のJPEG品質/FPS反映は次Stepで行う。
+        // ============================================================
+		bool adaptiveEnabled = false;
+
+		int adaptiveTargetJpegQuality = 0;
+		int adaptiveTargetFps = 0;
+		int adaptiveTargetBitrateKbps = 0;
+
+		bool adaptiveQualityChanged = false;
+		bool adaptiveFpsChanged = false;
+		bool adaptiveBitrateChanged = false;
+
+		double adaptiveLastAckMissingRate = 0.0;
+		double adaptiveLastRttMs = 0.0;
+		double adaptiveLastLatencyMs = 0.0;
+
+		// ============================================================
 		// Jitter
 		// ------------------------------------------------------------
 		// 連続するフレーム到着間隔の揺れ。

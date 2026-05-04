@@ -1,5 +1,5 @@
 #include "TextureUploader.h"
-#include "externals/DirectXTex/d3dx12.h"
+//#include "externals/DirectXTex/d3dx12.h"
 using namespace Microsoft::WRL;
 
 

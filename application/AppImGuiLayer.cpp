@@ -76,6 +76,30 @@ namespace {
             ImGui::Text("ACK Missing Rate: %.2f %%", stats.lastAckMissingRate * 100.0);
         }
 
+        if (ImGui::CollapsingHeader("Adaptive Streaming", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Enabled: %s", stats.adaptiveEnabled ? "true" : "false");
+
+            ImGui::Separator();
+
+            ImGui::Text("Target JPEG Quality: %d", stats.adaptiveTargetJpegQuality);
+            ImGui::Text("Target FPS: %d", stats.adaptiveTargetFps);
+            ImGui::Text("Target Bitrate: %d kbps", stats.adaptiveTargetBitrateKbps);
+
+            ImGui::Separator();
+
+            ImGui::Text("Quality Changed: %s", stats.adaptiveQualityChanged ? "true" : "false");
+            ImGui::Text("FPS Changed: %s", stats.adaptiveFpsChanged ? "true" : "false");
+            ImGui::Text("Bitrate Changed: %s", stats.adaptiveBitrateChanged ? "true" : "false");
+
+            ImGui::Separator();
+
+            ImGui::Text("Input ACK Missing Rate: %.2f %%",
+                stats.adaptiveLastAckMissingRate * 100.0);
+
+            ImGui::Text("Input RTT: %.2f ms", stats.adaptiveLastRttMs);
+            ImGui::Text("Input Latency: %.2f ms", stats.adaptiveLastLatencyMs);
+        }
+
         if (ImGui::CollapsingHeader("Jitter", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Jitter Now: %.2f ms", stats.currentJitterMs);
             ImGui::Text("Jitter Avg: %.2f ms", stats.averageJitterMs);

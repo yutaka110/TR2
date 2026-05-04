@@ -7,26 +7,74 @@
 #include <limits>
 #include <vector>
 
+namespace {
+
+    void NetworkDebugLog(const std::string& message) {
+        OutputDebugStringA(message.c_str());
+        OutputDebugStringA("\n");
+
+        std::cout << message << "\n";
+    }
+
+} // namespace
+
 NetworkManager::NetworkManager(const std::string& ip, uint16_t port) {
     WSADATA wsa{};
     int result = WSAStartup(MAKEWORD(2, 2), &wsa);
     if (result != 0) {
-        std::cerr << "[NetworkManager] WSAStartup failed: " << result << "\n";
+        NetworkDebugLog("[NetworkManager] WSAStartup failed: " + std::to_string(result));
         return;
     }
 
     udpSocket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (udpSocket_ == INVALID_SOCKET) {
-        std::cerr << "[NetworkManager] Failed to create socket: " << WSAGetLastError() << "\n";
+        NetworkDebugLog("[NetworkManager] Failed to create socket: " + std::to_string(WSAGetLastError()));
         WSACleanup();
         return;
+    }
+
+    // ============================================================
+    // Important:
+    // ------------------------------------------------------------
+    // NetworkManager は Ping/Data を送るだけでなく、
+    // UdpReceiver から返ってくる Pong/ACK を同じsocketで受け取る。
+    //
+    // そのため、recvfrom() を開始する前に必ずローカル側をbindする。
+    // port 0 は OS に空いている一時ポートを割り当ててもらう指定。
+    // ============================================================
+    sockaddr_in localAddr{};
+    localAddr.sin_family = AF_INET;
+    localAddr.sin_port = htons(0);
+    localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(udpSocket_, reinterpret_cast<sockaddr*>(&localAddr), sizeof(localAddr)) == SOCKET_ERROR) {
+        NetworkDebugLog("[NetworkManager] bind local ephemeral port failed: " + std::to_string(WSAGetLastError()));
+        closesocket(udpSocket_);
+        udpSocket_ = INVALID_SOCKET;
+        WSACleanup();
+        return;
+    }
+
+    sockaddr_in boundAddr{};
+    int boundLen = sizeof(boundAddr);
+    if (getsockname(udpSocket_, reinterpret_cast<sockaddr*>(&boundAddr), &boundLen) == 0) {
+        std::ostringstream oss;
+        oss << "[NetworkManager] Local UDP port bound: "
+            << ntohs(boundAddr.sin_port);
+        NetworkDebugLog(oss.str());
     }
 
     udpAddr_.sin_family = AF_INET;
     udpAddr_.sin_port = htons(port);
 
     if (InetPtonA(AF_INET, ip.c_str(), &udpAddr_.sin_addr) != 1) {
-        std::cerr << "[NetworkManager] Invalid IP address: " << ip << "\n";
+        NetworkDebugLog("[NetworkManager] Invalid IP address: " + ip);
+    }
+    else {
+        std::ostringstream oss;
+        oss << "[NetworkManager] Remote endpoint: "
+            << ip << ":" << port;
+        NetworkDebugLog(oss.str());
     }
 
     // recvfromをStop時に抜けやすくするため、受信タイムアウトを設定
@@ -260,11 +308,14 @@ void NetworkManager::SendRNVPPing(uint32_t streamId) {
         return;
     }
 
-    std::cout << "[NetworkManager] RNVP Ping sent. streamId="
-        << streamId
-        << " sequence="
-        << header.sequence
-        << "\n";
+    {
+        std::ostringstream oss;
+        oss << "[NetworkManager] RNVP Ping sent. streamId="
+            << streamId
+            << " sequence="
+            << header.sequence;
+        NetworkDebugLog(oss.str());
+    }
 }
 
 // ============================================================
@@ -273,15 +324,19 @@ void NetworkManager::SendRNVPPing(uint32_t streamId) {
 
 bool NetworkManager::StartRNVPControlReceiver() {
     if (udpSocket_ == INVALID_SOCKET) {
+        NetworkDebugLog("[NetworkManager] StartRNVPControlReceiver failed: invalid socket");
         return false;
     }
 
     if (controlReceiverRunning_) {
+        NetworkDebugLog("[NetworkManager] RNVP control receiver already running");
         return true;
     }
 
     controlReceiverRunning_ = true;
     controlReceiveThread_ = std::thread(&NetworkManager::RNVPControlReceiveLoop, this);
+
+    NetworkDebugLog("[NetworkManager] RNVP control receiver started");
 
     return true;
 }
@@ -333,6 +388,13 @@ void NetworkManager::RNVPControlReceiveLoop() {
 
         if (received <= 0) {
             continue;
+        }
+
+        {
+            std::ostringstream oss;
+            oss << "[NetworkManager] RNVP control packet received. bytes="
+                << received;
+            NetworkDebugLog(oss.str());
         }
 
         HandleRnvpControlPacket(
@@ -420,8 +482,12 @@ void NetworkManager::HandleRnvpPong(
         }
     }
 
-    std::cout << "[NetworkManager] RNVP Pong received. RTT = "
-        << rttMs << " ms\n";
+    {
+        std::ostringstream oss;
+        oss << "[NetworkManager] RNVP Pong received. RTT = "
+            << rttMs << " ms";
+        NetworkDebugLog(oss.str());
+    }
 }
 
 void NetworkManager::HandleRnvpAck(
