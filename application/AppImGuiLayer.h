@@ -36,6 +36,8 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE depthPreview,
         D3D12_GPU_DESCRIPTOR_HANDLE emissivePreview,
         const net::NetworkStatsSnapshot* networkStats,
+        const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
+        const std::function<void(bool)>& onJitterBufferAutoModeChanged,
         const std::function<void()>& onAddParticle);
     void EndFrame();
 

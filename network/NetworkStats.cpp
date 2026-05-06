@@ -209,6 +209,46 @@ namespace net {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
+    void NetworkStats::OnJitterBufferUpdated(
+        uint32_t bufferedFrames,
+        uint32_t targetDelayMs
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.jitterBufferBufferedFrames = bufferedFrames;
+        snapshot_.jitterBufferTargetDelayMs = targetDelayMs;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnJitterBufferReleased() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.jitterBufferReleasedFrames++;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnJitterBufferDropped(uint32_t droppedFrames) {
+        if (droppedFrames == 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.jitterBufferDroppedFrames += droppedFrames;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnJitterBufferAutoModeUpdated(
+        bool enabled,
+        uint32_t calculatedDelayMs
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.jitterBufferAutoModeEnabled = enabled;
+        snapshot_.jitterBufferAutoCalculatedDelayMs = calculatedDelayMs;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
     void NetworkStats::OnDecodeFrame() {
         std::lock_guard<std::mutex> lock(mutex_);
 

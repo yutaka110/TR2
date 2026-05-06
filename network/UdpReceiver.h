@@ -6,6 +6,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 #include "FrameReassembler.h"
+#include "JitterBuffer.h"
 #include "NetworkStats.h"
 
 #include <atomic>
@@ -32,8 +33,23 @@ namespace net {
         NetworkStatsSnapshot GetStats() const;
         void ResetStats();
 
+        void SetJitterBufferTargetDelayMs(uint32_t delayMs);
+        uint32_t GetJitterBufferTargetDelayMs() const;
+
+        void SetJitterBufferAutoModeEnabled(bool enabled);
+        bool IsJitterBufferAutoModeEnabled() const;
+
     private:
         void ReceiveLoop();
+
+        void PushCompletedFrameToJitterBuffer(
+            CompletedFrame&& frame,
+            uint64_t nowUs
+        );
+
+        void DrainReadyJitterBuffer(uint64_t nowUs);
+
+        void UpdateJitterBufferAutoMode(uint64_t nowUs);
 
         // ============================================================
         // RNVP v1 Control Entry
@@ -95,6 +111,10 @@ namespace net {
 
         NetworkStats stats_;
         FrameReassembler reassembler_;
+        JitterBuffer jitterBuffer_;
+
+        std::atomic<bool> jitterBufferAutoModeEnabled_{ false };
+        std::atomic<uint64_t> lastJitterAutoUpdateUs_{ 0 };
 
         std::mutex frameQueueMutex_;
         std::queue<CompletedFrame> completedFrames_;

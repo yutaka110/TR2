@@ -88,6 +88,14 @@ namespace net {
 		double averageJitterMs = 0.0;
 		double maxJitterMs = 0.0;
 
+		uint32_t jitterBufferTargetDelayMs = 0;
+		uint32_t jitterBufferBufferedFrames = 0;
+		uint64_t jitterBufferReleasedFrames = 0;
+		uint64_t jitterBufferDroppedFrames = 0;
+
+		bool jitterBufferAutoModeEnabled = false;
+		uint32_t jitterBufferAutoCalculatedDelayMs = 0;
+
 		// ============================================================
 		// Bandwidth
 		// ============================================================
@@ -144,6 +152,21 @@ namespace net {
 
 		// RNVP sequence の欠番を検出したときに呼ぶ
 		void OnMissingPackets(uint64_t missingCount);
+
+		// JitterBufferの状態更新
+		void OnJitterBufferUpdated(
+			uint32_t bufferedFrames,
+			uint32_t targetDelayMs
+		);
+
+		void OnJitterBufferReleased();
+
+		void OnJitterBufferDropped(uint32_t droppedFrames);
+
+		void OnJitterBufferAutoModeUpdated(
+			bool enabled,
+			uint32_t calculatedDelayMs
+		);
 
 		NetworkStatsSnapshot GetSnapshot() const;
 

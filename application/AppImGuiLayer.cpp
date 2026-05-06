@@ -14,7 +14,9 @@
 
 namespace {
 
-    void DrawNetworkMonitorWindow(const net::NetworkStatsSnapshot& stats) {
+    void DrawNetworkMonitorWindow(const net::NetworkStatsSnapshot& stats,
+        const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
+        const std::function<void(bool)>& onJitterBufferAutoModeChanged) {
         ImGui::Begin("Network Monitor");
 
         if (ImGui::CollapsingHeader("Packet", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -104,6 +106,76 @@ namespace {
             ImGui::Text("Jitter Now: %.2f ms", stats.currentJitterMs);
             ImGui::Text("Jitter Avg: %.2f ms", stats.averageJitterMs);
             ImGui::Text("Jitter Max: %.2f ms", stats.maxJitterMs);
+        }
+
+        if (ImGui::CollapsingHeader("Jitter Buffer", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool autoMode = stats.jitterBufferAutoModeEnabled;
+
+            if (ImGui::Checkbox("Auto Mode", &autoMode)) {
+                if (onJitterBufferAutoModeChanged) {
+                    onJitterBufferAutoModeChanged(autoMode);
+                }
+            }
+
+            ImGui::Separator();
+
+            int targetDelayMs =
+                static_cast<int>(stats.jitterBufferTargetDelayMs);
+
+            if (stats.jitterBufferAutoModeEnabled) {
+                ImGui::Text("Target Delay: %u ms", stats.jitterBufferTargetDelayMs);
+                ImGui::Text("Auto Calculated Delay: %u ms",
+                    stats.jitterBufferAutoCalculatedDelayMs);
+            }
+            else {
+                if (ImGui::SliderInt(
+                    "Target Delay (ms)",
+                    &targetDelayMs,
+                    0,
+                    120
+                )) {
+                    if (onJitterBufferTargetDelayChanged) {
+                        onJitterBufferTargetDelayChanged(
+                            static_cast<uint32_t>(targetDelayMs)
+                        );
+                    }
+                }
+
+                ImGui::Text("Current Target Delay: %u ms", stats.jitterBufferTargetDelayMs);
+            }
+
+            ImGui::Text("Buffered Frames: %u", stats.jitterBufferBufferedFrames);
+
+            ImGui::Text("Released Frames: %llu",
+                static_cast<unsigned long long>(stats.jitterBufferReleasedFrames));
+
+            ImGui::Text("Dropped Frames: %llu",
+                static_cast<unsigned long long>(stats.jitterBufferDroppedFrames));
+
+            ImGui::Separator();
+
+            if (stats.jitterBufferAutoModeEnabled) {
+                ImGui::Text("Mode: Auto adaptive jitter control");
+            }
+            else if (stats.jitterBufferTargetDelayMs <= 10) {
+                ImGui::Text("Mode: Ultra low latency / weak jitter tolerance");
+            }
+            else if (stats.jitterBufferTargetDelayMs <= 40) {
+                ImGui::Text("Mode: Balanced realtime");
+            }
+            else {
+                ImGui::Text("Mode: Stability priority / higher latency");
+            }
+
+            if (stats.jitterBufferBufferedFrames == 0) {
+                ImGui::Text("State: Low buffer / realtime");
+            }
+            else if (stats.jitterBufferBufferedFrames <= 2) {
+                ImGui::Text("State: Stable");
+            }
+            else {
+                ImGui::Text("State: Absorbing jitter");
+            }
         }
 
         if (ImGui::CollapsingHeader("FPS", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -522,6 +594,8 @@ void AppImGuiLayer::BuildUi(
     D3D12_GPU_DESCRIPTOR_HANDLE depthPreview,
     D3D12_GPU_DESCRIPTOR_HANDLE emissivePreview,
     const net::NetworkStatsSnapshot* networkStats,
+    const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
+    const std::function<void(bool)>& onJitterBufferAutoModeChanged,
     const std::function<void()>& onAddParticle) {
     if (!initialized_) {
         return;
@@ -595,7 +669,11 @@ void AppImGuiLayer::BuildUi(
     ImGui::End();
 
     if (networkStats) {
-        DrawNetworkMonitorWindow(*networkStats);
+        DrawNetworkMonitorWindow(
+            *networkStats,
+            onJitterBufferTargetDelayChanged,
+            onJitterBufferAutoModeChanged
+        );
     }
 
     ImGui::Begin("VFX Engine");
