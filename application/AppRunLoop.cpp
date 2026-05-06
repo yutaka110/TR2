@@ -252,6 +252,14 @@ void AppRunLoop::SetNetworkStatsProvider(std::function<net::NetworkStatsSnapshot
     networkStatsProvider_ = std::move(provider);
 }
 
+void AppRunLoop::SetJitterBufferTargetDelaySetter(std::function<void(uint32_t)> setter) {
+    jitterBufferTargetDelaySetter_ = std::move(setter);
+}
+
+void AppRunLoop::SetJitterBufferAutoModeSetter(std::function<void(bool)> setter) {
+    jitterBufferAutoModeSetter_ = std::move(setter);
+}
+
 void AppRunLoop::UpdateFrame() {
     appPipelines_.HotReloadIfNeeded(dev_.GetDevice());
     runtimeState_.viewport.Width = static_cast<float>(windowWidth_);
@@ -398,6 +406,8 @@ void AppRunLoop::RenderFrame() {
         vfxRenderTargets_.GetSrvHandle("DebugDepthPreview"),
         vfxRenderTargets_.GetSrvHandle("DebugEmissivePreview"),
         networkStatsPtr,
+        jitterBufferTargetDelaySetter_,
+        jitterBufferAutoModeSetter_,
         [&]() {
         Emitter emitterState{};
         emitterState.transform = runtimeState_.emitter.transform;

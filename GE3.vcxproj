@@ -235,6 +235,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="network\CustomByteStream.cpp" />
     <ClCompile Include="network\FrameReassembler.cpp" />
     <ClCompile Include="network\H264Encoder.cpp" />
+    <ClCompile Include="network\JitterBuffer.cpp" />
     <ClCompile Include="network\MfH264Receiver.cpp" />
     <ClCompile Include="network\MfH264Sender.cpp" />
     <ClCompile Include="network\NalUtils.cpp" />
@@ -427,6 +428,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="network\CustomByteStream.h" />
     <ClInclude Include="network\FrameReassembler.h" />
     <ClInclude Include="network\H264Encoder.h" />
+    <ClInclude Include="network\JitterBuffer.h" />
     <ClInclude Include="network\MfH264Receiver.h" />
     <ClInclude Include="network\MfH264Sender.h" />
     <ClInclude Include="network\NalUtils.h" />

@@ -1,13 +1,16 @@
 #include "UdpReceiver.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <vector>
 
 namespace net {
 
     UdpReceiver::UdpReceiver()
-        : reassembler_(&stats_) {
+        : reassembler_(&stats_)
+        , jitterBuffer_(30, 8) {
     }
 
     UdpReceiver::~UdpReceiver() {
@@ -77,6 +80,8 @@ namespace net {
     }
 
     bool UdpReceiver::TryPopFrame(CompletedFrame& outFrame) {
+        DrainReadyJitterBuffer(NowMicroseconds());
+
         std::lock_guard<std::mutex> lock(frameQueueMutex_);
 
         if (completedFrames_.empty()) {
@@ -96,11 +101,193 @@ namespace net {
     void UdpReceiver::ResetStats() {
         stats_.Reset();
         reassembler_.Clear();
+        jitterBuffer_.Clear();
 
         std::lock_guard<std::mutex> lock(frameQueueMutex_);
         while (!completedFrames_.empty()) {
             completedFrames_.pop();
         }
+    }
+
+    void UdpReceiver::SetJitterBufferTargetDelayMs(uint32_t delayMs) {
+        jitterBuffer_.SetTargetDelayMs(delayMs);
+
+        stats_.OnJitterBufferUpdated(
+            jitterBuffer_.GetBufferedFrameCount(),
+            jitterBuffer_.GetTargetDelayMs()
+        );
+    }
+
+    uint32_t UdpReceiver::GetJitterBufferTargetDelayMs() const {
+        return jitterBuffer_.GetTargetDelayMs();
+    }
+
+    void UdpReceiver::SetJitterBufferAutoModeEnabled(bool enabled) {
+        jitterBufferAutoModeEnabled_.store(enabled);
+
+        if (!enabled) {
+            stats_.OnJitterBufferAutoModeUpdated(
+                false,
+                jitterBuffer_.GetTargetDelayMs()
+            );
+            return;
+        }
+
+        lastJitterAutoUpdateUs_.store(0);
+
+        stats_.OnJitterBufferAutoModeUpdated(
+            true,
+            jitterBuffer_.GetTargetDelayMs()
+        );
+    }
+
+    bool UdpReceiver::IsJitterBufferAutoModeEnabled() const {
+        return jitterBufferAutoModeEnabled_.load();
+    }
+
+    void UdpReceiver::PushCompletedFrameToJitterBuffer(
+        CompletedFrame&& frame,
+        uint64_t nowUs
+    ) {
+        UpdateJitterBufferAutoMode(nowUs);
+
+        JitterBufferResult result =
+            jitterBuffer_.PushFrame(std::move(frame));
+
+        if (result.droppedFrames > 0) {
+            stats_.OnJitterBufferDropped(result.droppedFrames);
+
+            for (uint32_t i = 0; i < result.droppedFrames; ++i) {
+                stats_.OnDroppedFrame();
+            }
+        }
+
+        stats_.OnJitterBufferUpdated(
+            result.bufferedFrames,
+            result.targetDelayMs
+        );
+
+        DrainReadyJitterBuffer(nowUs);
+    }
+
+    void UdpReceiver::DrainReadyJitterBuffer(uint64_t nowUs) {
+        CompletedFrame readyFrame;
+
+        while (jitterBuffer_.TryPopReadyFrame(nowUs, readyFrame)) {
+            stats_.OnJitterBufferReleased();
+
+            uint32_t droppedByOutputQueue = 0;
+
+            {
+                std::lock_guard<std::mutex> lock(frameQueueMutex_);
+
+                while (completedFrames_.size() >= kMaxQueuedFrames) {
+                    completedFrames_.pop();
+                    droppedByOutputQueue++;
+                }
+
+                completedFrames_.push(std::move(readyFrame));
+            }
+
+            if (droppedByOutputQueue > 0) {
+                for (uint32_t i = 0; i < droppedByOutputQueue; ++i) {
+                    stats_.OnDroppedFrame();
+                }
+            }
+
+            stats_.OnJitterBufferUpdated(
+                jitterBuffer_.GetBufferedFrameCount(),
+                jitterBuffer_.GetTargetDelayMs()
+            );
+
+            readyFrame = CompletedFrame{};
+        }
+    }
+
+    void UdpReceiver::UpdateJitterBufferAutoMode(uint64_t nowUs) {
+        if (!jitterBufferAutoModeEnabled_.load()) {
+            return;
+        }
+
+        constexpr uint64_t kAutoUpdateIntervalUs = 500000; // 0.5秒ごと
+        constexpr uint32_t kMinAutoDelayMs = 5;
+        constexpr uint32_t kMaxAutoDelayMs = 80;
+        constexpr uint32_t kMaxStepUpMs = 5;
+        constexpr uint32_t kMaxStepDownMs = 3;
+
+        const uint64_t lastUpdateUs = lastJitterAutoUpdateUs_.load();
+
+        if (lastUpdateUs != 0 &&
+            nowUs > lastUpdateUs &&
+            nowUs - lastUpdateUs < kAutoUpdateIntervalUs) {
+            return;
+        }
+
+        lastJitterAutoUpdateUs_.store(nowUs);
+
+        const NetworkStatsSnapshot snapshot = stats_.GetSnapshot();
+
+        const double currentJitterMs = snapshot.currentJitterMs;
+        const double averageJitterMs = snapshot.averageJitterMs;
+        const double maxJitterMs = snapshot.maxJitterMs;
+
+        // ============================================================
+        // Auto Delay Calculation
+        // ------------------------------------------------------------
+        // averageJitterを基準にしつつ、
+        // currentJitterが跳ねた場合とmaxJitterが大きい場合は余裕を持たせる。
+        //
+        // 狙い:
+        // - 平常時は低遅延
+        // - 揺れたときだけ少しバッファを増やす
+        // - 急激な変化で表示リズムを壊さない
+        // ============================================================
+        double calculatedDelayMs = 5.0;
+
+        calculatedDelayMs += averageJitterMs * 3.0;
+
+        if (currentJitterMs > averageJitterMs * 2.0) {
+            calculatedDelayMs += 5.0;
+        }
+
+        if (maxJitterMs >= 25.0) {
+            calculatedDelayMs = (std::max)(
+                calculatedDelayMs,
+                averageJitterMs * 2.0 + 15.0
+                );
+        }
+
+        uint32_t targetDelayMs = static_cast<uint32_t>(
+            std::ceil(calculatedDelayMs)
+            );
+
+        targetDelayMs = (std::max)(targetDelayMs, kMinAutoDelayMs);
+        targetDelayMs = (std::min)(targetDelayMs, kMaxAutoDelayMs);
+
+        const uint32_t currentDelayMs = jitterBuffer_.GetTargetDelayMs();
+
+        uint32_t smoothedDelayMs = currentDelayMs;
+
+        if (targetDelayMs > currentDelayMs) {
+            const uint32_t diff = targetDelayMs - currentDelayMs;
+            smoothedDelayMs = currentDelayMs + (std::min)(diff, kMaxStepUpMs);
+        }
+        else if (targetDelayMs < currentDelayMs) {
+            const uint32_t diff = currentDelayMs - targetDelayMs;
+            smoothedDelayMs = currentDelayMs - (std::min)(diff, kMaxStepDownMs);
+        }
+
+        jitterBuffer_.SetTargetDelayMs(smoothedDelayMs);
+
+        stats_.OnJitterBufferUpdated(
+            jitterBuffer_.GetBufferedFrameCount(),
+            jitterBuffer_.GetTargetDelayMs()
+        );
+
+        stats_.OnJitterBufferAutoModeUpdated(
+            true,
+            smoothedDelayMs
+        );
     }
 
     void UdpReceiver::ReceiveLoop() {
@@ -160,13 +347,10 @@ namespace net {
                 );
 
                 if (completed) {
-                    std::lock_guard<std::mutex> lock(frameQueueMutex_);
-
-                    while (completedFrames_.size() >= kMaxQueuedFrames) {
-                        completedFrames_.pop();
-                    }
-
-                    completedFrames_.push(std::move(*completed));
+                    PushCompletedFrameToJitterBuffer(
+                        std::move(*completed),
+                        receiveTimeUs
+                    );
                 }
 
                 continue;
@@ -220,13 +404,10 @@ namespace net {
             }
 
             if (completed) {
-                std::lock_guard<std::mutex> lock(frameQueueMutex_);
-
-                while (completedFrames_.size() >= kMaxQueuedFrames) {
-                    completedFrames_.pop();
-                }
-
-                completedFrames_.push(std::move(*completed));
+                PushCompletedFrameToJitterBuffer(
+                    std::move(*completed),
+                    receiveTimeUs
+                );
             }
 
             break;

@@ -75,7 +75,8 @@ public:
     void RenderFrame();
     void Shutdown();
     void SetNetworkStatsProvider(std::function<net::NetworkStatsSnapshot()> provider);
-
+    void SetJitterBufferTargetDelaySetter(std::function<void(uint32_t)> setter);
+    void SetJitterBufferAutoModeSetter(std::function<void(bool)> setter);
 private:
     void BeginFrameSystems();
     void SignalAndWaitGpu();
@@ -129,4 +130,6 @@ private:
     float beamTime_ = 0.0f;
 
     std::function<net::NetworkStatsSnapshot()> networkStatsProvider_;
+    std::function<void(uint32_t)> jitterBufferTargetDelaySetter_;
+    std::function<void(bool)> jitterBufferAutoModeSetter_;
 };
