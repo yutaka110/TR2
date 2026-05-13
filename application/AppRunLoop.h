@@ -30,6 +30,7 @@
 #include "vfx/ParticleRenderer.h"
 #include "vfx/TrailRenderer.h"
 #include "../network/NetworkStats.h"
+#include "../network/FrameReassembler.h"
 
 class AppFrameRenderer;
 class AppImGuiLayer;
@@ -77,9 +78,21 @@ public:
     void SetNetworkStatsProvider(std::function<net::NetworkStatsSnapshot()> provider);
     void SetJitterBufferTargetDelaySetter(std::function<void(uint32_t)> setter);
     void SetJitterBufferAutoModeSetter(std::function<void(bool)> setter);
+
+    void SetReceivedFrameProvider(std::function<bool(net::CompletedFrame&)> provider);
+    void SetNetworkFrameDecodeNotifier(std::function<void()> notifier);
+    void SetNetworkFrameDisplayNotifier(std::function<void()> notifier);
+
+    void SetReceivedVideoTexture(
+        Microsoft::WRL::ComPtr<ID3D12Resource> texture,
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer,
+        D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle,
+        uint32_t width,
+        uint32_t height);
 private:
     void BeginFrameSystems();
     void SignalAndWaitGpu();
+    void UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList);
 
     DebugCamera& debugCamera_;
     AppRuntimeState& runtimeState_;
@@ -132,4 +145,14 @@ private:
     std::function<net::NetworkStatsSnapshot()> networkStatsProvider_;
     std::function<void(uint32_t)> jitterBufferTargetDelaySetter_;
     std::function<void(bool)> jitterBufferAutoModeSetter_;
+
+    std::function<bool(net::CompletedFrame&)> receivedFrameProvider_;
+    std::function<void()> networkFrameDecodeNotifier_;
+    std::function<void()> networkFrameDisplayNotifier_;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> receivedVideoTexture_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> receivedVideoUploadBuffer_;
+    D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoSrvGpuHandle_{};
+    uint32_t receivedVideoWidth_ = 0;
+    uint32_t receivedVideoHeight_ = 0;
 };

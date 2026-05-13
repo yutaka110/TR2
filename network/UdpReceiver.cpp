@@ -145,6 +145,14 @@ namespace net {
         return jitterBufferAutoModeEnabled_.load();
     }
 
+    void UdpReceiver::NotifyDecodeFrame() {
+        stats_.OnDecodeFrame();
+    }
+
+    void UdpReceiver::NotifyDisplayFrame() {
+        stats_.OnDisplayFrame();
+    }
+
     void UdpReceiver::PushCompletedFrameToJitterBuffer(
         CompletedFrame&& frame,
         uint64_t nowUs
