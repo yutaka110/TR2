@@ -40,6 +40,7 @@ struct AppFrameGraphBuildContext {
     D3D12_GPU_DESCRIPTOR_HANDLE spriteTextureHandle{};
     D3D12_GPU_DESCRIPTOR_HANDLE vfxTextureHandle{};
     D3D12_GPU_DESCRIPTOR_HANDLE depthTextureHandle{};
+    D3D12_GPU_DESCRIPTOR_HANDLE receivedTextureHandle{};
     const EffectRuntimeFrame* effectRuntime = nullptr;
     ParticleRenderFallback primaryParticleFx{};
     float beamTime = 0.0f;

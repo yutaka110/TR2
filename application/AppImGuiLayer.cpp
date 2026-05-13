@@ -593,6 +593,7 @@ void AppImGuiLayer::BuildUi(
     D3D12_GPU_DESCRIPTOR_HANDLE postColorPreview,
     D3D12_GPU_DESCRIPTOR_HANDLE depthPreview,
     D3D12_GPU_DESCRIPTOR_HANDLE emissivePreview,
+    D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoPreview,
     const net::NetworkStatsSnapshot* networkStats,
     const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
     const std::function<void(bool)>& onJitterBufferAutoModeChanged,
@@ -674,6 +675,10 @@ void AppImGuiLayer::BuildUi(
             onJitterBufferTargetDelayChanged,
             onJitterBufferAutoModeChanged
         );
+
+        ImGui::Begin("Received Video Preview");
+        DrawPreviewImage("RNVP Received Texture", receivedVideoPreview);
+        ImGui::End();
     }
 
     ImGui::Begin("VFX Engine");

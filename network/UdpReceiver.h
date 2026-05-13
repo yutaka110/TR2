@@ -39,6 +39,8 @@ namespace net {
         void SetJitterBufferAutoModeEnabled(bool enabled);
         bool IsJitterBufferAutoModeEnabled() const;
 
+        void NotifyDecodeFrame();
+        void NotifyDisplayFrame();
     private:
         void ReceiveLoop();
 

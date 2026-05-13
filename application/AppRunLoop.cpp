@@ -18,6 +18,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <cstring>
 
 using namespace DirectX;
 using namespace Microsoft::WRL;
@@ -260,6 +261,32 @@ void AppRunLoop::SetJitterBufferAutoModeSetter(std::function<void(bool)> setter)
     jitterBufferAutoModeSetter_ = std::move(setter);
 }
 
+void AppRunLoop::SetReceivedFrameProvider(
+    std::function<bool(net::CompletedFrame&)> provider) {
+    receivedFrameProvider_ = std::move(provider);
+}
+
+void AppRunLoop::SetNetworkFrameDecodeNotifier(std::function<void()> notifier) {
+    networkFrameDecodeNotifier_ = std::move(notifier);
+}
+
+void AppRunLoop::SetNetworkFrameDisplayNotifier(std::function<void()> notifier) {
+    networkFrameDisplayNotifier_ = std::move(notifier);
+}
+
+void AppRunLoop::SetReceivedVideoTexture(
+    Microsoft::WRL::ComPtr<ID3D12Resource> texture,
+    Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer,
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle,
+    uint32_t width,
+    uint32_t height) {
+    receivedVideoTexture_ = std::move(texture);
+    receivedVideoUploadBuffer_ = std::move(uploadBuffer);
+    receivedVideoSrvGpuHandle_ = srvGpuHandle;
+    receivedVideoWidth_ = width;
+    receivedVideoHeight_ = height;
+}
+
 void AppRunLoop::UpdateFrame() {
     appPipelines_.HotReloadIfNeeded(dev_.GetDevice());
     runtimeState_.viewport.Width = static_cast<float>(windowWidth_);
@@ -354,6 +381,135 @@ void AppRunLoop::SignalAndWaitGpu() {
     }
 }
 
+void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList) {
+    if (commandList == nullptr ||
+        !receivedFrameProvider_ ||
+        !receivedVideoTexture_ ||
+        !receivedVideoUploadBuffer_ ||
+        receivedVideoWidth_ == 0 ||
+        receivedVideoHeight_ == 0) {
+        return;
+    }
+
+    net::CompletedFrame frame{};
+    if (!receivedFrameProvider_(frame)) {
+        return;
+    }
+
+    if (frame.codecType != net::CodecType::Raw) {
+        return;
+    }
+
+    const size_t requiredSize =
+        static_cast<size_t>(receivedVideoWidth_) *
+        static_cast<size_t>(receivedVideoHeight_) *
+        4u;
+
+    if (frame.data.size() < requiredSize) {
+        static uint32_t shortFrameLogCount = 0;
+        if (shortFrameLogCount < 10) {
+            OutputDebugStringA("[ReceivedVideo] Raw frame is too small. Skip upload.\n");
+            shortFrameLogCount++;
+        }
+        return;
+    }
+
+    if (networkFrameDecodeNotifier_) {
+        networkFrameDecodeNotifier_();
+    }
+
+    const D3D12_RESOURCE_DESC textureDesc =
+        receivedVideoTexture_->GetDesc();
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT numRows = 0;
+    UINT64 rowSizeInBytes = 0;
+    UINT64 totalBytes = 0;
+
+    dev_.GetDevice()->GetCopyableFootprints(
+        &textureDesc,
+        0,
+        1,
+        0,
+        &footprint,
+        &numRows,
+        &rowSizeInBytes,
+        &totalBytes
+    );
+
+    uint8_t* mapped = nullptr;
+    const HRESULT mapHr = receivedVideoUploadBuffer_->Map(
+        0,
+        nullptr,
+        reinterpret_cast<void**>(&mapped)
+    );
+
+    if (FAILED(mapHr) || mapped == nullptr) {
+        OutputDebugStringA("[ReceivedVideo] UploadBuffer Map failed.\n");
+        return;
+    }
+
+    const uint8_t* src = frame.data.data();
+    uint8_t* dst = mapped + footprint.Offset;
+
+    const size_t srcRowPitch =
+        static_cast<size_t>(receivedVideoWidth_) * 4u;
+
+    const size_t dstRowPitch =
+        static_cast<size_t>(footprint.Footprint.RowPitch);
+
+    for (uint32_t y = 0; y < receivedVideoHeight_; ++y) {
+        std::memcpy(
+            dst + static_cast<size_t>(y) * dstRowPitch,
+            src + static_cast<size_t>(y) * srcRowPitch,
+            srcRowPitch
+        );
+    }
+
+    receivedVideoUploadBuffer_->Unmap(0, nullptr);
+
+    D3D12_RESOURCE_BARRIER toCopy{};
+    toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toCopy.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    toCopy.Transition.pResource = receivedVideoTexture_.Get();
+    toCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    toCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    commandList->ResourceBarrier(1, &toCopy);
+
+    D3D12_TEXTURE_COPY_LOCATION dstLocation{};
+    dstLocation.pResource = receivedVideoTexture_.Get();
+    dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dstLocation.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION srcLocation{};
+    srcLocation.pResource = receivedVideoUploadBuffer_.Get();
+    srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    srcLocation.PlacedFootprint = footprint;
+
+    commandList->CopyTextureRegion(
+        &dstLocation,
+        0,
+        0,
+        0,
+        &srcLocation,
+        nullptr
+    );
+
+    D3D12_RESOURCE_BARRIER toSrv{};
+    toSrv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toSrv.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    toSrv.Transition.pResource = receivedVideoTexture_.Get();
+    toSrv.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    toSrv.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    commandList->ResourceBarrier(1, &toSrv);
+
+    if (networkFrameDisplayNotifier_) {
+        networkFrameDisplayNotifier_();
+    }
+}
+
 void AppRunLoop::RenderFrame() {
     BeginFrameSystems();
 
@@ -371,6 +527,8 @@ void AppRunLoop::RenderFrame() {
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = swapChain_.RTV(backBufferIndex);
 
     UpdateFrame();
+
+    UploadReceivedVideoFrame(commandList.Get());
 
     scene_.UpdateTransforms(
         runtimeState_,
@@ -405,6 +563,7 @@ void AppRunLoop::RenderFrame() {
         vfxRenderTargets_.GetSrvHandle(postExecutionPlan.finalOutputResource),
         vfxRenderTargets_.GetSrvHandle("DebugDepthPreview"),
         vfxRenderTargets_.GetSrvHandle("DebugEmissivePreview"),
+        receivedVideoSrvGpuHandle_,
         networkStatsPtr,
         jitterBufferTargetDelaySetter_,
         jitterBufferAutoModeSetter_,
@@ -460,6 +619,7 @@ void AppRunLoop::RenderFrame() {
     graphContext.spriteTextureHandle = spriteTextureHandle;
     graphContext.vfxTextureHandle = vfxTextureHandle;
     graphContext.depthTextureHandle = engineContext_.GetDepthSrvGpuHandle();
+    graphContext.receivedTextureHandle = receivedVideoSrvGpuHandle_;
     graphContext.effectRuntime = &effectRuntimeFrame;
     graphContext.primaryParticleFx = primaryParticleFx;
     graphContext.beamTime = beamTime_;

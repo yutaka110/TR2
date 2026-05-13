@@ -84,7 +84,9 @@ void AppSceneRenderPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
                 ctx.scene->materialResource->GetGPUVirtualAddress(),
                 ctx.scene->sphere.cbvResource->GetGPUVirtualAddress(),
                 ctx.scene->textureSrvHandleGPU2,
-                ctx.scene->textureSrvHandleGPU2,
+                ctx.receivedTextureHandle.ptr != 0
+                ? ctx.receivedTextureHandle
+                : ctx.scene->textureSrvHandleGPU2,
                 ctx.scene->textureSrvHandleGPU2,
                 ctx.scene->directionalLightResource->GetGPUVirtualAddress(),
                 ctx.scene->cameraResource->GetGPUVirtualAddress(),
