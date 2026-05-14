@@ -82,6 +82,28 @@ namespace net {
         H264 = 3,
     };
 
+    static constexpr uint32_t kRawFramePayloadMagic =
+        (static_cast<uint32_t>('R') << 24) |
+        (static_cast<uint32_t>('V') << 16) |
+        (static_cast<uint32_t>('F') << 8) |
+        static_cast<uint32_t>('1');
+
+    static constexpr size_t kRawFramePayloadHeaderSize = 16;
+
+    enum class RawFrameFormat : uint8_t {
+        Rgba8 = 1,
+    };
+
+    struct RawFramePayloadHeader {
+        uint32_t magic = kRawFramePayloadMagic;
+        uint16_t width = 0;
+        uint16_t height = 0;
+        uint8_t format = static_cast<uint8_t>(RawFrameFormat::Rgba8);
+        uint8_t reserved0 = 0;
+        uint16_t reserved1 = 0;
+        uint32_t payloadBytes = 0;
+    };
+
     enum class ControlCommand : uint8_t {
         None = 0,
 
@@ -217,6 +239,46 @@ namespace net {
             value = (value << 8) | src[i];
         }
         return value;
+    }
+
+    inline void EncodeRawFramePayloadHeader(
+        uint8_t* dst,
+        const RawFramePayloadHeader& header
+    ) {
+        WriteU32BE(dst + 0, header.magic);
+        WriteU16BE(dst + 4, header.width);
+        WriteU16BE(dst + 6, header.height);
+        dst[8] = header.format;
+        dst[9] = header.reserved0;
+        WriteU16BE(dst + 10, header.reserved1);
+        WriteU32BE(dst + 12, header.payloadBytes);
+    }
+
+    inline bool DecodeRawFramePayloadHeader(
+        const uint8_t* src,
+        size_t size,
+        RawFramePayloadHeader& outHeader
+    ) {
+        if (!src || size < kRawFramePayloadHeaderSize) {
+            return false;
+        }
+
+        outHeader.magic = ReadU32BE(src + 0);
+        outHeader.width = ReadU16BE(src + 4);
+        outHeader.height = ReadU16BE(src + 6);
+        outHeader.format = src[8];
+        outHeader.reserved0 = src[9];
+        outHeader.reserved1 = ReadU16BE(src + 10);
+        outHeader.payloadBytes = ReadU32BE(src + 12);
+
+        if (outHeader.magic != kRawFramePayloadMagic ||
+            outHeader.width == 0 ||
+            outHeader.height == 0 ||
+            outHeader.format != static_cast<uint8_t>(RawFrameFormat::Rgba8)) {
+            return false;
+        }
+
+        return kRawFramePayloadHeaderSize + outHeader.payloadBytes <= size;
     }
 
     // ============================================================

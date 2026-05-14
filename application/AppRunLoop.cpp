@@ -11,6 +11,7 @@
 #include "AppRuntimeState.h"
 #include "AppSceneResources.h"
 #include "EngineContext.h"
+#include "../network/PacketProtocol.h"
 
 #include <algorithm>
 #include <cmath>
@@ -416,12 +417,28 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         return;
     }
 
+    const uint8_t* src = frame.data.data();
+    uint32_t srcWidth = receivedVideoWidth_;
+    uint32_t srcHeight = receivedVideoHeight_;
+    size_t srcPayloadBytes = frame.data.size();
+
+    net::RawFramePayloadHeader rawHeader{};
+    if (net::DecodeRawFramePayloadHeader(
+            frame.data.data(),
+            frame.data.size(),
+            rawHeader)) {
+        src = frame.data.data() + net::kRawFramePayloadHeaderSize;
+        srcWidth = rawHeader.width;
+        srcHeight = rawHeader.height;
+        srcPayloadBytes = rawHeader.payloadBytes;
+    }
+
     const size_t requiredSize =
-        static_cast<size_t>(receivedVideoWidth_) *
-        static_cast<size_t>(receivedVideoHeight_) *
+        static_cast<size_t>(srcWidth) *
+        static_cast<size_t>(srcHeight) *
         4u;
 
-    if (frame.data.size() < requiredSize) {
+    if (srcPayloadBytes < requiredSize) {
         static uint32_t shortFrameLogCount = 0;
         if (shortFrameLogCount < 10) {
             OutputDebugStringA("[ReceivedVideo] Raw frame is too small. Skip upload.\n");
@@ -465,21 +482,44 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         return;
     }
 
-    const uint8_t* src = frame.data.data();
     uint8_t* dst = mapped + footprint.Offset;
 
     const size_t srcRowPitch =
-        static_cast<size_t>(receivedVideoWidth_) * 4u;
+        static_cast<size_t>(srcWidth) * 4u;
 
     const size_t dstRowPitch =
         static_cast<size_t>(footprint.Footprint.RowPitch);
 
     for (uint32_t y = 0; y < receivedVideoHeight_; ++y) {
-        std::memcpy(
-            dst + static_cast<size_t>(y) * dstRowPitch,
-            src + static_cast<size_t>(y) * srcRowPitch,
-            srcRowPitch
-        );
+        const uint32_t sampleY =
+            std::min<uint32_t>(
+                srcHeight - 1u,
+                static_cast<uint32_t>(
+                    (static_cast<uint64_t>(y) * srcHeight) / receivedVideoHeight_
+                )
+            );
+
+        for (uint32_t x = 0; x < receivedVideoWidth_; ++x) {
+            const uint32_t sampleX =
+                std::min<uint32_t>(
+                    srcWidth - 1u,
+                    static_cast<uint32_t>(
+                        (static_cast<uint64_t>(x) * srcWidth) / receivedVideoWidth_
+                    )
+                );
+
+            const uint8_t* srcPixel =
+                src +
+                static_cast<size_t>(sampleY) * srcRowPitch +
+                static_cast<size_t>(sampleX) * 4u;
+
+            uint8_t* dstPixel =
+                dst +
+                static_cast<size_t>(y) * dstRowPitch +
+                static_cast<size_t>(x) * 4u;
+
+            std::memcpy(dstPixel, srcPixel, 4u);
+        }
     }
 
     receivedVideoUploadBuffer_->Unmap(0, nullptr);
