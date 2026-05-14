@@ -70,10 +70,13 @@ namespace net {
 		int adaptiveTargetJpegQuality = 0;
 		int adaptiveTargetFps = 0;
 		int adaptiveTargetBitrateKbps = 0;
+		int adaptiveTargetWidth = 0;
+		int adaptiveTargetHeight = 0;
 
 		bool adaptiveQualityChanged = false;
 		bool adaptiveFpsChanged = false;
 		bool adaptiveBitrateChanged = false;
+		bool adaptiveResolutionChanged = false;
 
 		double adaptiveLastAckMissingRate = 0.0;
 		double adaptiveLastRttMs = 0.0;

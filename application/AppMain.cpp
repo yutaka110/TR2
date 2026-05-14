@@ -70,6 +70,9 @@
 #include "../network/UdpReceiver.h"
 #include "../network/NetworkManager.h"
 #include "../network/AdaptiveStreamingController.h"
+#include "../network/PacketProtocol.h"
+#include <algorithm>
+#include <cstring>
 #include <memory>
 #include <iostream>
 
@@ -96,6 +99,97 @@ namespace {
 	// 別PCへ送る場合は、ここを受信側PCのIPv4アドレスに変更する。
 	constexpr const char* kRnvpRemoteIp = "127.0.0.1";
 	constexpr uint16_t kRnvpRemotePort = kRnvpListenPort;
+
+	std::vector<uint8_t> ResizeRgbaNearest(
+		const std::vector<uint8_t>& src,
+		uint32_t srcWidth,
+		uint32_t srcHeight,
+		uint32_t dstWidth,
+		uint32_t dstHeight) {
+		if (srcWidth == 0 || srcHeight == 0 || dstWidth == 0 || dstHeight == 0) {
+			return {};
+		}
+
+		const size_t requiredBytes =
+			static_cast<size_t>(srcWidth) *
+			static_cast<size_t>(srcHeight) *
+			4u;
+
+		if (src.size() < requiredBytes) {
+			return {};
+		}
+
+		if (srcWidth == dstWidth && srcHeight == dstHeight) {
+			return src;
+		}
+
+		std::vector<uint8_t> dst(
+			static_cast<size_t>(dstWidth) *
+			static_cast<size_t>(dstHeight) *
+			4u
+		);
+
+		for (uint32_t y = 0; y < dstHeight; ++y) {
+			const uint32_t srcY =
+				std::min<uint32_t>(
+					srcHeight - 1u,
+					static_cast<uint32_t>(
+						(static_cast<uint64_t>(y) * srcHeight) / dstHeight
+					)
+				);
+
+			for (uint32_t x = 0; x < dstWidth; ++x) {
+				const uint32_t srcX =
+					std::min<uint32_t>(
+						srcWidth - 1u,
+						static_cast<uint32_t>(
+							(static_cast<uint64_t>(x) * srcWidth) / dstWidth
+						)
+					);
+
+				const size_t srcIndex =
+					(static_cast<size_t>(srcY) * srcWidth + srcX) * 4u;
+
+				const size_t dstIndex =
+					(static_cast<size_t>(y) * dstWidth + x) * 4u;
+
+				std::memcpy(dst.data() + dstIndex, src.data() + srcIndex, 4u);
+			}
+		}
+
+		return dst;
+	}
+
+	std::vector<uint8_t> PackRawRgbaPayload(
+		const std::vector<uint8_t>& rgba,
+		uint32_t width,
+		uint32_t height) {
+		const size_t imageBytes =
+			static_cast<size_t>(width) *
+			static_cast<size_t>(height) *
+			4u;
+
+		if (width == 0 || height == 0 || rgba.size() < imageBytes) {
+			return {};
+		}
+
+		std::vector<uint8_t> payload(net::kRawFramePayloadHeaderSize + imageBytes);
+
+		net::RawFramePayloadHeader header{};
+		header.width = static_cast<uint16_t>(width);
+		header.height = static_cast<uint16_t>(height);
+		header.format = static_cast<uint8_t>(net::RawFrameFormat::Rgba8);
+		header.payloadBytes = static_cast<uint32_t>(imageBytes);
+
+		net::EncodeRawFramePayloadHeader(payload.data(), header);
+		std::memcpy(
+			payload.data() + net::kRawFramePayloadHeaderSize,
+			rgba.data(),
+			imageBytes
+		);
+
+		return payload;
+	}
 }
 
 MaterialData LoadMaterialTemplateFile(const std::string& directoryPath,
@@ -1193,6 +1287,12 @@ int AppMain::Run() {
 				stats.adaptiveTargetBitrateKbps =
 					adaptiveState.targetBitrateKbps;
 
+				stats.adaptiveTargetWidth =
+					adaptiveState.targetWidth;
+
+				stats.adaptiveTargetHeight =
+					adaptiveState.targetHeight;
+
 				stats.adaptiveQualityChanged =
 					adaptiveState.qualityChanged;
 
@@ -1201,6 +1301,9 @@ int AppMain::Run() {
 
 				stats.adaptiveBitrateChanged =
 					adaptiveState.bitrateChanged;
+
+				stats.adaptiveResolutionChanged =
+					adaptiveState.resolutionChanged;
 
 				stats.adaptiveLastAckMissingRate =
 					adaptiveState.lastAckMissingRate;
@@ -1340,9 +1443,27 @@ int AppMain::Run() {
 				if (targetFps < 1) {
 					targetFps = 1;
 				}
-				if (targetFps > 10) {
-					targetFps = 10;
+				if (targetFps > 30) {
+					targetFps = 30;
 				}
+
+				const uint32_t targetWidth =
+					static_cast<uint32_t>(
+						std::clamp(
+							adaptiveState.targetWidth,
+							160,
+							static_cast<int>(texWidth)
+						)
+					);
+
+				const uint32_t targetHeight =
+					static_cast<uint32_t>(
+						std::clamp(
+							adaptiveState.targetHeight,
+							90,
+							static_cast<int>(texHeight)
+						)
+					);
 
 				const auto sendInterval =
 					std::chrono::duration<double>(1.0 / static_cast<double>(targetFps));
@@ -1390,8 +1511,28 @@ int AppMain::Run() {
 						}
 					}
 
+					std::vector<uint8_t> adaptiveVideoFrame =
+						ResizeRgbaNearest(
+							videoFrame,
+							texWidth,
+							texHeight,
+							targetWidth,
+							targetHeight
+						);
+
+					std::vector<uint8_t> rawPayload =
+						PackRawRgbaPayload(
+							adaptiveVideoFrame,
+							targetWidth,
+							targetHeight
+						);
+
+					if (rawPayload.empty()) {
+						rawPayload = PackRawRgbaPayload(videoFrame, texWidth, texHeight);
+					}
+
 					networkManager->SendRNVPFragmented(
-						videoFrame,
+						rawPayload,
 						dummyFrameId,
 						net::CodecType::Raw,
 						1
@@ -1405,10 +1546,18 @@ int AppMain::Run() {
 							<< dummyFrameId
 							<< " targetFps="
 							<< targetFps
+							<< " targetBitrateKbps="
+							<< adaptiveState.targetBitrateKbps
+							<< " targetQuality="
+							<< adaptiveState.targetJpegQuality
+							<< " targetResolution="
+							<< targetWidth
+							<< "x"
+							<< targetHeight
 							<< " source="
 							<< (cameraFrameReady ? "camera" : "fallback")
 							<< " size="
-							<< videoFrame.size();
+							<< rawPayload.size();
 
 						OutputDebugStringA(oss.str().c_str());
 						OutputDebugStringA("\n");

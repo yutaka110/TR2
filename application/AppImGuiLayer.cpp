@@ -485,12 +485,16 @@ namespace {
             ImGui::Text("Target JPEG Quality: %d", stats.adaptiveTargetJpegQuality);
             ImGui::Text("Target FPS: %d", stats.adaptiveTargetFps);
             ImGui::Text("Target Bitrate: %d kbps", stats.adaptiveTargetBitrateKbps);
+            ImGui::Text("Target Resolution: %dx%d",
+                stats.adaptiveTargetWidth,
+                stats.adaptiveTargetHeight);
 
             ImGui::Separator();
 
             ImGui::Text("Quality Changed: %s", stats.adaptiveQualityChanged ? "true" : "false");
             ImGui::Text("FPS Changed: %s", stats.adaptiveFpsChanged ? "true" : "false");
             ImGui::Text("Bitrate Changed: %s", stats.adaptiveBitrateChanged ? "true" : "false");
+            ImGui::Text("Resolution Changed: %s", stats.adaptiveResolutionChanged ? "true" : "false");
 
             ImGui::Separator();
 
