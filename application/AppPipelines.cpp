@@ -642,7 +642,7 @@ bool AppPipelines::Initialize(ID3D12Device* device) {
     spriteBlend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
     D3D12_DEPTH_STENCIL_DESC spriteDepth{};
-    spriteDepth.DepthEnable = TRUE;
+    spriteDepth.DepthEnable = FALSE;
     spriteDepth.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     spriteDepth.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
 

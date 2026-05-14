@@ -41,6 +41,14 @@ struct AppRuntimeState {
     Vector3 cameraWorldPosition{};
 
     bool useMonsterBall = true;
+    // RNVPで受信した映像テクスチャをゲーム画面内のSpriteに表示する
+    bool showReceivedVideoInGame = true;
+    bool showReceivedVideoPreviewWindow = true;
+    bool showImGui = true;
+    bool networkExperimentMode = false;
+    bool enableVfxRenderPasses = true;
+    bool enablePostProcessPasses = true;
+    bool enableDebugPreviewPasses = true;
     bool enableParticles = false;
     bool autoPlayVfxDemo = true;
     float autoPlayVfxInterval = 0.6f;

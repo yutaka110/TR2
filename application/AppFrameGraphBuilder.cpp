@@ -36,26 +36,45 @@ void AppFrameGraphBuilder::Build(const AppFrameGraphBuildContext& context) const
     }
 
     const AppFrameGraphBuildContext ctx = context;
-    const PostProcessExecutionPlan postExecutionPlan = ctx.postProcessStack->BuildExecutionPlan();
+    const bool enableVfx =
+        ctx.runtimeState != nullptr &&
+        ctx.runtimeState->enableVfxRenderPasses;
+    const bool enablePostProcess =
+        ctx.runtimeState != nullptr &&
+        ctx.runtimeState->enablePostProcessPasses;
+    const bool enableDebugPreview =
+        ctx.runtimeState != nullptr &&
+        ctx.runtimeState->enableDebugPreviewPasses;
+
+    const PostProcessExecutionPlan postExecutionPlan =
+        enablePostProcess
+        ? ctx.postProcessStack->BuildExecutionPlan()
+        : PostProcessExecutionPlan{};
     const std::string finalPostOutput =
-        postExecutionPlan.finalOutputResource.empty() ? "SceneColor" : postExecutionPlan.finalOutputResource;
+        enablePostProcess && !postExecutionPlan.finalOutputResource.empty()
+        ? postExecutionPlan.finalOutputResource
+        : "SceneColor";
     AppSceneRenderPipeline{}.RegisterPasses(ctx);
-    AppVfxRenderPipeline{}.RegisterPasses(ctx);
+    if (enableVfx) {
+        AppVfxRenderPipeline{}.RegisterPasses(ctx);
+    }
     AppPostProcessPipeline{}.RegisterPasses(ctx);
 
     const float debugClear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    ctx.renderGraph->DeclarePersistentRenderTarget(
-        "DebugDepthPreview",
-        0.5f,
-        DXGI_FORMAT_R8G8B8A8_UNORM,
-        debugClear,
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
-    ctx.renderGraph->DeclarePersistentRenderTarget(
-        "DebugEmissivePreview",
-        0.5f,
-        DXGI_FORMAT_R8G8B8A8_UNORM,
-        debugClear,
-        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if (enableDebugPreview) {
+        ctx.renderGraph->DeclarePersistentRenderTarget(
+            "DebugDepthPreview",
+            0.5f,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            debugClear,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ctx.renderGraph->DeclarePersistentRenderTarget(
+            "DebugEmissivePreview",
+            0.5f,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            debugClear,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
 
     ge3::graphics::RenderPassDesc depthPreviewPass{};
     depthPreviewPass.name = "Debug.DepthPreview";
@@ -89,7 +108,9 @@ void AppFrameGraphBuilder::Build(const AppFrameGraphBuildContext& context) const
                 debugParams);
         };
     depthPreviewPass.forceExecute = true;
-    ctx.renderGraph->AddPass(std::move(depthPreviewPass));
+    if (enableDebugPreview) {
+        ctx.renderGraph->AddPass(std::move(depthPreviewPass));
+    }
 
     ge3::graphics::RenderPassDesc emissivePreviewPass{};
     emissivePreviewPass.name = "Debug.EmissiveIsolation";
@@ -125,7 +146,9 @@ void AppFrameGraphBuilder::Build(const AppFrameGraphBuildContext& context) const
                 debugParams);
         };
     emissivePreviewPass.forceExecute = true;
-    ctx.renderGraph->AddPass(std::move(emissivePreviewPass));
+    if (enableDebugPreview) {
+        ctx.renderGraph->AddPass(std::move(emissivePreviewPass));
+    }
 
     ctx.renderGraph->AddPass({
         "UI.ImGui",

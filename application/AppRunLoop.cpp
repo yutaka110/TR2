@@ -261,6 +261,12 @@ void AppRunLoop::SetJitterBufferAutoModeSetter(std::function<void(bool)> setter)
     jitterBufferAutoModeSetter_ = std::move(setter);
 }
 
+void AppRunLoop::SetNetworkConditionSetter(
+    std::function<void(const net::NetworkCondition&)> setter
+) {
+    networkConditionSetter_ = std::move(setter);
+}
+
 void AppRunLoop::SetReceivedFrameProvider(
     std::function<bool(net::CompletedFrame&)> provider) {
     receivedFrameProvider_ = std::move(provider);
@@ -300,7 +306,15 @@ void AppRunLoop::UpdateFrame() {
     runtimeState_.scissorRect.right = static_cast<LONG>(windowWidth_);
     runtimeState_.scissorRect.bottom = static_cast<LONG>(windowHeight_);
 
-    if (runtimeState_.autoPlayVfxDemo) {
+    const bool uiToggleKeyDown = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+    if (uiToggleKeyDown && !uiToggleKeyWasDown_) {
+        runtimeState_.showImGui = !runtimeState_.showImGui;
+    }
+    uiToggleKeyWasDown_ = uiToggleKeyDown;
+
+    if (runtimeState_.autoPlayVfxDemo &&
+        runtimeState_.enableVfxRenderPasses &&
+        !runtimeState_.networkExperimentMode) {
         runtimeState_.enableParticles = true;
         runtimeState_.autoPlayVfxTimer -= 0.016f;
         runtimeState_.autoPlayVfxAngle += 0.9f * 0.016f;
@@ -329,7 +343,9 @@ void AppRunLoop::UpdateFrame() {
 
     beamTime_ += 0.016f;
     beam_.SetTime(beamTime_);
-    effectRuntime_.Update(0.016f);
+    if (runtimeState_.enableVfxRenderPasses) {
+        effectRuntime_.Update(0.016f);
+    }
 
     for (LoadedEffectAsset& loaded : loadedEffectAssets_) {
         if (!std::filesystem::exists(loaded.path)) {
@@ -528,7 +544,10 @@ void AppRunLoop::RenderFrame() {
 
     UpdateFrame();
 
-    UploadReceivedVideoFrame(commandList.Get());
+    if (runtimeState_.showReceivedVideoInGame ||
+        runtimeState_.showReceivedVideoPreviewWindow) {
+        UploadReceivedVideoFrame(commandList.Get());
+    }
 
     scene_.UpdateTransforms(
         runtimeState_,
@@ -538,7 +557,15 @@ void AppRunLoop::RenderFrame() {
         windowWidth_,
         windowHeight_);
 
-    const PostProcessExecutionPlan postExecutionPlan = postProcessStack_.BuildExecutionPlan();
+    const PostProcessExecutionPlan postExecutionPlan =
+        runtimeState_.enablePostProcessPasses
+        ? postProcessStack_.BuildExecutionPlan()
+        : PostProcessExecutionPlan{};
+    const std::string postPreviewResource =
+        runtimeState_.enablePostProcessPasses &&
+        !postExecutionPlan.finalOutputResource.empty()
+        ? postExecutionPlan.finalOutputResource
+        : "SceneColor";
 
     net::NetworkStatsSnapshot networkStatsSnapshot{};
     const net::NetworkStatsSnapshot* networkStatsPtr = nullptr;
@@ -560,13 +587,14 @@ void AppRunLoop::RenderFrame() {
         lastTransientBufferStorageCount_,
         vfxRenderTargets_.GetSrvHandle("SceneColor"),
         vfxRenderTargets_.GetSrvHandle("VfxAccumulation"),
-        vfxRenderTargets_.GetSrvHandle(postExecutionPlan.finalOutputResource),
+        vfxRenderTargets_.GetSrvHandle(postPreviewResource),
         vfxRenderTargets_.GetSrvHandle("DebugDepthPreview"),
         vfxRenderTargets_.GetSrvHandle("DebugEmissivePreview"),
         receivedVideoSrvGpuHandle_,
         networkStatsPtr,
         jitterBufferTargetDelaySetter_,
         jitterBufferAutoModeSetter_,
+        networkConditionSetter_,
         [&]() {
         Emitter emitterState{};
         emitterState.transform = runtimeState_.emitter.transform;
@@ -587,8 +615,14 @@ void AppRunLoop::RenderFrame() {
     effectResourceCache_.RegisterTexture({"monsterBall", scene_.textureSrvHandleCPU2, scene_.textureSrvHandleGPU2, 1, 1});
     effectResourceCache_.RegisterTexture({"streakNoise", scene_.textureSrvHandleCPU, scene_.textureSrvHandleGPU, 1, 1});
 
-    const D3D12_GPU_DESCRIPTOR_HANDLE spriteTextureHandle =
+    D3D12_GPU_DESCRIPTOR_HANDLE spriteTextureHandle =
         runtimeState_.useMonsterBall ? scene_.textureSrvHandleGPU2 : scene_.textureSrvHandleGPU;
+
+    // RNVP受信テクスチャが有効なら、ゲーム画面内Spriteに表示する
+    if (runtimeState_.showReceivedVideoInGame &&
+        receivedVideoSrvGpuHandle_.ptr != 0) {
+        spriteTextureHandle = receivedVideoSrvGpuHandle_;
+    }
     const EffectRuntimeFrame effectRuntimeFrame = effectRuntime_.BuildFrame();
     const ParticleRenderQueue& particleQueue = effectRuntimeFrame.particleQueue;
     const ParticleRenderFallback primaryParticleFx =

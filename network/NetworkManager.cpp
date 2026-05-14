@@ -145,19 +145,10 @@ void NetworkManager::SendUDPFragmented(const std::vector<uint8_t>& data, uint32_
         net::EncodeHeader(packet.data(), header);
         std::memcpy(packet.data() + net::kPacketHeaderSize, data.data() + offset, payloadSize);
 
-        const int sent = sendto(
-            udpSocket_,
-            reinterpret_cast<const char*>(packet.data()),
-            static_cast<int>(packet.size()),
-            0,
-            reinterpret_cast<sockaddr*>(&udpAddr_),
-            sizeof(udpAddr_)
+        SendPacketWithSimulation(
+            std::move(packet),
+            "SendUDPFragmented"
         );
-
-        if (sent == SOCKET_ERROR) {
-            std::cerr << "[NetworkManager] SendUDPFragmented sendto failed: "
-                << WSAGetLastError() << "\n";
-        }
     }
 }
 
@@ -238,19 +229,10 @@ void NetworkManager::SendRNVPFragmented(
             payloadSize
         );
 
-        const int sent = sendto(
-            udpSocket_,
-            reinterpret_cast<const char*>(packet.data()),
-            static_cast<int>(packet.size()),
-            0,
-            reinterpret_cast<sockaddr*>(&udpAddr_),
-            sizeof(udpAddr_)
+        SendPacketWithSimulation(
+            std::move(packet),
+            "SendRNVPFragmented"
         );
-
-        if (sent == SOCKET_ERROR) {
-            std::cerr << "[NetworkManager] SendRNVPFragmented sendto failed: "
-                << WSAGetLastError() << "\n";
-        }
     }
 }
 
@@ -293,18 +275,12 @@ void NetworkManager::SendRNVPPing(uint32_t streamId) {
     net::EncodeRnvpHeaderV1(packet.data(), header);
     net::EncodePingPayload(packet.data() + net::kRnvpHeaderV1Size, ping);
 
-    const int sent = sendto(
-        udpSocket_,
-        reinterpret_cast<const char*>(packet.data()),
-        static_cast<int>(packet.size()),
-        0,
-        reinterpret_cast<sockaddr*>(&udpAddr_),
-        sizeof(udpAddr_)
+    SendPacketWithSimulation(
+        std::move(packet),
+        "SendRNVPPing"
     );
 
-    if (sent == SOCKET_ERROR) {
-        std::cerr << "[NetworkManager] SendRNVPPing sendto failed: "
-            << WSAGetLastError() << "\n";
+    if (udpSocket_ == INVALID_SOCKET) {
         return;
     }
 
@@ -629,6 +605,41 @@ uint64_t NetworkManager::GetAckCount() const {
 }
 
 // ============================================================
+// Network Condition Simulator
+// ============================================================
+
+void NetworkManager::SetNetworkCondition(
+    const net::NetworkCondition& condition
+) {
+    networkSimulator_.SetCondition(condition);
+}
+
+net::NetworkCondition NetworkManager::GetNetworkCondition() const {
+    return networkSimulator_.GetCondition();
+}
+
+net::NetworkSimulationStats NetworkManager::GetNetworkSimulationStats() const {
+    return networkSimulator_.GetStats();
+}
+
+void NetworkManager::ResetNetworkSimulationStats() {
+    networkSimulator_.Reset();
+}
+
+void NetworkManager::FlushNetworkSimulator() {
+    std::vector<std::vector<uint8_t>> readyPackets;
+    networkSimulator_.PopReadyPackets(NowMicroseconds(), readyPackets);
+
+    for (const std::vector<uint8_t>& packet : readyPackets) {
+        SendPacketRaw(
+            packet.data(),
+            packet.size(),
+            "NetworkConditionSimulator"
+        );
+    }
+}
+
+// ============================================================
 // Utility
 // ============================================================
 
@@ -644,4 +655,56 @@ uint64_t NetworkManager::NowMicroseconds() const {
 
 uint32_t NetworkManager::NextRNVPSequence() {
     return rnvpSequence_.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool NetworkManager::SendPacketRaw(
+    const uint8_t* packetData,
+    size_t packetSize,
+    const char* context
+) {
+    if (udpSocket_ == INVALID_SOCKET ||
+        packetData == nullptr ||
+        packetSize == 0 ||
+        packetSize > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(udpSendMutex_);
+
+    const int sent = sendto(
+        udpSocket_,
+        reinterpret_cast<const char*>(packetData),
+        static_cast<int>(packetSize),
+        0,
+        reinterpret_cast<sockaddr*>(&udpAddr_),
+        sizeof(udpAddr_)
+    );
+
+    if (sent == SOCKET_ERROR) {
+        std::cerr << "[NetworkManager] "
+            << context
+            << " sendto failed: "
+            << WSAGetLastError()
+            << "\n";
+        return false;
+    }
+
+    return true;
+}
+
+void NetworkManager::SendPacketWithSimulation(
+    std::vector<uint8_t>&& packet,
+    const char* context
+) {
+    if (!networkSimulator_.IsEnabled()) {
+        SendPacketRaw(packet.data(), packet.size(), context);
+        return;
+    }
+
+    networkSimulator_.SubmitPacket(
+        std::move(packet),
+        NowMicroseconds()
+    );
+
+    FlushNetworkSimulator();
 }

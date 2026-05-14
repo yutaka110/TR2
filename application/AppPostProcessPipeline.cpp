@@ -3,7 +3,10 @@
 #include <string>
 
 #include "AppFrameGraphBuilder.h"
+#include "AppFrameRenderer.h"
 #include "AppPipelines.h"
+#include "AppRuntimeState.h"
+#include "AppSceneResources.h"
 #include "AppVfxRenderTargets.h"
 #include "PostProcessStack.h"
 #include "graphics/RenderGraph.h"
@@ -85,10 +88,20 @@ void BuildPassParams(const PostProcessPass& postPass, float passParams[8]) {
 } // namespace
 
 void AppPostProcessPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx) const {
-    const PostProcessExecutionPlan executionPlan = ctx.postProcessStack->BuildExecutionPlan();
+    const bool enablePostProcess =
+        ctx.runtimeState != nullptr &&
+        ctx.runtimeState->enablePostProcessPasses;
+
+    const PostProcessExecutionPlan executionPlan =
+        enablePostProcess
+        ? ctx.postProcessStack->BuildExecutionPlan()
+        : PostProcessExecutionPlan{};
     const std::string finalOutputResource =
-        executionPlan.finalOutputResource.empty() ? "SceneColor" : executionPlan.finalOutputResource;
-    for (const PostProcessExecutionPass& executionPass : executionPlan.passes) {
+        enablePostProcess && !executionPlan.finalOutputResource.empty()
+        ? executionPlan.finalOutputResource
+        : "SceneColor";
+    if (enablePostProcess) {
+        for (const PostProcessExecutionPass& executionPass : executionPlan.passes) {
         const PostProcessPass& postPass = executionPass.pass;
 
         ctx.renderGraph->DeclareTransientRenderTarget(
@@ -124,6 +137,7 @@ void AppPostProcessPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
                     postPass.tertiaryInputResource,
                     passParams);
         }});
+        }
     }
 
     ctx.renderGraph->AddPass({
@@ -159,4 +173,39 @@ void AppPostProcessPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
                 compositeParams);
         },
         true});
+
+    const bool showReceivedVideoOverlay =
+        ctx.runtimeState->showReceivedVideoInGame &&
+        ctx.receivedTextureHandle.ptr != 0;
+    if (showReceivedVideoOverlay) {
+        ctx.renderGraph->AddPass({
+            "UI.ReceivedVideoOverlay",
+            ge3::graphics::RenderPassLayer::Ui,
+            {
+                {"BackBuffer", ge3::graphics::RenderResourceAccessType::WriteRtv},
+            },
+            "",
+            [ctx](ge3::graphics::RenderPassContext& passContext) {
+                const bool overlayReady = ctx.frameRenderer->PrepareMainPass(
+                    passContext.commandList,
+                    ctx.runtimeState->viewport,
+                    ctx.runtimeState->scissorRect,
+                    ctx.appPipelines->GetSpriteRootSignature(),
+                    ctx.appPipelines->GetSpritePSO());
+
+                if (overlayReady &&
+                    ctx.scene->materialResourceSprite &&
+                    ctx.scene->transformationMatrixResourceSprite) {
+                    ctx.frameRenderer->DrawSprite(
+                        passContext.commandList,
+                        ctx.srvDescriptorHeap,
+                        ctx.scene->indexBufferViewSprite,
+                        ctx.scene->vertexBufferViewSprite,
+                        ctx.scene->materialResourceSprite->GetGPUVirtualAddress(),
+                        ctx.scene->transformationMatrixResourceSprite->GetGPUVirtualAddress(),
+                        ctx.receivedTextureHandle);
+                }
+            },
+            true});
+    }
 }
