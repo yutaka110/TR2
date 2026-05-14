@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -165,17 +166,39 @@ void NetworkManager::SendRNVPFragmented(
     const std::string& data,
     uint32_t frameId,
     net::CodecType codecType,
-    uint32_t streamId
+    uint32_t streamId,
+    bool keyFrame
 ) {
     std::vector<uint8_t> bytes(data.begin(), data.end());
-    SendRNVPFragmented(bytes, frameId, codecType, streamId);
+    SendRNVPFragmented(bytes, frameId, codecType, streamId, keyFrame);
 }
 
 void NetworkManager::SendRNVPFragmented(
     const std::vector<uint8_t>& data,
     uint32_t frameId,
     net::CodecType codecType,
-    uint32_t streamId
+    uint32_t streamId,
+    bool keyFrame
+) {
+    SendRNVPFragmentedInternal(
+        data,
+        frameId,
+        codecType,
+        streamId,
+        keyFrame,
+        true,
+        "SendRNVPFragmented"
+    );
+}
+
+void NetworkManager::SendRNVPFragmentedInternal(
+    const std::vector<uint8_t>& data,
+    uint32_t frameId,
+    net::CodecType codecType,
+    uint32_t streamId,
+    bool keyFrame,
+    bool trackFrame,
+    const char* context
 ) {
     if (udpSocket_ == INVALID_SOCKET || data.empty()) {
         return;
@@ -193,6 +216,54 @@ void NetworkManager::SendRNVPFragmented(
 
     const uint16_t chunkCount = static_cast<uint16_t>(chunkCountSizeT);
     const uint64_t sendTimeUs = NowMicroseconds();
+
+    if (!SendRNVPFramePackets(
+        data,
+        frameId,
+        codecType,
+        streamId,
+        keyFrame,
+        sendTimeUs,
+        context
+    )) {
+        return;
+    }
+
+    if (trackFrame) {
+        TrackSentFrame(
+            data,
+            frameId,
+            codecType,
+            streamId,
+            keyFrame,
+            chunkCount,
+            sendTimeUs
+        );
+    }
+}
+
+bool NetworkManager::SendRNVPFramePackets(
+    const std::vector<uint8_t>& data,
+    uint32_t frameId,
+    net::CodecType codecType,
+    uint32_t streamId,
+    bool keyFrame,
+    uint64_t sendTimeUs,
+    const char* context
+) {
+    if (udpSocket_ == INVALID_SOCKET || data.empty()) {
+        return false;
+    }
+
+    const size_t maxPayload = net::kMaxUdpPayloadSize;
+    const size_t totalSize = data.size();
+
+    const size_t chunkCountSizeT = (totalSize + maxPayload - 1) / maxPayload;
+    if (chunkCountSizeT == 0 || chunkCountSizeT > (std::numeric_limits<uint16_t>::max)()) {
+        return false;
+    }
+
+    const uint16_t chunkCount = static_cast<uint16_t>(chunkCountSizeT);
 
     for (uint16_t i = 0; i < chunkCount; ++i) {
         const size_t offset = static_cast<size_t>(i) * maxPayload;
@@ -218,6 +289,9 @@ void NetworkManager::SendRNVPFragmented(
         header.flags = (i == chunkCount - 1)
             ? net::PacketFlag_LastChunk
             : net::PacketFlag_None;
+        if (keyFrame) {
+            header.flags = net::AddPacketFlag(header.flags, net::PacketFlag_KeyFrame);
+        }
 
         header.codecType = static_cast<uint8_t>(codecType);
 
@@ -231,8 +305,128 @@ void NetworkManager::SendRNVPFragmented(
 
         SendPacketWithSimulation(
             std::move(packet),
-            "SendRNVPFragmented"
+            context
         );
+    }
+
+    return true;
+}
+
+uint32_t NetworkManager::SendRNVPSelectedChunks(
+    const std::vector<uint8_t>& data,
+    uint32_t frameId,
+    net::CodecType codecType,
+    uint32_t streamId,
+    bool keyFrame,
+    uint64_t sendTimeUs,
+    const std::vector<uint16_t>& chunkIndices,
+    const char* context
+) {
+    if (udpSocket_ == INVALID_SOCKET || data.empty() || chunkIndices.empty()) {
+        return 0;
+    }
+
+    const size_t maxPayload = net::kMaxUdpPayloadSize;
+    const size_t totalSize = data.size();
+
+    const size_t chunkCountSizeT = (totalSize + maxPayload - 1) / maxPayload;
+    if (chunkCountSizeT == 0 || chunkCountSizeT > (std::numeric_limits<uint16_t>::max)()) {
+        return 0;
+    }
+
+    const uint16_t chunkCount = static_cast<uint16_t>(chunkCountSizeT);
+    uint32_t sentChunkCount = 0;
+
+    for (uint16_t chunkIndex : chunkIndices) {
+        if (chunkIndex >= chunkCount) {
+            continue;
+        }
+
+        const size_t offset = static_cast<size_t>(chunkIndex) * maxPayload;
+        const size_t payloadSize = (std::min)(maxPayload, totalSize - offset);
+
+        std::vector<uint8_t> packet(net::kRnvpHeaderV1Size + payloadSize);
+
+        net::RnvpHeaderV1 header{};
+        header.magic = net::kRnvpMagic;
+        header.version = net::kRnvpVersion;
+        header.packetType = static_cast<uint8_t>(net::PacketType::Data);
+        header.headerSize = static_cast<uint16_t>(net::kRnvpHeaderV1Size);
+
+        header.sequence = NextRNVPSequence();
+        header.streamId = streamId;
+
+        header.frameId = frameId;
+        header.chunkIndex = chunkIndex;
+        header.chunkCount = chunkCount;
+
+        header.sendTimeUs = sendTimeUs;
+        header.payloadSize = static_cast<uint32_t>(payloadSize);
+        header.flags = (chunkIndex == chunkCount - 1)
+            ? net::PacketFlag_LastChunk
+            : net::PacketFlag_None;
+        if (keyFrame) {
+            header.flags = net::AddPacketFlag(header.flags, net::PacketFlag_KeyFrame);
+        }
+
+        header.codecType = static_cast<uint8_t>(codecType);
+
+        net::EncodeRnvpHeaderV1(packet.data(), header);
+
+        std::memcpy(
+            packet.data() + net::kRnvpHeaderV1Size,
+            data.data() + offset,
+            payloadSize
+        );
+
+        SendPacketWithSimulation(std::move(packet), context);
+        sentChunkCount++;
+    }
+
+    return sentChunkCount;
+}
+
+void NetworkManager::TrackSentFrame(
+    const std::vector<uint8_t>& data,
+    uint32_t frameId,
+    net::CodecType codecType,
+    uint32_t streamId,
+    bool keyFrame,
+    uint16_t chunkCount,
+    uint64_t sendTimeUs
+) {
+    SentFrameRecord record{};
+    record.frameId = frameId;
+    record.streamId = streamId;
+    record.codecType = codecType;
+    record.chunkCount = chunkCount;
+    record.sendTimeUs = sendTimeUs;
+    record.keyFrame = keyFrame;
+    record.payload = data;
+
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+
+    latestSentFrameId_ = (std::max)(latestSentFrameId_, frameId);
+
+    auto existing = std::find_if(
+        sentFrames_.begin(),
+        sentFrames_.end(),
+        [frameId, streamId](const SentFrameRecord& candidate) {
+            return candidate.frameId == frameId && candidate.streamId == streamId;
+        }
+    );
+
+    if (existing != sentFrames_.end()) {
+        const uint32_t retransmitCount = existing->retransmitCount;
+        *existing = std::move(record);
+        existing->retransmitCount = retransmitCount;
+    }
+    else {
+        sentFrames_.push_back(std::move(record));
+    }
+
+    while (sentFrames_.size() > kSentFrameHistoryLimit) {
+        sentFrames_.pop_front();
     }
 }
 
@@ -471,8 +665,6 @@ void NetworkManager::HandleRnvpAck(
     const uint8_t* payload,
     size_t payloadSize
 ) {
-    (void)header;
-
     net::AckPayload ack{};
     if (!net::DecodeAckPayload(payload, payloadSize, ack)) {
         return;
@@ -498,17 +690,160 @@ void NetworkManager::HandleRnvpAck(
         ackCount_++;
     }
 
+    HandleAckControl(header.streamId, ack, missingRate);
+
     std::cout << "[NetworkManager] RNVP Ack received. frameId="
         << ack.frameId
         << " receivedChunks="
         << ack.receivedChunkCount
         << " missingChunks="
         << ack.missingChunkCount
+        << " missingList="
+        << ack.missingChunkIndices.size()
         << " missingRate="
         << missingRate * 100.0
         << " latestSequence="
         << ack.latestSequence
         << "\n";
+}
+
+void NetworkManager::HandleAckControl(
+    uint32_t streamId,
+    const net::AckPayload& ack,
+    double missingRate
+) {
+    SentFrameRecord resendRecord{};
+    std::vector<uint16_t> resendChunkIndices;
+    bool shouldRetransmit = false;
+    bool shouldRequestKeyFrame = false;
+    bool shouldCountStaleDrop = false;
+
+    const uint64_t nowUs = NowMicroseconds();
+
+    {
+        std::lock_guard<std::mutex> lock(sentFramesMutex_);
+
+        auto record = std::find_if(
+            sentFrames_.begin(),
+            sentFrames_.end(),
+            [streamId, frameId = ack.frameId](const SentFrameRecord& candidate) {
+                return candidate.streamId == streamId && candidate.frameId == frameId;
+            }
+        );
+
+        if (ack.missingChunkCount == 0) {
+            if (record != sentFrames_.end()) {
+                record->acked = true;
+            }
+
+            while (!sentFrames_.empty() &&
+                sentFrames_.front().acked &&
+                latestSentFrameId_ > sentFrames_.front().frameId + kMaxRetransmitFrameLag) {
+                sentFrames_.pop_front();
+            }
+
+            return;
+        }
+
+        if (record == sentFrames_.end()) {
+            shouldCountStaleDrop = true;
+            shouldRequestKeyFrame = true;
+        }
+        else {
+            const bool staleByFrameLag =
+                latestSentFrameId_ > record->frameId + kMaxRetransmitFrameLag;
+
+            const bool staleByAge =
+                nowUs > record->sendTimeUs &&
+                nowUs - record->sendTimeUs > kMaxRetransmitAgeUs;
+
+            const bool retransmitBudgetExhausted =
+                record->retransmitCount >= kMaxRetransmitsPerFrame;
+
+            if (staleByFrameLag || staleByAge || retransmitBudgetExhausted) {
+                shouldCountStaleDrop = true;
+                shouldRequestKeyFrame = true;
+            }
+            else {
+                record->retransmitCount++;
+                resendRecord = *record;
+                resendChunkIndices = ack.missingChunkIndices;
+                shouldRetransmit = true;
+                ackRetransmittedFrameCount_++;
+                ackRetransmittedChunkCount_ += resendChunkIndices.empty()
+                    ? static_cast<uint64_t>(record->chunkCount)
+                    : static_cast<uint64_t>(resendChunkIndices.size());
+
+                if (missingRate >= 0.25) {
+                    shouldRequestKeyFrame = true;
+                }
+            }
+        }
+
+        if (shouldCountStaleDrop) {
+            ackStaleDroppedFrameCount_++;
+        }
+
+        if (shouldRequestKeyFrame) {
+            forceNextKeyFrame_.store(true, std::memory_order_relaxed);
+            ackKeyFrameRequestCount_++;
+        }
+    }
+
+    if (shouldRetransmit) {
+        const bool retransmitAsKeyFrame =
+            resendRecord.keyFrame || shouldRequestKeyFrame;
+
+        uint32_t retransmittedChunks = 0;
+
+        if (!resendChunkIndices.empty()) {
+            retransmittedChunks = SendRNVPSelectedChunks(
+                resendRecord.payload,
+                resendRecord.frameId,
+                resendRecord.codecType,
+                resendRecord.streamId,
+                retransmitAsKeyFrame,
+                NowMicroseconds(),
+                resendChunkIndices,
+                "RNVP ACK Selective Retransmit"
+            );
+        }
+        else {
+            SendRNVPFragmentedInternal(
+                resendRecord.payload,
+                resendRecord.frameId,
+                resendRecord.codecType,
+                resendRecord.streamId,
+                retransmitAsKeyFrame,
+                false,
+                "RNVP ACK Full Retransmit"
+            );
+
+            retransmittedChunks = resendRecord.chunkCount;
+        }
+
+        std::ostringstream oss;
+        oss << "[NetworkManager] ACK control retransmit. frameId="
+            << resendRecord.frameId
+            << " missingChunks="
+            << ack.missingChunkCount
+            << " missingList="
+            << resendChunkIndices.size()
+            << " retransmittedChunks="
+            << retransmittedChunks
+            << " missingRate="
+            << missingRate * 100.0
+            << "%";
+        NetworkDebugLog(oss.str());
+    }
+    else if (shouldCountStaleDrop) {
+        std::ostringstream oss;
+        oss << "[NetworkManager] ACK control dropped stale frame. frameId="
+            << ack.frameId
+            << " missingChunks="
+            << ack.missingChunkCount;
+        NetworkDebugLog(oss.str());
+    }
 }
 
 void NetworkManager::HandleRnvpControl(
@@ -543,6 +878,11 @@ void NetworkManager::HandleRnvpControl(
         break;
 
     case net::ControlCommand::RequestKeyFrame:
+        {
+            std::lock_guard<std::mutex> lock(sentFramesMutex_);
+            forceNextKeyFrame_.store(true, std::memory_order_relaxed);
+            ackKeyFrameRequestCount_++;
+        }
         std::cout << "[NetworkManager] Control: RequestKeyFrame\n";
         break;
 
@@ -602,6 +942,39 @@ double NetworkManager::GetLastAckMissingRate() const {
 uint64_t NetworkManager::GetAckCount() const {
     std::lock_guard<std::mutex> lock(ackMutex_);
     return ackCount_;
+}
+
+uint64_t NetworkManager::GetAckRetransmittedFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return ackRetransmittedFrameCount_;
+}
+
+uint64_t NetworkManager::GetAckRetransmittedChunkCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return ackRetransmittedChunkCount_;
+}
+
+uint64_t NetworkManager::GetAckStaleDroppedFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return ackStaleDroppedFrameCount_;
+}
+
+uint64_t NetworkManager::GetAckKeyFrameRequestCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return ackKeyFrameRequestCount_;
+}
+
+bool NetworkManager::IsKeyFrameRequestPending() const {
+    return forceNextKeyFrame_.load(std::memory_order_relaxed);
+}
+
+bool NetworkManager::ConsumeKeyFrameRequest() {
+    bool expected = true;
+    return forceNextKeyFrame_.compare_exchange_strong(
+        expected,
+        false,
+        std::memory_order_acq_rel
+    );
 }
 
 // ============================================================

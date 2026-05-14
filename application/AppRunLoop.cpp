@@ -12,6 +12,7 @@
 #include "AppSceneResources.h"
 #include "EngineContext.h"
 #include "../network/PacketProtocol.h"
+#include "../../externals/DirectXTex/DirectXTex.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +26,77 @@ using namespace DirectX;
 using namespace Microsoft::WRL;
 
 namespace {
+bool DecodeJpegToRgba(
+    const std::vector<uint8_t>& jpeg,
+    std::vector<uint8_t>& outRgba,
+    uint32_t& outWidth,
+    uint32_t& outHeight) {
+    if (jpeg.empty()) {
+        return false;
+    }
+
+    DirectX::TexMetadata metadata{};
+    DirectX::ScratchImage decoded;
+    HRESULT hr = DirectX::LoadFromWICMemory(
+        jpeg.data(),
+        jpeg.size(),
+        DirectX::WIC_FLAGS_FORCE_RGB,
+        &metadata,
+        decoded
+    );
+
+    if (FAILED(hr)) {
+        static uint32_t decodeFailLogCount = 0;
+        if (decodeFailLogCount < 10) {
+            OutputDebugStringA("[ReceivedVideo] JPEG decode failed. Skip upload.\n");
+            decodeFailLogCount++;
+        }
+        return false;
+    }
+
+    const DirectX::Image* image = decoded.GetImage(0, 0, 0);
+    if (image == nullptr || image->pixels == nullptr ||
+        image->width == 0 || image->height == 0) {
+        return false;
+    }
+
+    DirectX::ScratchImage converted;
+    if (image->format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+        hr = DirectX::Convert(
+            *image,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DirectX::TEX_FILTER_DEFAULT,
+            0.0f,
+            converted
+        );
+
+        if (FAILED(hr)) {
+            return false;
+        }
+
+        image = converted.GetImage(0, 0, 0);
+        if (image == nullptr || image->pixels == nullptr) {
+            return false;
+        }
+    }
+
+    outWidth = static_cast<uint32_t>(image->width);
+    outHeight = static_cast<uint32_t>(image->height);
+
+    const size_t dstRowPitch = static_cast<size_t>(outWidth) * 4u;
+    outRgba.resize(dstRowPitch * static_cast<size_t>(outHeight));
+
+    for (uint32_t y = 0; y < outHeight; ++y) {
+        std::memcpy(
+            outRgba.data() + static_cast<size_t>(y) * dstRowPitch,
+            image->pixels + static_cast<size_t>(y) * image->rowPitch,
+            dstRowPitch
+        );
+    }
+
+    return true;
+}
+
 void TransitionSceneDepthIfNeeded(
     ID3D12GraphicsCommandList* commandList,
     ID3D12Resource* depthResource,
@@ -413,24 +485,40 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         return;
     }
 
-    if (frame.codecType != net::CodecType::Raw) {
+    if (frame.codecType != net::CodecType::Raw &&
+        frame.codecType != net::CodecType::MJPEG) {
         return;
     }
 
+    std::vector<uint8_t> decodedJpegRgba;
     const uint8_t* src = frame.data.data();
     uint32_t srcWidth = receivedVideoWidth_;
     uint32_t srcHeight = receivedVideoHeight_;
     size_t srcPayloadBytes = frame.data.size();
 
-    net::RawFramePayloadHeader rawHeader{};
-    if (net::DecodeRawFramePayloadHeader(
-            frame.data.data(),
-            frame.data.size(),
-            rawHeader)) {
-        src = frame.data.data() + net::kRawFramePayloadHeaderSize;
-        srcWidth = rawHeader.width;
-        srcHeight = rawHeader.height;
-        srcPayloadBytes = rawHeader.payloadBytes;
+    if (frame.codecType == net::CodecType::MJPEG) {
+        if (!DecodeJpegToRgba(
+                frame.data,
+                decodedJpegRgba,
+                srcWidth,
+                srcHeight)) {
+            return;
+        }
+
+        src = decodedJpegRgba.data();
+        srcPayloadBytes = decodedJpegRgba.size();
+    }
+    else {
+        net::RawFramePayloadHeader rawHeader{};
+        if (net::DecodeRawFramePayloadHeader(
+                frame.data.data(),
+                frame.data.size(),
+                rawHeader)) {
+            src = frame.data.data() + net::kRawFramePayloadHeaderSize;
+            srcWidth = rawHeader.width;
+            srcHeight = rawHeader.height;
+            srcPayloadBytes = rawHeader.payloadBytes;
+        }
     }
 
     const size_t requiredSize =

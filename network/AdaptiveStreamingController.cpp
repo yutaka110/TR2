@@ -104,6 +104,23 @@ namespace net {
         return state_;
     }
 
+    void AdaptiveStreamingController::ReportEncodedFrame(
+        size_t rawBytes,
+        size_t encodedBytes
+    ) {
+        state_.lastRawFrameBytes = rawBytes;
+        state_.lastEncodedFrameBytes = encodedBytes;
+
+        if (rawBytes > 0 && encodedBytes > 0) {
+            state_.lastCompressionRatio =
+                static_cast<double>(encodedBytes) /
+                static_cast<double>(rawBytes);
+        }
+        else {
+            state_.lastCompressionRatio = 0.0;
+        }
+    }
+
     void AdaptiveStreamingController::ApplyMultiplicativeDecrease(double factor) {
         const int oldQuality = state_.targetJpegQuality;
         const int oldFps = state_.targetFps;

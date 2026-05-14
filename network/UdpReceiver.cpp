@@ -409,9 +409,35 @@ namespace net {
 
             if (ackInfo.valid && isLastChunk) {
                 SendRnvpAck(header, ackInfo, fromAddr);
+
+                if (ackInfo.missingChunkCount > 0) {
+                    consecutiveIncompleteFrames_++;
+
+                    const bool cooldownElapsed =
+                        lastKeyFrameRequestUs_ == 0 ||
+                        receiveTimeUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
+
+                    const bool shouldRequestKeyFrame =
+                        cooldownElapsed &&
+                        (ackInfo.missingChunkCount >= 2 ||
+                            consecutiveIncompleteFrames_ >= 2);
+
+                    if (shouldRequestKeyFrame) {
+                        SendRnvpControl(
+                            header,
+                            ControlCommand::RequestKeyFrame,
+                            ackInfo.frameId,
+                            fromAddr
+                        );
+
+                        lastKeyFrameRequestUs_ = receiveTimeUs;
+                    }
+                }
             }
 
             if (completed) {
+                consecutiveIncompleteFrames_ = 0;
+
                 PushCompletedFrameToJitterBuffer(
                     std::move(*completed),
                     receiveTimeUs
@@ -497,6 +523,8 @@ namespace net {
             << ack.receivedChunkCount
             << " missingChunks="
             << ack.missingChunkCount
+            << " missingList="
+            << ack.missingChunkIndices.size()
             << " latestSequence="
             << ack.latestSequence
             << "\n";
@@ -619,8 +647,9 @@ namespace net {
         ack.receivedChunkCount = ackInfo.receivedChunkCount;
         ack.missingChunkCount = ackInfo.missingChunkCount;
         ack.latestSequence = ackInfo.latestSequence;
+        ack.missingChunkIndices = ackInfo.missingChunkIndices;
 
-        constexpr size_t payloadSize = 16;
+        const size_t payloadSize = CalculateAckPayloadSize(ack);
 
         std::vector<uint8_t> packet(kRnvpHeaderV1Size + payloadSize);
 
@@ -657,6 +686,66 @@ namespace net {
         if (sent == SOCKET_ERROR) {
             std::cerr << "[UdpReceiver] SendRnvpAck failed: "
                 << WSAGetLastError() << "\n";
+        }
+    }
+
+    void UdpReceiver::SendRnvpControl(
+        const RnvpHeaderV1& dataHeader,
+        ControlCommand command,
+        uint32_t value,
+        const sockaddr_in& toAddr
+    ) {
+        if (socket_ == INVALID_SOCKET) {
+            return;
+        }
+
+        ControlPayload control{};
+        control.command = static_cast<uint8_t>(command);
+        control.value = value;
+
+        constexpr size_t payloadSize = 8;
+
+        std::vector<uint8_t> packet(kRnvpHeaderV1Size + payloadSize);
+
+        RnvpHeaderV1 header{};
+        header.magic = kRnvpMagic;
+        header.version = kRnvpVersion;
+        header.packetType = static_cast<uint8_t>(PacketType::Control);
+        header.headerSize = static_cast<uint16_t>(kRnvpHeaderV1Size);
+
+        header.sequence = NextRNVPSequence();
+        header.streamId = dataHeader.streamId;
+
+        header.frameId = dataHeader.frameId;
+        header.chunkIndex = 0;
+        header.chunkCount = 0;
+
+        header.sendTimeUs = NowMicroseconds();
+        header.payloadSize = static_cast<uint32_t>(payloadSize);
+        header.flags = PacketFlag_Control;
+        header.codecType = static_cast<uint8_t>(CodecType::Unknown);
+
+        EncodeRnvpHeaderV1(packet.data(), header);
+        EncodeControlPayload(packet.data() + kRnvpHeaderV1Size, control);
+
+        const int sent = sendto(
+            socket_,
+            reinterpret_cast<const char*>(packet.data()),
+            static_cast<int>(packet.size()),
+            0,
+            reinterpret_cast<const sockaddr*>(&toAddr),
+            sizeof(toAddr)
+        );
+
+        if (sent == SOCKET_ERROR) {
+            std::cerr << "[UdpReceiver] SendRnvpControl failed: "
+                << WSAGetLastError() << "\n";
+            return;
+        }
+
+        if (command == ControlCommand::RequestKeyFrame) {
+            std::cout << "[UdpReceiver] RequestKeyFrame sent. frameId="
+                << value << "\n";
         }
     }
 
