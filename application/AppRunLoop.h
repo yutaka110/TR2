@@ -31,6 +31,7 @@
 #include "vfx/TrailRenderer.h"
 #include "../network/NetworkStats.h"
 #include "../network/FrameReassembler.h"
+#include "../network/NetworkConditionSimulator.h"
 
 class AppFrameRenderer;
 class AppImGuiLayer;
@@ -78,6 +79,7 @@ public:
     void SetNetworkStatsProvider(std::function<net::NetworkStatsSnapshot()> provider);
     void SetJitterBufferTargetDelaySetter(std::function<void(uint32_t)> setter);
     void SetJitterBufferAutoModeSetter(std::function<void(bool)> setter);
+    void SetNetworkConditionSetter(std::function<void(const net::NetworkCondition&)> setter);
 
     void SetReceivedFrameProvider(std::function<bool(net::CompletedFrame&)> provider);
     void SetNetworkFrameDecodeNotifier(std::function<void()> notifier);
@@ -141,10 +143,12 @@ private:
     uint32_t lastTransientBufferStorageCount_ = 0;
     D3D12_RESOURCE_STATES sceneDepthState_ = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     float beamTime_ = 0.0f;
+    bool uiToggleKeyWasDown_ = false;
 
     std::function<net::NetworkStatsSnapshot()> networkStatsProvider_;
     std::function<void(uint32_t)> jitterBufferTargetDelaySetter_;
     std::function<void(bool)> jitterBufferAutoModeSetter_;
+    std::function<void(const net::NetworkCondition&)> networkConditionSetter_;
 
     std::function<bool(net::CompletedFrame&)> receivedFrameProvider_;
     std::function<void()> networkFrameDecodeNotifier_;

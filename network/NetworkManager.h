@@ -6,6 +6,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 #include "PacketProtocol.h"
+#include "NetworkConditionSimulator.h"
 
 #include <atomic>
 #include <cstdint>
@@ -62,6 +63,12 @@ public:
     double GetLastAckMissingRate() const;
     uint64_t GetAckCount() const;
 
+    void SetNetworkCondition(const net::NetworkCondition& condition);
+    net::NetworkCondition GetNetworkCondition() const;
+    net::NetworkSimulationStats GetNetworkSimulationStats() const;
+    void ResetNetworkSimulationStats();
+    void FlushNetworkSimulator();
+
 private:
     void RNVPControlReceiveLoop();
 
@@ -92,9 +99,23 @@ private:
     uint64_t NowMicroseconds() const;
     uint32_t NextRNVPSequence();
 
+    bool SendPacketRaw(
+        const uint8_t* packetData,
+        size_t packetSize,
+        const char* context
+    );
+
+    void SendPacketWithSimulation(
+        std::vector<uint8_t>&& packet,
+        const char* context
+    );
+
 private:
     SOCKET udpSocket_ = INVALID_SOCKET;
     sockaddr_in udpAddr_{};
+    mutable std::mutex udpSendMutex_;
+
+    net::NetworkConditionSimulator networkSimulator_;
 
     std::atomic<uint32_t> rnvpSequence_{ 1 };
 

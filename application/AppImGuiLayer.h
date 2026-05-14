@@ -12,6 +12,7 @@ class EffectRuntime;
 class PostProcessStack;
 namespace net {
     struct NetworkStatsSnapshot;
+    struct NetworkCondition;
 }
 class AppImGuiLayer {
 public:
@@ -39,6 +40,7 @@ public:
         const net::NetworkStatsSnapshot* networkStats,
         const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
         const std::function<void(bool)>& onJitterBufferAutoModeChanged,
+        const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged,
         const std::function<void()>& onAddParticle);
     void EndFrame();
 

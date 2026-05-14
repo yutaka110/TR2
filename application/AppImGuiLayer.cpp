@@ -14,10 +14,81 @@
 
 namespace {
 
-    void DrawNetworkMonitorWindow(const net::NetworkStatsSnapshot& stats,
+    void DrawNetworkMonitorContents(const net::NetworkStatsSnapshot& stats,
         const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
-        const std::function<void(bool)>& onJitterBufferAutoModeChanged) {
-        ImGui::Begin("Network Monitor");
+        const std::function<void(bool)>& onJitterBufferAutoModeChanged,
+        const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged) {
+        if (ImGui::CollapsingHeader("Network Condition Simulator", ImGuiTreeNodeFlags_DefaultOpen)) {
+            net::NetworkCondition condition = stats.networkCondition;
+            bool changed = false;
+
+            bool enabled = condition.enabled;
+            if (ImGui::Checkbox("Enable Simulation", &enabled)) {
+                condition.enabled = enabled;
+                changed = true;
+            }
+
+            float lossPercent = static_cast<float>(condition.lossRate * 100.0);
+            if (ImGui::SliderFloat("Loss (%)", &lossPercent, 0.0f, 50.0f, "%.1f")) {
+                condition.lossRate = lossPercent / 100.0;
+                changed = true;
+            }
+
+            float duplicatePercent = static_cast<float>(condition.duplicateRate * 100.0);
+            if (ImGui::SliderFloat("Duplicate (%)", &duplicatePercent, 0.0f, 50.0f, "%.1f")) {
+                condition.duplicateRate = duplicatePercent / 100.0;
+                changed = true;
+            }
+
+            float reorderPercent = static_cast<float>(condition.reorderRate * 100.0);
+            if (ImGui::SliderFloat("Reorder (%)", &reorderPercent, 0.0f, 50.0f, "%.1f")) {
+                condition.reorderRate = reorderPercent / 100.0;
+                changed = true;
+            }
+
+            int minDelayMs = static_cast<int>(condition.minDelayMs);
+            if (ImGui::SliderInt("Min Delay (ms)", &minDelayMs, 0, 500)) {
+                condition.minDelayMs = static_cast<uint32_t>((std::max)(0, minDelayMs));
+                changed = true;
+            }
+
+            int maxDelayMs = static_cast<int>(condition.maxDelayMs);
+            if (ImGui::SliderInt("Max Delay / Jitter (ms)", &maxDelayMs, 0, 500)) {
+                condition.maxDelayMs = static_cast<uint32_t>((std::max)(0, maxDelayMs));
+                changed = true;
+            }
+
+            int burstLossLength = static_cast<int>(condition.burstLossLength);
+            if (ImGui::SliderInt("Burst Loss Length", &burstLossLength, 0, 32)) {
+                condition.burstLossLength = static_cast<uint32_t>((std::max)(0, burstLossLength));
+                changed = true;
+            }
+
+            if (condition.maxDelayMs < condition.minDelayMs) {
+                condition.maxDelayMs = condition.minDelayMs;
+                changed = true;
+            }
+
+            if (changed && onNetworkConditionChanged) {
+                onNetworkConditionChanged(condition);
+            }
+
+            ImGui::Separator();
+
+            ImGui::Text("Submitted: %llu",
+                static_cast<unsigned long long>(stats.networkSimulation.submittedPackets));
+            ImGui::Text("Sent: %llu",
+                static_cast<unsigned long long>(stats.networkSimulation.sentPackets));
+            ImGui::Text("Dropped: %llu",
+                static_cast<unsigned long long>(stats.networkSimulation.droppedPackets));
+            ImGui::Text("Duplicated: %llu",
+                static_cast<unsigned long long>(stats.networkSimulation.duplicatedPackets));
+            ImGui::Text("Reordered: %llu",
+                static_cast<unsigned long long>(stats.networkSimulation.reorderedPackets));
+            ImGui::Text("Burst Events: %llu",
+                static_cast<unsigned long long>(stats.networkSimulation.burstLossEvents));
+            ImGui::Text("Pending: %u", stats.networkSimulation.pendingPackets);
+        }
 
         if (ImGui::CollapsingHeader("Packet", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Received Packets: %llu",
@@ -188,10 +259,6 @@ namespace {
             ImGui::Text("Bitrate: %.2f Mbps", stats.bitrateMbps);
             ImGui::Text("Throughput: %.2f Mbps", stats.throughputMbps);
         }
-
-
-
-        ImGui::End();
     }
 
 const char* EffectTypeLabel(EffectComponentType type) {
@@ -460,6 +527,47 @@ void DrawPreviewImage(const char* label, D3D12_GPU_DESCRIPTOR_HANDLE handle) {
         ImVec2(160.0f, 90.0f));
 }
 
+void DrawReceivedVideoBackgroundOverlay(
+    const AppRuntimeState& runtimeState,
+    D3D12_GPU_DESCRIPTOR_HANDLE handle) {
+    if (!runtimeState.showReceivedVideoInGame || handle.ptr == 0) {
+        return;
+    }
+
+    const float width = (std::max)(32.0f, runtimeState.transformSprite.scale.x);
+    const float height = (std::max)(18.0f, runtimeState.transformSprite.scale.y);
+    const ImVec2 center(
+        runtimeState.transformSprite.translate.x,
+        runtimeState.transformSprite.translate.y);
+    const ImVec2 half(width * 0.5f, height * 0.5f);
+    const ImVec2 topLeft(center.x - half.x, center.y - half.y);
+    const ImVec2 bottomRight(center.x + half.x, center.y + half.y);
+
+    ImGui::GetBackgroundDrawList()->AddImage(
+        reinterpret_cast<ImTextureID>(handle.ptr),
+        topLeft,
+        bottomRight);
+}
+
+void ApplyNetworkExperimentPreset(AppRuntimeState& runtimeState, EffectRuntime& effectRuntime) {
+    if (runtimeState.networkExperimentMode) {
+        runtimeState.enableVfxRenderPasses = false;
+        runtimeState.enablePostProcessPasses = false;
+        runtimeState.enableDebugPreviewPasses = false;
+        runtimeState.showReceivedVideoPreviewWindow = false;
+        runtimeState.showReceivedVideoInGame = true;
+        runtimeState.autoPlayVfxDemo = false;
+        runtimeState.enableParticles = false;
+        effectRuntime.ClearInstances();
+    } else {
+        runtimeState.enableVfxRenderPasses = true;
+        runtimeState.enablePostProcessPasses = true;
+        runtimeState.enableDebugPreviewPasses = true;
+        runtimeState.showReceivedVideoPreviewWindow = true;
+        runtimeState.showReceivedVideoInGame = true;
+    }
+}
+
 const char* AccessTypeShortLabel(ge3::graphics::RenderResourceAccessType type) {
     using ge3::graphics::RenderResourceAccessType;
     switch (type) {
@@ -597,91 +705,248 @@ void AppImGuiLayer::BuildUi(
     const net::NetworkStatsSnapshot* networkStats,
     const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
     const std::function<void(bool)>& onJitterBufferAutoModeChanged,
+    const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged,
     const std::function<void()>& onAddParticle) {
     if (!initialized_) {
         return;
     }
 
-    ImGui::ShowDemoWindow();
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    const float toolbarHeight = 28.0f;
+    const float gap = 8.0f;
+    const float leftPanelWidth = 360.0f;
+    const float rightPanelWidth = 430.0f;
+    const float bottomPanelHeight = 285.0f;
+    const ImGuiWindowFlags panelFlags =
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoCollapse;
 
-    ImGui::ColorEdit3("Light Color",
-        reinterpret_cast<float*>(&runtimeState.directionalLightData.color));
+    DrawReceivedVideoBackgroundOverlay(runtimeState, receivedVideoPreview);
 
-    ImGui::SliderFloat3(
-        "Light Direction",
-        reinterpret_cast<float*>(&runtimeState.directionalLightData.direction),
-        -1.0f,
-        1.0f);
-
-    ImGui::SliderFloat(
-        "Intensity",
-        &runtimeState.directionalLightData.intensity,
-        0.0f,
-        10.0f);
-    ImGui::Checkbox("Show Particles", &runtimeState.enableParticles);
-
-    ImGui::Begin("Material Settings");
-    ImGui::ColorEdit4("Material Color",
-        reinterpret_cast<float*>(&runtimeState.materialData.color));
-    ImGui::Checkbox("Enable Lighting", reinterpret_cast<bool*>(&runtimeState.materialData.enableLighting));
-    ImGui::SliderFloat("Shininess", &runtimeState.materialData.shininess, 1.0f, 64.0f);
-
-    ImGui::Text("Recommended: shininess 8-16");
-
-    ImGui::Text("Scale");
-    ImGui::DragFloat3("Scale", reinterpret_cast<float*>(&runtimeState.transform.scale),
-        0.01f, 0.01f, 10.0f);
-
-    ImGui::Text("Rotate");
-    ImGui::DragFloat3("Rotate", reinterpret_cast<float*>(&runtimeState.transform.rotate),
-        0.01f, -3.14f, 3.14f);
-
-    ImGui::Text("Translate");
-    ImGui::DragFloat3("Translate",
-        reinterpret_cast<float*>(&runtimeState.transform.translate), 0.01f,
-        -100.0f, 100.0f);
-
-    ImGui::DragFloat2("UVTranslate", &runtimeState.uvTransformSprite.translate.x, 0.01f,
-        -10.0f, 10.0f);
-    ImGui::DragFloat2("UVScale", &runtimeState.uvTransformSprite.scale.x, 0.01f, -10.0f,
-        10.0f);
-    ImGui::SliderAngle("UVRotate", &runtimeState.uvTransformSprite.rotate.z);
-
-    ImGui::DragFloat3(
-        "EmitterTranslate",
-        &runtimeState.emitter.transform.translate.x,
-        0.01f,
-        -100.0f,
-        100.0f);
-
-    ImGui::DragFloat3("Field Accel", &runtimeState.accelerationField.acceleration.x, 0.1f);
-    ImGui::DragFloat3("Field Min", &runtimeState.accelerationField.area.min.x, 0.1f);
-    ImGui::DragFloat3("Field Max", &runtimeState.accelerationField.area.max.x, 0.1f);
-
-    if (ImGui::Button("Add Particle (Emitter)") && onAddParticle) {
-        onAddParticle();
+    if (!runtimeState.showImGui) {
+        return;
     }
 
-    ImGui::DragFloat3("Point Pos", &runtimeState.pointLightData.position.x, 0.05f);
-    ImGui::DragFloat("Point Intensity", &runtimeState.pointLightData.intensity, 0.05f, 0.0f, 50.0f);
-    ImGui::DragFloat("Point Radius", &runtimeState.pointLightData.radius, 0.1f, 0.1f, 100.0f);
-    ImGui::DragFloat("Point Decay", &runtimeState.pointLightData.decay, 0.05f, 0.1f, 8.0f);
+    if (ImGui::BeginMainMenuBar()) {
+        ImGui::TextUnformatted("TR2 Realtime Streaming Lab");
+        ImGui::Separator();
+        ImGui::Checkbox("UI (F1)", &runtimeState.showImGui);
+        ImGui::Separator();
+        bool networkExperimentMode = runtimeState.networkExperimentMode;
+        if (ImGui::Checkbox("Network Experiment", &networkExperimentMode)) {
+            runtimeState.networkExperimentMode = networkExperimentMode;
+            ApplyNetworkExperimentPreset(runtimeState, effectRuntime);
+        }
+        ImGui::Separator();
+        ImGui::Checkbox("VFX", &runtimeState.enableVfxRenderPasses);
+        ImGui::Checkbox("PostFX", &runtimeState.enablePostProcessPasses);
+        ImGui::Checkbox("Debug", &runtimeState.enableDebugPreviewPasses);
+        ImGui::Checkbox("Video", &runtimeState.showReceivedVideoInGame);
+        ImGui::EndMainMenuBar();
+    }
 
+    ImGui::SetNextWindowPos(ImVec2(gap, toolbarHeight + gap), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(
+        ImVec2(leftPanelWidth, displaySize.y - toolbarHeight - gap * 2.0f),
+        ImGuiCond_Always);
+    if (ImGui::Begin("Network Lab", nullptr, panelFlags)) {
+        if (runtimeState.showReceivedVideoPreviewWindow) {
+            DrawPreviewImage("RNVP Received Texture", receivedVideoPreview);
+            ImGui::Separator();
+        }
+        if (networkStats) {
+            DrawNetworkMonitorContents(
+                *networkStats,
+                onJitterBufferTargetDelayChanged,
+                onJitterBufferAutoModeChanged,
+                onNetworkConditionChanged);
+        } else {
+            ImGui::TextDisabled("Network stats unavailable.");
+        }
+    }
     ImGui::End();
 
-    if (networkStats) {
-        DrawNetworkMonitorWindow(
-            *networkStats,
-            onJitterBufferTargetDelayChanged,
-            onJitterBufferAutoModeChanged
-        );
+    ImGui::SetNextWindowPos(
+        ImVec2(displaySize.x - rightPanelWidth - gap, toolbarHeight + gap),
+        ImGuiCond_Always);
+    ImGui::SetNextWindowSize(
+        ImVec2(rightPanelWidth, 360.0f),
+        ImGuiCond_Always);
+    if (ImGui::Begin("Inspector", nullptr, panelFlags)) {
+        if (ImGui::BeginTabBar("InspectorTabs")) {
+            if (ImGui::BeginTabItem("Scene")) {
+                ImGui::ColorEdit4("Material Color",
+                    reinterpret_cast<float*>(&runtimeState.materialData.color));
+                ImGui::Checkbox("Enable Lighting", reinterpret_cast<bool*>(&runtimeState.materialData.enableLighting));
+                ImGui::SliderFloat("Shininess", &runtimeState.materialData.shininess, 1.0f, 64.0f);
+                ImGui::Separator();
+                ImGui::DragFloat3("Scale", reinterpret_cast<float*>(&runtimeState.transform.scale), 0.01f, 0.01f, 10.0f);
+                ImGui::DragFloat3("Rotate", reinterpret_cast<float*>(&runtimeState.transform.rotate), 0.01f, -3.14f, 3.14f);
+                ImGui::DragFloat3("Translate", reinterpret_cast<float*>(&runtimeState.transform.translate), 0.01f, -100.0f, 100.0f);
+                ImGui::Separator();
+                ImGui::ColorEdit3("Light Color", reinterpret_cast<float*>(&runtimeState.directionalLightData.color));
+                ImGui::SliderFloat3("Light Direction", reinterpret_cast<float*>(&runtimeState.directionalLightData.direction), -1.0f, 1.0f);
+                ImGui::SliderFloat("Intensity", &runtimeState.directionalLightData.intensity, 0.0f, 10.0f);
+                ImGui::DragFloat3("Point Pos", &runtimeState.pointLightData.position.x, 0.05f);
+                ImGui::DragFloat("Point Intensity", &runtimeState.pointLightData.intensity, 0.05f, 0.0f, 50.0f);
+                ImGui::DragFloat("Point Radius", &runtimeState.pointLightData.radius, 0.1f, 0.1f, 100.0f);
+                ImGui::DragFloat("Point Decay", &runtimeState.pointLightData.decay, 0.05f, 0.1f, 8.0f);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Video")) {
+                ImGui::Checkbox("Show RNVP Video In Game", &runtimeState.showReceivedVideoInGame);
+                ImGui::Checkbox("Preview Window", &runtimeState.showReceivedVideoPreviewWindow);
+                ImGui::DragFloat("Video Scale X", &runtimeState.transformSprite.scale.x, 1.0f, 32.0f, 1280.0f);
+                ImGui::DragFloat("Video Scale Y", &runtimeState.transformSprite.scale.y, 1.0f, 32.0f, 720.0f);
+                ImGui::DragFloat("Video Pos X", &runtimeState.transformSprite.translate.x, 1.0f, -1000.0f, 2000.0f);
+                ImGui::DragFloat("Video Pos Y", &runtimeState.transformSprite.translate.y, 1.0f, -1000.0f, 2000.0f);
+                ImGui::Separator();
+                ImGui::DragFloat2("UVTranslate", &runtimeState.uvTransformSprite.translate.x, 0.01f, -10.0f, 10.0f);
+                ImGui::DragFloat2("UVScale", &runtimeState.uvTransformSprite.scale.x, 0.01f, -10.0f, 10.0f);
+                ImGui::SliderAngle("UVRotate", &runtimeState.uvTransformSprite.rotate.z);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Emitter")) {
+                ImGui::Checkbox("Show Particles", &runtimeState.enableParticles);
+                ImGui::DragFloat3("EmitterTranslate", &runtimeState.emitter.transform.translate.x, 0.01f, -100.0f, 100.0f);
+                ImGui::DragFloat3("Field Accel", &runtimeState.accelerationField.acceleration.x, 0.1f);
+                ImGui::DragFloat3("Field Min", &runtimeState.accelerationField.area.min.x, 0.1f);
+                ImGui::DragFloat3("Field Max", &runtimeState.accelerationField.area.max.x, 0.1f);
+                if (ImGui::Button("Add Particle (Emitter)") && onAddParticle) {
+                    onAddParticle();
+                }
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::End();
 
-        ImGui::Begin("Received Video Preview");
-        DrawPreviewImage("RNVP Received Texture", receivedVideoPreview);
-        ImGui::End();
+    const float profilerX = leftPanelWidth + gap * 2.0f;
+    const float profilerWidth =
+        (std::max)(320.0f, displaySize.x - leftPanelWidth - rightPanelWidth - gap * 4.0f);
+    const float profilerY = displaySize.y - bottomPanelHeight - gap;
+    ImGui::SetNextWindowPos(ImVec2(profilerX, profilerY), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(profilerWidth, bottomPanelHeight), ImGuiCond_Always);
+    if (ImGui::Begin("Profiler", nullptr, panelFlags)) {
+        int executedPassCount = 0;
+        for (const auto& pass : renderPassDebugInfo) {
+            if (pass.executed) {
+                ++executedPassCount;
+            }
+        }
+        if (renderGraphError.empty()) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "RenderGraph: OK");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "RenderGraph: %s", renderGraphError.c_str());
+        }
+        ImGui::SameLine();
+        ImGui::Text("Passes %d/%d  RT %u/%u  Buffers %u/%u",
+            executedPassCount,
+            static_cast<int>(renderPassDebugInfo.size()),
+            transientTargetCount,
+            transientTargetStorageCount,
+            transientBufferCount,
+            transientBufferStorageCount);
+
+        if (ImGui::BeginTable("ProfilerPassActivity", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0.0f, 165.0f))) {
+            ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+            ImGui::TableSetupColumn("Layer", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+            ImGui::TableSetupColumn("Pass");
+            ImGui::TableSetupColumn("Targets");
+            ImGui::TableSetupColumn("Reason");
+            ImGui::TableHeadersRow();
+            for (const auto& pass : renderPassDebugInfo) {
+                const std::string targets = BuildPassOutputsSummary(pass);
+                const std::string tooltip = BuildPassTooltip(pass);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextColored(
+                    pass.executed ? ImVec4(0.45f, 1.0f, 0.45f, 1.0f) : ImVec4(0.65f, 0.65f, 0.65f, 1.0f),
+                    pass.executed ? "ON" : "OFF");
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(ge3::graphics::ToString(pass.layer));
+                ImGui::TableNextColumn();
+                ImGui::Text("%s%s", pass.executed ? "" : "(culled) ", pass.name.c_str());
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", tooltip.c_str());
+                }
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(targets.empty() ? "-" : targets.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(pass.reason.empty() ? "-" : pass.reason.c_str());
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::End();
+
+    ImGui::SetNextWindowPos(
+        ImVec2(displaySize.x - rightPanelWidth - gap, toolbarHeight + 376.0f),
+        ImGuiCond_Always);
+    ImGui::SetNextWindowSize(
+        ImVec2(rightPanelWidth, displaySize.y - toolbarHeight - 384.0f - gap),
+        ImGuiCond_Always);
+    ImGui::Begin("VFX Inspector", nullptr, panelFlags);
+    if (ImGui::CollapsingHeader("Render Load Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool networkExperimentMode = runtimeState.networkExperimentMode;
+        if (ImGui::Checkbox("Network Experiment Mode", &networkExperimentMode)) {
+            runtimeState.networkExperimentMode = networkExperimentMode;
+            if (runtimeState.networkExperimentMode) {
+                runtimeState.enableVfxRenderPasses = false;
+                runtimeState.enablePostProcessPasses = false;
+                runtimeState.enableDebugPreviewPasses = false;
+                runtimeState.showReceivedVideoPreviewWindow = false;
+                runtimeState.showReceivedVideoInGame = true;
+                runtimeState.autoPlayVfxDemo = false;
+                runtimeState.enableParticles = false;
+                effectRuntime.ClearInstances();
+            } else {
+                runtimeState.enableVfxRenderPasses = true;
+                runtimeState.enablePostProcessPasses = true;
+                runtimeState.enableDebugPreviewPasses = true;
+                runtimeState.showReceivedVideoPreviewWindow = true;
+                runtimeState.showReceivedVideoInGame = true;
+            }
+        }
+
+        bool enableVfx = runtimeState.enableVfxRenderPasses;
+        if (ImGui::Checkbox("VFX RenderGraph Passes", &enableVfx)) {
+            runtimeState.enableVfxRenderPasses = enableVfx;
+            runtimeState.networkExperimentMode = false;
+            if (!runtimeState.enableVfxRenderPasses) {
+                runtimeState.autoPlayVfxDemo = false;
+                runtimeState.enableParticles = false;
+                effectRuntime.ClearInstances();
+            }
+        }
+
+        bool enablePostProcess = runtimeState.enablePostProcessPasses;
+        if (ImGui::Checkbox("PostProcess Passes", &enablePostProcess)) {
+            runtimeState.enablePostProcessPasses = enablePostProcess;
+            runtimeState.networkExperimentMode = false;
+        }
+
+        bool enableDebugPreview = runtimeState.enableDebugPreviewPasses;
+        if (ImGui::Checkbox("Debug Preview Passes", &enableDebugPreview)) {
+            runtimeState.enableDebugPreviewPasses = enableDebugPreview;
+            runtimeState.networkExperimentMode = false;
+        }
+
+        bool showPreviewWindow = runtimeState.showReceivedVideoPreviewWindow;
+        if (ImGui::Checkbox("Received Video Preview Window", &showPreviewWindow)) {
+            runtimeState.showReceivedVideoPreviewWindow = showPreviewWindow;
+            runtimeState.networkExperimentMode = false;
+        }
+
+        bool showReceivedVideoInGame = runtimeState.showReceivedVideoInGame;
+        if (ImGui::Checkbox("Received Video In Game", &showReceivedVideoInGame)) {
+            runtimeState.showReceivedVideoInGame = showReceivedVideoInGame;
+            runtimeState.networkExperimentMode = false;
+        }
     }
 
-    ImGui::Begin("VFX Engine");
     bool runtimePaused = effectRuntime.IsPaused();
     if (ImGui::Checkbox("Pause Effect Runtime", &runtimePaused)) {
         effectRuntime.SetPaused(runtimePaused);
@@ -690,6 +955,10 @@ void AppImGuiLayer::BuildUi(
     if (ImGui::SliderFloat("Effect Runtime Speed", &runtimeSpeed, 0.0f, 4.0f)) {
         effectRuntime.SetSpeedMultiplier(runtimeSpeed);
     }
+    if (!runtimeState.enableVfxRenderPasses && runtimeState.autoPlayVfxDemo) {
+        runtimeState.autoPlayVfxDemo = false;
+    }
+    ImGui::BeginDisabled(!runtimeState.enableVfxRenderPasses);
     ImGui::Checkbox("Auto Play VFX Demo", &runtimeState.autoPlayVfxDemo);
     ImGui::SliderFloat("Demo Spawn Interval", &runtimeState.autoPlayVfxInterval, 0.1f, 2.0f, "%.2f");
     ImGui::SliderFloat("Demo Spawn Radius", &runtimeState.autoPlayVfxRadius, 0.0f, 8.0f, "%.2f");
@@ -700,6 +969,7 @@ void AppImGuiLayer::BuildUi(
             {1.0f, 0.75f, 0.35f, 1.0f},
             {1.0f, 1.0f, 1.0f});
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Clear Effects")) {
         effectRuntime.ClearInstances();
@@ -760,7 +1030,7 @@ void AppImGuiLayer::BuildUi(
             static_cast<unsigned int>(runtimeFrame.distortionQueue.size()));
     }
 
-    if (ImGui::CollapsingHeader("RenderGraph", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("RenderGraph")) {
         int executedPassCount = 0;
         for (const auto& pass : renderPassDebugInfo) {
             if (pass.executed) {
@@ -815,7 +1085,7 @@ void AppImGuiLayer::BuildUi(
         ImGui::EndChild();
     }
 
-    if (ImGui::CollapsingHeader("Render Targets", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Render Targets")) {
         DrawPreviewImage("SceneColor", sceneColorPreview);
         DrawPreviewImage("VfxAccumulation", vfxAccumulationPreview);
         DrawPreviewImage("PostColor", postColorPreview);
@@ -833,7 +1103,7 @@ void AppImGuiLayer::BuildUi(
         ImGui::SliderFloat("Emissive Preview Boost", &runtimeState.debugEmissivePreviewBoost, 0.1f, 8.0f, "%.2f");
     }
 
-    if (ImGui::CollapsingHeader("Effect Instances", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Effect Instances")) {
         std::vector<EffectInstance*> instances;
         for (EffectInstance& instance : effectRuntime.MutableInstances()) {
             if (instance.asset != nullptr) {
@@ -933,7 +1203,7 @@ void AppImGuiLayer::BuildUi(
         }
     }
 
-    if (ImGui::CollapsingHeader("PostProcess", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("PostProcess")) {
         for (PostProcessPass& pass : postProcessStack.MutablePasses()) {
             ImGui::PushID(pass.name.c_str());
             ImGui::Checkbox(pass.name.c_str(), &pass.enabled);

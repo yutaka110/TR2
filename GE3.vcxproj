@@ -26,20 +26,20 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Development|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -239,6 +239,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="network\MfH264Receiver.cpp" />
     <ClCompile Include="network\MfH264Sender.cpp" />
     <ClCompile Include="network\NalUtils.cpp" />
+    <ClCompile Include="network\NetworkConditionSimulator.cpp" />
     <ClCompile Include="network\NetworkManager.cpp" />
     <ClCompile Include="network\NetworkStats.cpp" />
     <ClCompile Include="network\UdpByteStream.cpp" />
@@ -432,6 +433,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="network\MfH264Receiver.h" />
     <ClInclude Include="network\MfH264Sender.h" />
     <ClInclude Include="network\NalUtils.h" />
+    <ClInclude Include="network\NetworkConditionSimulator.h" />
     <ClInclude Include="network\NetworkManager.h" />
     <ClInclude Include="network\NetworkStats.h" />
     <ClInclude Include="network\PacketProtocol.h" />

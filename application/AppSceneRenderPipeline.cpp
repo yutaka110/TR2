@@ -30,7 +30,7 @@ void AppSceneRenderPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
         0,
         D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
-    ctx.renderGraph->AddPass({
+    /*ctx.renderGraph->AddPass({
         "Geometry.Sprite",
         ge3::graphics::RenderPassLayer::Geometry,
         {
@@ -60,7 +60,7 @@ void AppSceneRenderPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
             } else {
                 OutputDebugStringA("[AppSceneRenderPipeline] Sprite pass skipped because pipeline or resources are not ready.\n");
             }
-        }});
+        }});*/
 
     ctx.renderGraph->AddPass({
         "Geometry.MainModel",
@@ -71,6 +71,13 @@ void AppSceneRenderPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
         },
         "SceneDepth",
         [ctx](ge3::graphics::RenderPassContext& passContext) {
+            if (ctx.srvDescriptorHeap) {
+                ID3D12DescriptorHeap* descriptorHeaps[] = {
+                    ctx.srvDescriptorHeap
+                };
+                passContext.commandList->SetDescriptorHeaps(1, descriptorHeaps);
+            }
+
             ctx.frameRenderer->PrepareMainPass(
                 passContext.commandList,
                 ctx.runtimeState->viewport,
@@ -78,15 +85,19 @@ void AppSceneRenderPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
                 ctx.appPipelines->GetMainRootSignature(),
                 ctx.appPipelines->GetMainPSO());
 
+            const D3D12_GPU_DESCRIPTOR_HANDLE receivedTextureHandle =
+                ctx.runtimeState->showReceivedVideoInGame &&
+                ctx.receivedTextureHandle.ptr != 0
+                ? ctx.receivedTextureHandle
+                : ctx.scene->textureSrvHandleGPU2;
+
             ctx.frameRenderer->DrawMainModel(
                 passContext.commandList,
                 ctx.scene->modelVBV,
                 ctx.scene->materialResource->GetGPUVirtualAddress(),
                 ctx.scene->sphere.cbvResource->GetGPUVirtualAddress(),
                 ctx.scene->textureSrvHandleGPU2,
-                ctx.receivedTextureHandle.ptr != 0
-                ? ctx.receivedTextureHandle
-                : ctx.scene->textureSrvHandleGPU2,
+                receivedTextureHandle,
                 ctx.scene->textureSrvHandleGPU2,
                 ctx.scene->directionalLightResource->GetGPUVirtualAddress(),
                 ctx.scene->cameraResource->GetGPUVirtualAddress(),
@@ -94,4 +105,5 @@ void AppSceneRenderPipeline::RegisterPasses(const AppFrameGraphBuildContext& ctx
                 ctx.scene->spotLightResource->GetGPUVirtualAddress(),
                 ctx.scene->modelVertexCount);
         }});
+
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "NetworkConditionSimulator.h"
+
 #include <cstdint>
 #include <mutex>
 
@@ -95,6 +97,12 @@ namespace net {
 
 		bool jitterBufferAutoModeEnabled = false;
 		uint32_t jitterBufferAutoCalculatedDelayMs = 0;
+
+		// ============================================================
+		// Network Condition Simulator
+		// ============================================================
+		NetworkCondition networkCondition{};
+		NetworkSimulationStats networkSimulation{};
 
 		// ============================================================
 		// Bandwidth
