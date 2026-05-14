@@ -9,10 +9,336 @@
 #include "../../externals/imgui/imgui_impl_win32.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <sstream>
 #include <vector>
 
 namespace {
+    constexpr size_t kEvaluationScenarioCount = 5;
+
+    struct EvaluationScenarioPreset {
+        const char* name = "";
+        net::NetworkCondition condition{};
+    };
+
+    struct EvaluationScenarioMetrics {
+        uint64_t completedFrames = 0;
+        uint64_t droppedFrames = 0;
+        uint64_t jitterBufferDroppedFrames = 0;
+
+        double fpsSum = 0.0;
+        double latencySumMs = 0.0;
+        double jitterSumMs = 0.0;
+        uint32_t samples = 0;
+
+        std::vector<float> fpsHistory;
+        std::vector<float> latencyHistory;
+        std::vector<float> completionHistory;
+    };
+
+    struct EvaluationGraphState {
+        std::array<EvaluationScenarioMetrics, kEvaluationScenarioCount> metrics{};
+        net::NetworkStatsSnapshot lastStats{};
+        bool hasLastStats = false;
+        double lastSampleTime = 0.0;
+    };
+
+    EvaluationGraphState g_evaluationGraphState{};
+
+    net::NetworkCondition MakeNetworkCondition(
+        bool enabled,
+        double lossRate,
+        uint32_t minDelayMs,
+        uint32_t maxDelayMs,
+        uint32_t burstLossLength,
+        double duplicateRate = 0.0,
+        double reorderRate = 0.0) {
+        net::NetworkCondition condition{};
+        condition.enabled = enabled;
+        condition.lossRate = lossRate;
+        condition.duplicateRate = duplicateRate;
+        condition.reorderRate = reorderRate;
+        condition.minDelayMs = minDelayMs;
+        condition.maxDelayMs = maxDelayMs;
+        condition.burstLossLength = burstLossLength;
+        return condition;
+    }
+
+    const std::array<EvaluationScenarioPreset, kEvaluationScenarioCount>& GetEvaluationPresets() {
+        static const std::array<EvaluationScenarioPreset, kEvaluationScenarioCount> presets{ {
+            { "Baseline", MakeNetworkCondition(false, 0.0, 0, 0, 0) },
+            { "10% loss", MakeNetworkCondition(true, 0.10, 0, 0, 0) },
+            { "50ms jitter", MakeNetworkCondition(true, 0.0, 0, 50, 0) },
+            { "100ms delay", MakeNetworkCondition(true, 0.0, 100, 100, 0) },
+            { "Burst loss", MakeNetworkCondition(true, 0.03, 0, 0, 8) },
+        } };
+        return presets;
+    }
+
+    bool NearlyEqual(double lhs, double rhs, double epsilon = 0.0001) {
+        return std::fabs(lhs - rhs) <= epsilon;
+    }
+
+    bool MatchesEvaluationCondition(
+        const net::NetworkCondition& lhs,
+        const net::NetworkCondition& rhs) {
+        if (lhs.enabled != rhs.enabled) {
+            return false;
+        }
+
+        if (!lhs.enabled && !rhs.enabled) {
+            return true;
+        }
+
+        return NearlyEqual(lhs.lossRate, rhs.lossRate) &&
+            NearlyEqual(lhs.duplicateRate, rhs.duplicateRate) &&
+            NearlyEqual(lhs.reorderRate, rhs.reorderRate) &&
+            lhs.minDelayMs == rhs.minDelayMs &&
+            lhs.maxDelayMs == rhs.maxDelayMs &&
+            lhs.burstLossLength == rhs.burstLossLength;
+    }
+
+    int FindEvaluationScenarioIndex(const net::NetworkCondition& condition) {
+        const auto& presets = GetEvaluationPresets();
+        for (size_t i = 0; i < presets.size(); ++i) {
+            if (MatchesEvaluationCondition(condition, presets[i].condition)) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    uint64_t DeltaCounter(uint64_t current, uint64_t previous) {
+        return current >= previous ? current - previous : 0;
+    }
+
+    void PushHistoryValue(std::vector<float>& values, float value) {
+        constexpr size_t kMaxHistoryValues = 120;
+        values.push_back(value);
+        if (values.size() > kMaxHistoryValues) {
+            values.erase(values.begin());
+        }
+    }
+
+    double AverageMetric(double sum, uint32_t samples) {
+        return samples > 0 ? sum / static_cast<double>(samples) : 0.0;
+    }
+
+    double FrameCompletionRate(const EvaluationScenarioMetrics& metrics) {
+        const uint64_t totalFrames = metrics.completedFrames + metrics.droppedFrames;
+        if (totalFrames == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(metrics.completedFrames) /
+            static_cast<double>(totalFrames);
+    }
+
+    void ResetEvaluationGraph() {
+        g_evaluationGraphState = EvaluationGraphState{};
+    }
+
+    void UpdateEvaluationGraphSamples(const net::NetworkStatsSnapshot& stats) {
+        const double now = ImGui::GetTime();
+        if (g_evaluationGraphState.hasLastStats &&
+            now - g_evaluationGraphState.lastSampleTime < 1.0) {
+            return;
+        }
+
+        const int scenarioIndex = FindEvaluationScenarioIndex(stats.networkCondition);
+        if (scenarioIndex >= 0) {
+            EvaluationScenarioMetrics& metrics =
+                g_evaluationGraphState.metrics[static_cast<size_t>(scenarioIndex)];
+
+            if (g_evaluationGraphState.hasLastStats) {
+                metrics.completedFrames += DeltaCounter(
+                    stats.completedFrames,
+                    g_evaluationGraphState.lastStats.completedFrames);
+                metrics.droppedFrames += DeltaCounter(
+                    stats.droppedFrames,
+                    g_evaluationGraphState.lastStats.droppedFrames);
+                metrics.jitterBufferDroppedFrames += DeltaCounter(
+                    stats.jitterBufferDroppedFrames,
+                    g_evaluationGraphState.lastStats.jitterBufferDroppedFrames);
+            }
+
+            const double fps =
+                stats.displayFps > 0.0 ? stats.displayFps : stats.receiveFps;
+            metrics.fpsSum += fps;
+            metrics.latencySumMs += stats.currentLatencyMs;
+            metrics.jitterSumMs += stats.currentJitterMs;
+            metrics.samples++;
+
+            PushHistoryValue(metrics.fpsHistory, static_cast<float>(fps));
+            PushHistoryValue(metrics.latencyHistory, static_cast<float>(stats.currentLatencyMs));
+            PushHistoryValue(
+                metrics.completionHistory,
+                static_cast<float>(FrameCompletionRate(metrics) * 100.0));
+        }
+
+        g_evaluationGraphState.lastStats = stats;
+        g_evaluationGraphState.hasLastStats = true;
+        g_evaluationGraphState.lastSampleTime = now;
+    }
+
+    void DrawMetricBar(const char* label, float value, float maxValue, const char* format) {
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(115.0f);
+        ImGui::ProgressBar(
+            maxValue > 0.0f ? (std::min)(1.0f, value / maxValue) : 0.0f,
+            ImVec2(135.0f, 0.0f),
+            "");
+        ImGui::SameLine();
+        ImGui::Text(format, value);
+    }
+
+    void DrawEvaluationGraphBaseline(
+        const net::NetworkStatsSnapshot& stats,
+        const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged) {
+        UpdateEvaluationGraphSamples(stats);
+
+        if (!ImGui::CollapsingHeader("Evaluation Graph Baseline", ImGuiTreeNodeFlags_DefaultOpen)) {
+            return;
+        }
+
+        const auto& presets = GetEvaluationPresets();
+        const int currentScenarioIndex = FindEvaluationScenarioIndex(stats.networkCondition);
+
+        ImGui::Text("Current: %s",
+            currentScenarioIndex >= 0
+            ? presets[static_cast<size_t>(currentScenarioIndex)].name
+            : "Custom condition");
+
+        for (size_t i = 0; i < presets.size(); ++i) {
+            if (i > 0) {
+                ImGui::SameLine();
+            }
+
+            if (ImGui::Button(presets[i].name)) {
+                if (onNetworkConditionChanged) {
+                    onNetworkConditionChanged(presets[i].condition);
+                }
+                g_evaluationGraphState.lastStats = stats;
+                g_evaluationGraphState.hasLastStats = true;
+                g_evaluationGraphState.lastSampleTime = ImGui::GetTime();
+            }
+        }
+
+        if (ImGui::Button("Reset Evaluation")) {
+            ResetEvaluationGraph();
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::BeginTable(
+            "EvaluationGraphTable",
+            6,
+            ImGuiTableFlags_Borders |
+            ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Condition");
+            ImGui::TableSetupColumn("Samples");
+            ImGui::TableSetupColumn("FPS");
+            ImGui::TableSetupColumn("Latency");
+            ImGui::TableSetupColumn("JB Drop");
+            ImGui::TableSetupColumn("Complete");
+            ImGui::TableHeadersRow();
+
+            for (size_t i = 0; i < presets.size(); ++i) {
+                const EvaluationScenarioMetrics& metrics = g_evaluationGraphState.metrics[i];
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(presets[i].name);
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", metrics.samples);
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%.1f", AverageMetric(metrics.fpsSum, metrics.samples));
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%.1f ms", AverageMetric(metrics.latencySumMs, metrics.samples));
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%llu",
+                    static_cast<unsigned long long>(metrics.jitterBufferDroppedFrames));
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%.1f%%", FrameCompletionRate(metrics) * 100.0);
+            }
+
+            ImGui::EndTable();
+        }
+
+        ImGui::Separator();
+
+        const char* previewName =
+            currentScenarioIndex >= 0
+            ? presets[static_cast<size_t>(currentScenarioIndex)].name
+            : "Custom condition";
+        const EvaluationScenarioMetrics* currentMetrics =
+            currentScenarioIndex >= 0
+            ? &g_evaluationGraphState.metrics[static_cast<size_t>(currentScenarioIndex)]
+            : nullptr;
+
+        ImGui::Text("Live Graph: %s", previewName);
+        if (currentMetrics && !currentMetrics->fpsHistory.empty()) {
+            ImGui::PlotLines(
+                "FPS",
+                currentMetrics->fpsHistory.data(),
+                static_cast<int>(currentMetrics->fpsHistory.size()),
+                0,
+                nullptr,
+                0.0f,
+                60.0f,
+                ImVec2(0.0f, 42.0f));
+            ImGui::PlotLines(
+                "Latency",
+                currentMetrics->latencyHistory.data(),
+                static_cast<int>(currentMetrics->latencyHistory.size()),
+                0,
+                nullptr,
+                0.0f,
+                200.0f,
+                ImVec2(0.0f, 42.0f));
+            ImGui::PlotLines(
+                "Complete",
+                currentMetrics->completionHistory.data(),
+                static_cast<int>(currentMetrics->completionHistory.size()),
+                0,
+                nullptr,
+                0.0f,
+                100.0f,
+                ImVec2(0.0f, 42.0f));
+        } else {
+            ImGui::TextDisabled("Select a preset and let it run for a few seconds.");
+        }
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Comparison Bars");
+        for (size_t i = 0; i < presets.size(); ++i) {
+            const EvaluationScenarioMetrics& metrics = g_evaluationGraphState.metrics[i];
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::TextUnformatted(presets[i].name);
+            DrawMetricBar(
+                "FPS",
+                static_cast<float>(AverageMetric(metrics.fpsSum, metrics.samples)),
+                60.0f,
+                "%.1f");
+            DrawMetricBar(
+                "Latency",
+                static_cast<float>(AverageMetric(metrics.latencySumMs, metrics.samples)),
+                200.0f,
+                "%.1f ms");
+            DrawMetricBar(
+                "Complete",
+                static_cast<float>(FrameCompletionRate(metrics) * 100.0),
+                100.0f,
+                "%.1f%%");
+            ImGui::PopID();
+        }
+    }
 
     void DrawNetworkMonitorContents(const net::NetworkStatsSnapshot& stats,
         const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
@@ -89,6 +415,8 @@ namespace {
                 static_cast<unsigned long long>(stats.networkSimulation.burstLossEvents));
             ImGui::Text("Pending: %u", stats.networkSimulation.pendingPackets);
         }
+
+        DrawEvaluationGraphBaseline(stats, onNetworkConditionChanged);
 
         if (ImGui::CollapsingHeader("Packet", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Received Packets: %llu",
