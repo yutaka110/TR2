@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace net {
@@ -23,6 +24,10 @@ namespace net {
         bool bitrateChanged = false;
         bool resolutionChanged = false;
 
+        size_t lastRawFrameBytes = 0;
+        size_t lastEncodedFrameBytes = 0;
+        double lastCompressionRatio = 0.0;
+
         double lastAckMissingRate = 0.0;
         double lastRttMs = 0.0;
         double lastLatencyMs = 0.0;
@@ -37,6 +42,8 @@ namespace net {
         void Update(const AdaptiveStreamingInput& input, double deltaTimeSec);
 
         AdaptiveStreamingState GetState() const;
+
+        void ReportEncodedFrame(size_t rawBytes, size_t encodedBytes);
 
         void SetEnabled(bool enabled);
         bool IsEnabled() const;

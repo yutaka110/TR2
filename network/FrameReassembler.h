@@ -33,6 +33,7 @@ namespace net {
 
         uint32_t receivedChunkCount = 0;
         uint32_t missingChunkCount = 0;
+        std::vector<uint16_t> missingChunkIndices;
     };
 
     class FrameReassembler {

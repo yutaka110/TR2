@@ -43,6 +43,8 @@
 #include <mfobjects.h>
 #include <mftransform.h>
 #include <comdef.h>
+#include <propidl.h>
+#include <wincodec.h>
 #include <map> 
 
 #include"../media/TextureHelper.h"
@@ -189,6 +191,79 @@ namespace {
 		);
 
 		return payload;
+	}
+
+	std::vector<uint8_t> EncodeJpegFrame(
+		const std::vector<uint8_t>& rgba,
+		uint32_t width,
+		uint32_t height,
+		int quality) {
+		const size_t imageBytes =
+			static_cast<size_t>(width) *
+			static_cast<size_t>(height) *
+			4u;
+
+		if (width == 0 || height == 0 || rgba.size() < imageBytes) {
+			return {};
+		}
+
+		DirectX::Image image{};
+		image.width = width;
+		image.height = height;
+		image.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		image.rowPitch = static_cast<size_t>(width) * 4u;
+		image.slicePitch = image.rowPitch * static_cast<size_t>(height);
+		image.pixels = const_cast<uint8_t*>(rgba.data());
+
+		DirectX::Blob blob;
+		const float imageQuality =
+			static_cast<float>(std::clamp(quality, 1, 100)) / 100.0f;
+
+		auto setJpegQuality =
+			[imageQuality](IPropertyBag2* propertyBag) {
+				if (!propertyBag) {
+					return;
+				}
+
+				PROPBAG2 option{};
+				option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+
+				VARIANT value{};
+				VariantInit(&value);
+				value.vt = VT_R4;
+				value.fltVal = imageQuality;
+
+				propertyBag->Write(1, &option, &value);
+				VariantClear(&value);
+			};
+
+		const HRESULT hr = DirectX::SaveToWICMemory(
+			image,
+			DirectX::WIC_FLAGS_NONE,
+			DirectX::GetWICCodec(DirectX::WIC_CODEC_JPEG),
+			blob,
+			&GUID_WICPixelFormat24bppBGR,
+			setJpegQuality
+		);
+
+		if (FAILED(hr) ||
+			blob.GetBufferPointer() == nullptr ||
+			blob.GetBufferSize() == 0) {
+			static uint32_t encodeFailLogCount = 0;
+			if (encodeFailLogCount < 10) {
+				OutputDebugStringA("[AppMain] JPEG encode failed; falling back to Raw.\n");
+				encodeFailLogCount++;
+			}
+			return {};
+		}
+
+		const uint8_t* bytes =
+			static_cast<const uint8_t*>(blob.GetBufferPointer());
+
+		return std::vector<uint8_t>(
+			bytes,
+			bytes + blob.GetBufferSize()
+		);
 	}
 }
 
@@ -1257,6 +1332,11 @@ int AppMain::Run() {
 				stats.lastAckReceivedChunks = sender->GetLastAckReceivedChunks();
 				stats.lastAckMissingChunks = sender->GetLastAckMissingChunks();
 				stats.lastAckMissingRate = sender->GetLastAckMissingRate();
+				stats.ackRetransmittedFrames = sender->GetAckRetransmittedFrameCount();
+				stats.ackRetransmittedChunks = sender->GetAckRetransmittedChunkCount();
+				stats.ackStaleDroppedFrames = sender->GetAckStaleDroppedFrameCount();
+				stats.ackKeyFrameRequests = sender->GetAckKeyFrameRequestCount();
+				stats.ackKeyFramePending = sender->IsKeyFrameRequestPending();
 
 				stats.currentRttMs = sender->GetLastRttMs();
 				stats.averageRttMs = sender->GetAverageRttMs();
@@ -1292,6 +1372,15 @@ int AppMain::Run() {
 
 				stats.adaptiveTargetHeight =
 					adaptiveState.targetHeight;
+
+				stats.adaptiveRawFrameBytes =
+					static_cast<uint64_t>(adaptiveState.lastRawFrameBytes);
+
+				stats.adaptiveEncodedFrameBytes =
+					static_cast<uint64_t>(adaptiveState.lastEncodedFrameBytes);
+
+				stats.adaptiveCompressionRatio =
+					adaptiveState.lastCompressionRatio;
 
 				stats.adaptiveQualityChanged =
 					adaptiveState.qualityChanged;
@@ -1520,22 +1609,41 @@ int AppMain::Run() {
 							targetHeight
 						);
 
-					std::vector<uint8_t> rawPayload =
-						PackRawRgbaPayload(
+					std::vector<uint8_t> encodedPayload =
+						EncodeJpegFrame(
 							adaptiveVideoFrame,
 							targetWidth,
-							targetHeight
+							targetHeight,
+							adaptiveState.targetJpegQuality
 						);
 
-					if (rawPayload.empty()) {
-						rawPayload = PackRawRgbaPayload(videoFrame, texWidth, texHeight);
+					net::CodecType sendCodec = net::CodecType::MJPEG;
+					if (encodedPayload.empty()) {
+						encodedPayload =
+							PackRawRgbaPayload(videoFrame, texWidth, texHeight);
+						sendCodec = net::CodecType::Raw;
+					}
+
+					const bool requestedKeyFrame =
+						networkManager->ConsumeKeyFrameRequest();
+
+					const bool sendAsKeyFrame =
+						requestedKeyFrame ||
+						sendCodec == net::CodecType::MJPEG;
+
+					if (adaptiveController) {
+						adaptiveController->ReportEncodedFrame(
+							adaptiveVideoFrame.size(),
+							encodedPayload.size()
+						);
 					}
 
 					networkManager->SendRNVPFragmented(
-						rawPayload,
+						encodedPayload,
 						dummyFrameId,
-						net::CodecType::Raw,
-						1
+						sendCodec,
+						1,
+						sendAsKeyFrame
 					);
 
 					dummyFrameId++;
@@ -1554,10 +1662,18 @@ int AppMain::Run() {
 							<< targetWidth
 							<< "x"
 							<< targetHeight
+							<< " codec="
+							<< (sendCodec == net::CodecType::MJPEG ? "mjpeg" : "raw")
 							<< " source="
 							<< (cameraFrameReady ? "camera" : "fallback")
 							<< " size="
-							<< rawPayload.size();
+							<< encodedPayload.size()
+							<< " rawSize="
+							<< adaptiveVideoFrame.size()
+							<< " keyFrame="
+							<< (sendAsKeyFrame ? "true" : "false")
+							<< " requestedKeyFrame="
+							<< (requestedKeyFrame ? "true" : "false");
 
 						OutputDebugStringA(oss.str().c_str());
 						OutputDebugStringA("\n");

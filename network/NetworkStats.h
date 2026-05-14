@@ -58,6 +58,11 @@ namespace net {
 		uint32_t lastAckReceivedChunks = 0;
 		uint32_t lastAckMissingChunks = 0;
 		double lastAckMissingRate = 0.0;
+		uint64_t ackRetransmittedFrames = 0;
+		uint64_t ackRetransmittedChunks = 0;
+		uint64_t ackStaleDroppedFrames = 0;
+		uint64_t ackKeyFrameRequests = 0;
+		bool ackKeyFramePending = false;
 
 		// ============================================================
         // Adaptive Streaming
@@ -72,6 +77,9 @@ namespace net {
 		int adaptiveTargetBitrateKbps = 0;
 		int adaptiveTargetWidth = 0;
 		int adaptiveTargetHeight = 0;
+		uint64_t adaptiveRawFrameBytes = 0;
+		uint64_t adaptiveEncodedFrameBytes = 0;
+		double adaptiveCompressionRatio = 0.0;
 
 		bool adaptiveQualityChanged = false;
 		bool adaptiveFpsChanged = false;

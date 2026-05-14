@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,14 +35,16 @@ public:
         const std::string& data,
         uint32_t frameId,
         net::CodecType codecType = net::CodecType::Raw,
-        uint32_t streamId = 1
+        uint32_t streamId = 1,
+        bool keyFrame = false
     );
 
     void SendRNVPFragmented(
         const std::vector<uint8_t>& data,
         uint32_t frameId,
         net::CodecType codecType = net::CodecType::Raw,
-        uint32_t streamId = 1
+        uint32_t streamId = 1,
+        bool keyFrame = false
     );
 
     // ============================================================
@@ -62,6 +65,12 @@ public:
     uint32_t GetLastAckMissingChunks() const;
     double GetLastAckMissingRate() const;
     uint64_t GetAckCount() const;
+    uint64_t GetAckRetransmittedFrameCount() const;
+    uint64_t GetAckRetransmittedChunkCount() const;
+    uint64_t GetAckStaleDroppedFrameCount() const;
+    uint64_t GetAckKeyFrameRequestCount() const;
+    bool IsKeyFrameRequestPending() const;
+    bool ConsumeKeyFrameRequest();
 
     void SetNetworkCondition(const net::NetworkCondition& condition);
     net::NetworkCondition GetNetworkCondition() const;
@@ -70,6 +79,65 @@ public:
     void FlushNetworkSimulator();
 
 private:
+    struct SentFrameRecord {
+        uint32_t frameId = 0;
+        uint32_t streamId = 0;
+        net::CodecType codecType = net::CodecType::Unknown;
+        uint16_t chunkCount = 0;
+        uint64_t sendTimeUs = 0;
+        uint32_t retransmitCount = 0;
+        bool acked = false;
+        bool keyFrame = false;
+        std::vector<uint8_t> payload;
+    };
+
+    void SendRNVPFragmentedInternal(
+        const std::vector<uint8_t>& data,
+        uint32_t frameId,
+        net::CodecType codecType,
+        uint32_t streamId,
+        bool keyFrame,
+        bool trackFrame,
+        const char* context
+    );
+
+    bool SendRNVPFramePackets(
+        const std::vector<uint8_t>& data,
+        uint32_t frameId,
+        net::CodecType codecType,
+        uint32_t streamId,
+        bool keyFrame,
+        uint64_t sendTimeUs,
+        const char* context
+    );
+
+    uint32_t SendRNVPSelectedChunks(
+        const std::vector<uint8_t>& data,
+        uint32_t frameId,
+        net::CodecType codecType,
+        uint32_t streamId,
+        bool keyFrame,
+        uint64_t sendTimeUs,
+        const std::vector<uint16_t>& chunkIndices,
+        const char* context
+    );
+
+    void TrackSentFrame(
+        const std::vector<uint8_t>& data,
+        uint32_t frameId,
+        net::CodecType codecType,
+        uint32_t streamId,
+        bool keyFrame,
+        uint16_t chunkCount,
+        uint64_t sendTimeUs
+    );
+
+    void HandleAckControl(
+        uint32_t streamId,
+        const net::AckPayload& ack,
+        double missingRate
+    );
+
     void RNVPControlReceiveLoop();
 
     void HandleRnvpControlPacket(
@@ -136,6 +204,20 @@ private:
     uint32_t lastAckMissingChunks_ = 0;
     double lastAckMissingRate_ = 0.0;
     uint64_t ackCount_ = 0;
+
+    mutable std::mutex sentFramesMutex_;
+    std::deque<SentFrameRecord> sentFrames_;
+    uint32_t latestSentFrameId_ = 0;
+    uint64_t ackRetransmittedFrameCount_ = 0;
+    uint64_t ackRetransmittedChunkCount_ = 0;
+    uint64_t ackStaleDroppedFrameCount_ = 0;
+    uint64_t ackKeyFrameRequestCount_ = 0;
+    std::atomic<bool> forceNextKeyFrame_{ false };
+
+    static constexpr size_t kSentFrameHistoryLimit = 24;
+    static constexpr uint32_t kMaxRetransmitsPerFrame = 1;
+    static constexpr uint32_t kMaxRetransmitFrameLag = 2;
+    static constexpr uint64_t kMaxRetransmitAgeUs = 500000;
 
     static constexpr int kControlReceiveBufferSize = 2048;
 };

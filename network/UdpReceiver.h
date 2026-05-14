@@ -103,6 +103,13 @@ namespace net {
             const sockaddr_in& toAddr
         );
 
+        void SendRnvpControl(
+            const RnvpHeaderV1& dataHeader,
+            ControlCommand command,
+            uint32_t value,
+            const sockaddr_in& toAddr
+        );
+
         uint64_t NowMicroseconds() const;
         uint32_t NextRNVPSequence();
 
@@ -123,9 +130,12 @@ namespace net {
 
         // Receiver側からPongなどを返すときのRNVP sequence
         std::atomic<uint32_t> rnvpSequence_{ 1 };
+        uint32_t consecutiveIncompleteFrames_ = 0;
+        uint64_t lastKeyFrameRequestUs_ = 0;
 
         static constexpr int kReceiveBufferSize = 4096;
         static constexpr size_t kMaxQueuedFrames = 4;
+        static constexpr uint64_t kKeyFrameRequestCooldownUs = 500000;
     };
 
 } // namespace net

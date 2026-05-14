@@ -475,6 +475,23 @@ namespace {
             ImGui::Text("ACK Missing Chunks: %u", stats.lastAckMissingChunks);
 
             ImGui::Text("ACK Missing Rate: %.2f %%", stats.lastAckMissingRate * 100.0);
+
+            ImGui::Separator();
+
+            ImGui::Text("Retransmitted Frames: %llu",
+                static_cast<unsigned long long>(stats.ackRetransmittedFrames));
+
+            ImGui::Text("Retransmitted Chunks: %llu",
+                static_cast<unsigned long long>(stats.ackRetransmittedChunks));
+
+            ImGui::Text("Stale ACK Drops: %llu",
+                static_cast<unsigned long long>(stats.ackStaleDroppedFrames));
+
+            ImGui::Text("KeyFrame Requests: %llu",
+                static_cast<unsigned long long>(stats.ackKeyFrameRequests));
+
+            ImGui::Text("KeyFrame Pending: %s",
+                stats.ackKeyFramePending ? "true" : "false");
         }
 
         if (ImGui::CollapsingHeader("Adaptive Streaming", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -488,6 +505,12 @@ namespace {
             ImGui::Text("Target Resolution: %dx%d",
                 stats.adaptiveTargetWidth,
                 stats.adaptiveTargetHeight);
+            ImGui::Text("Encoded Size: %llu bytes",
+                static_cast<unsigned long long>(stats.adaptiveEncodedFrameBytes));
+            ImGui::Text("Raw Size: %llu bytes",
+                static_cast<unsigned long long>(stats.adaptiveRawFrameBytes));
+            ImGui::Text("Compression Ratio: %.2f %%",
+                stats.adaptiveCompressionRatio * 100.0);
 
             ImGui::Separator();
 

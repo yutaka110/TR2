@@ -1,8 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <vector>
 
 namespace net {
 
@@ -177,7 +179,12 @@ namespace net {
         uint32_t receivedChunkCount = 0;
         uint32_t missingChunkCount = 0;
         uint32_t latestSequence = 0;
+        std::vector<uint16_t> missingChunkIndices;
     };
+
+    static constexpr size_t kAckPayloadBaseSize = 16;
+    static constexpr size_t kAckMissingChunkIndexSize = 2;
+    static constexpr size_t kMaxAckMissingChunkIndices = 512;
 
     struct PingPayload {
         uint64_t clientTimeUs = 0;
@@ -433,15 +440,26 @@ namespace net {
     // 次フェーズで実際の送受信に使う。
     // ============================================================
 
+    inline size_t CalculateAckPayloadSize(const AckPayload& payload) {
+        return kAckPayloadBaseSize +
+            payload.missingChunkIndices.size() * kAckMissingChunkIndexSize;
+    }
+
     inline void EncodeAckPayload(uint8_t* dst, const AckPayload& payload) {
         WriteU32BE(dst + 0, payload.frameId);
         WriteU32BE(dst + 4, payload.receivedChunkCount);
         WriteU32BE(dst + 8, payload.missingChunkCount);
         WriteU32BE(dst + 12, payload.latestSequence);
+
+        uint8_t* cursor = dst + kAckPayloadBaseSize;
+        for (uint16_t chunkIndex : payload.missingChunkIndices) {
+            WriteU16BE(cursor, chunkIndex);
+            cursor += kAckMissingChunkIndexSize;
+        }
     }
 
     inline bool DecodeAckPayload(const uint8_t* src, size_t size, AckPayload& outPayload) {
-        if (!src || size < 16) {
+        if (!src || size < kAckPayloadBaseSize) {
             return false;
         }
 
@@ -449,6 +467,23 @@ namespace net {
         outPayload.receivedChunkCount = ReadU32BE(src + 4);
         outPayload.missingChunkCount = ReadU32BE(src + 8);
         outPayload.latestSequence = ReadU32BE(src + 12);
+        outPayload.missingChunkIndices.clear();
+
+        const size_t availableIndexBytes = size - kAckPayloadBaseSize;
+        const size_t encodedIndexCount =
+            availableIndexBytes / kAckMissingChunkIndexSize;
+        const size_t indexCount = (std::min)(
+            encodedIndexCount,
+            static_cast<size_t>(outPayload.missingChunkCount)
+        );
+
+        outPayload.missingChunkIndices.reserve(indexCount);
+
+        const uint8_t* cursor = src + kAckPayloadBaseSize;
+        for (size_t i = 0; i < indexCount; ++i) {
+            outPayload.missingChunkIndices.push_back(ReadU16BE(cursor));
+            cursor += kAckMissingChunkIndexSize;
+        }
 
         return true;
     }

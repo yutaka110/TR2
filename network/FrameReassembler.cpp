@@ -282,13 +282,19 @@ namespace net {
 
         ack.receivedChunkCount = frame.receivedCount;
 
-        if (frame.chunkCount >= frame.receivedCount) {
-            ack.missingChunkCount =
-                static_cast<uint32_t>(frame.chunkCount - frame.receivedCount);
+        uint32_t totalMissingChunks = 0;
+
+        for (uint16_t chunkIndex = 0; chunkIndex < frame.chunkCount; ++chunkIndex) {
+            if (!frame.received[chunkIndex]) {
+                totalMissingChunks++;
+
+                if (ack.missingChunkIndices.size() < kMaxAckMissingChunkIndices) {
+                    ack.missingChunkIndices.push_back(chunkIndex);
+                }
+            }
         }
-        else {
-            ack.missingChunkCount = 0;
-        }
+
+        ack.missingChunkCount = totalMissingChunks;
 
         return ack;
     }
