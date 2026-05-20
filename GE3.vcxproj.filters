@@ -285,6 +285,12 @@
     <ClCompile Include="network\NetworkConditionSimulator.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
+    <ClCompile Include="network\NetworkCsvLogger.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="network\NetworkExperimentRunner.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
     <ClCompile Include="network\UdpByteStream.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
@@ -589,6 +595,12 @@
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\NetworkConditionSimulator.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="network\NetworkCsvLogger.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="network\NetworkExperimentRunner.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\UdpByteStream.h">
