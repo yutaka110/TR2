@@ -49,6 +49,11 @@ namespace net {
             CompletedFrame& outFrame
         );
 
+        uint32_t DropExpiredFrames(
+            uint64_t nowUs,
+            uint64_t maxDisplayLatencyUs
+        );
+
         void Clear();
 
         uint32_t GetBufferedFrameCount() const;
@@ -63,6 +68,12 @@ namespace net {
 
         bool IsOlderThanLastReleasedLocked(
             const CompletedFrame& frame
+        ) const;
+
+        bool IsPastDisplayDeadlineLocked(
+            const CompletedFrame& frame,
+            uint64_t nowUs,
+            uint64_t maxDisplayLatencyUs
         ) const;
 
     private:

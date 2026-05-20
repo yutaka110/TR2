@@ -149,6 +149,16 @@ namespace {
             << stats.reorderedPackets << ','
             << stats.completedFrames << ','
             << stats.droppedFrames << ','
+            << stats.deadlineDroppedFrames << ','
+            << stats.outputQueueDroppedFrames << ','
+            << stats.outputQueueDropEvents << ','
+            << stats.outputQueueDropBurstEvents << ','
+            << stats.lastOutputQueueDropFrameCount << ','
+            << stats.lastOutputQueueDropQueueSize << ','
+            << stats.lastOutputQueueDropOldestAgeMs << ','
+            << stats.lastOutputQueueDropNewestAgeMs << ','
+            << stats.maxOutputQueueDropOldestAgeMs << ','
+            << EscapeCsv(stats.lastOutputQueueDropReason) << ','
             << stats.decodedFrames << ','
             << stats.displayedFrames << ','
             << stats.ackCount << ','
@@ -163,6 +173,9 @@ namespace {
             << stats.adaptiveRawFrameBytes << ','
             << stats.adaptiveEncodedFrameBytes << ','
             << stats.adaptiveCompressionRatio << ','
+            << stats.adaptiveLastPacketLossRate << ','
+            << stats.adaptiveLastDisplayFps << ','
+            << stats.adaptiveLastQoeScore << ','
             << (stats.networkCondition.enabled ? 1 : 0) << ','
             << stats.networkCondition.lossRate << ','
             << stats.networkCondition.duplicateRate << ','
@@ -213,6 +226,16 @@ namespace {
             << "reorderedPackets,"
             << "completedFrames,"
             << "droppedFrames,"
+            << "deadlineDroppedFrames,"
+            << "outputQueueDroppedFrames,"
+            << "outputQueueDropEvents,"
+            << "outputQueueDropBurstEvents,"
+            << "lastOutputQueueDropFrameCount,"
+            << "lastOutputQueueDropQueueSize,"
+            << "lastOutputQueueDropOldestAgeMs,"
+            << "lastOutputQueueDropNewestAgeMs,"
+            << "maxOutputQueueDropOldestAgeMs,"
+            << "lastOutputQueueDropReason,"
             << "decodedFrames,"
             << "displayedFrames,"
             << "ackCount,"
@@ -227,6 +250,9 @@ namespace {
             << "rawFrameBytes,"
             << "encodedFrameBytes,"
             << "compressionRatio,"
+            << "adaptiveInputPacketLossRate,"
+            << "adaptiveInputDisplayFps,"
+            << "adaptiveQoeScore,"
             << "simEnabled,"
             << "simLossRate,"
             << "simDuplicateRate,"

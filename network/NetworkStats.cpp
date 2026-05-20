@@ -174,6 +174,87 @@ namespace net {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
+    void NetworkStats::OnDeadlineDroppedFrames(uint32_t droppedFrames) {
+        if (droppedFrames == 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.deadlineDroppedFrames += droppedFrames;
+        snapshot_.droppedFrames += droppedFrames;
+
+        const uint64_t totalFrames =
+            snapshot_.completedFrames + snapshot_.droppedFrames;
+
+        if (totalFrames > 0) {
+            snapshot_.frameDropRate =
+                static_cast<double>(snapshot_.droppedFrames) /
+                static_cast<double>(totalFrames);
+        }
+
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnOutputQueueDroppedFrames(uint32_t droppedFrames) {
+        if (droppedFrames == 0) {
+            return;
+        }
+
+        OnOutputQueueDropEvent(
+            droppedFrames,
+            0,
+            0.0,
+            0.0,
+            "unknown"
+        );
+    }
+
+    void NetworkStats::OnOutputQueueDropEvent(
+        uint32_t droppedFrames,
+        uint32_t queueSizeBeforeDrop,
+        double oldestDroppedAgeMs,
+        double newestFrameAgeMs,
+        const char* reason
+    ) {
+        if (droppedFrames == 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.outputQueueDroppedFrames += droppedFrames;
+        snapshot_.outputQueueDropEvents++;
+        snapshot_.lastOutputQueueDropFrameCount = droppedFrames;
+        snapshot_.lastOutputQueueDropQueueSize = queueSizeBeforeDrop;
+        snapshot_.lastOutputQueueDropOldestAgeMs = oldestDroppedAgeMs;
+        snapshot_.lastOutputQueueDropNewestAgeMs = newestFrameAgeMs;
+        snapshot_.maxOutputQueueDropOldestAgeMs =
+            (std::max)(
+                snapshot_.maxOutputQueueDropOldestAgeMs,
+                oldestDroppedAgeMs
+            );
+        snapshot_.lastOutputQueueDropReason =
+            reason != nullptr ? reason : "unknown";
+
+        if (snapshot_.lastOutputQueueDropReason == "jitter-burst-release") {
+            snapshot_.outputQueueDropBurstEvents++;
+        }
+
+        snapshot_.droppedFrames += droppedFrames;
+
+        const uint64_t totalFrames =
+            snapshot_.completedFrames + snapshot_.droppedFrames;
+
+        if (totalFrames > 0) {
+            snapshot_.frameDropRate =
+                static_cast<double>(snapshot_.droppedFrames) /
+                static_cast<double>(totalFrames);
+        }
+
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
     void NetworkStats::OnDuplicatePacket() {
         std::lock_guard<std::mutex> lock(mutex_);
 

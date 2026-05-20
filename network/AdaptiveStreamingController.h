@@ -10,6 +10,10 @@ namespace net {
         double packetLossRate = 0.0;
         double rttMs = 0.0;
         double latencyMs = 0.0;
+        double displayFps = 0.0;
+        uint64_t displayedFrames = 0;
+        uint64_t deadlineDroppedFrames = 0;
+        uint64_t outputQueueDroppedFrames = 0;
     };
 
     struct AdaptiveStreamingState {
@@ -29,8 +33,13 @@ namespace net {
         double lastCompressionRatio = 0.0;
 
         double lastAckMissingRate = 0.0;
+        double lastPacketLossRate = 0.0;
         double lastRttMs = 0.0;
         double lastLatencyMs = 0.0;
+        double lastDisplayFps = 0.0;
+        double lastQoeScore = 0.0;
+        uint64_t lastDeadlineDroppedFrames = 0;
+        uint64_t lastOutputQueueDroppedFrames = 0;
     };
 
     class AdaptiveStreamingController {
@@ -52,6 +61,11 @@ namespace net {
         void ApplyMultiplicativeDecrease(double factor);
         void ApplyAdditiveIncrease(int bitrateKbps);
         void DeriveTargetsFromBitrate();
+        double CalculateQoeScore(
+            const AdaptiveStreamingInput& input,
+            uint64_t deadlineDropDelta,
+            uint64_t outputQueueDropDelta
+        ) const;
 
         int ClampQuality(int value) const;
         int ClampFps(int value) const;
@@ -66,7 +80,13 @@ namespace net {
 
         double stableTimeSec_ = 0.0;
         double badTimeSec_ = 0.0;
+        double lossOnlyBadTimeSec_ = 0.0;
         double cooldownSec_ = 0.0;
+        double observedTimeSec_ = 0.0;
+
+        bool hasDropCounters_ = false;
+        uint64_t lastDeadlineDroppedFrames_ = 0;
+        uint64_t lastOutputQueueDroppedFrames_ = 0;
 
         static constexpr int kMinQuality = 35;
         static constexpr int kMaxQuality = 95;

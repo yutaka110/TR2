@@ -75,6 +75,7 @@ public:
     void SetNetworkCondition(const net::NetworkCondition& condition);
     net::NetworkCondition GetNetworkCondition() const;
     net::NetworkSimulationStats GetNetworkSimulationStats() const;
+    void ResetStats();
     void ResetNetworkSimulationStats();
     void FlushNetworkSimulator();
 

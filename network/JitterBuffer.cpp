@@ -109,6 +109,27 @@ namespace net {
         return true;
     }
 
+    uint32_t JitterBuffer::DropExpiredFrames(
+        uint64_t nowUs,
+        uint64_t maxDisplayLatencyUs
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        uint32_t droppedFrames = 0;
+
+        for (auto it = frames_.begin(); it != frames_.end();) {
+            if (!IsPastDisplayDeadlineLocked(it->second, nowUs, maxDisplayLatencyUs)) {
+                ++it;
+                continue;
+            }
+
+            it = frames_.erase(it);
+            droppedFrames++;
+        }
+
+        return droppedFrames;
+    }
+
     void JitterBuffer::Clear() {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -153,6 +174,25 @@ namespace net {
         }
 
         return frame.frameId <= lastReleasedFrameId_;
+    }
+
+    bool JitterBuffer::IsPastDisplayDeadlineLocked(
+        const CompletedFrame& frame,
+        uint64_t nowUs,
+        uint64_t maxDisplayLatencyUs
+    ) const {
+        if (maxDisplayLatencyUs == 0) {
+            return false;
+        }
+
+        uint64_t baseTimeUs = frame.sendTimeUs;
+
+        if (baseTimeUs == 0 || nowUs < baseTimeUs) {
+            baseTimeUs = frame.receiveTimeUs;
+        }
+
+        return nowUs > baseTimeUs &&
+            nowUs - baseTimeUs > maxDisplayLatencyUs;
     }
 
 } // namespace net
