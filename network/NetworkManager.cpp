@@ -995,6 +995,37 @@ net::NetworkSimulationStats NetworkManager::GetNetworkSimulationStats() const {
     return networkSimulator_.GetStats();
 }
 
+void NetworkManager::ResetStats() {
+    {
+        std::lock_guard<std::mutex> lock(rttMutex_);
+        lastRttMs_ = 0.0;
+        averageRttMs_ = 0.0;
+        rttSampleCount_ = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(ackMutex_);
+        lastAckFrameId_ = 0;
+        lastAckReceivedChunks_ = 0;
+        lastAckMissingChunks_ = 0;
+        lastAckMissingRate_ = 0.0;
+        ackCount_ = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(sentFramesMutex_);
+        sentFrames_.clear();
+        latestSentFrameId_ = 0;
+        ackRetransmittedFrameCount_ = 0;
+        ackRetransmittedChunkCount_ = 0;
+        ackStaleDroppedFrameCount_ = 0;
+        ackKeyFrameRequestCount_ = 0;
+        forceNextKeyFrame_.store(false, std::memory_order_relaxed);
+    }
+
+    ResetNetworkSimulationStats();
+}
+
 void NetworkManager::ResetNetworkSimulationStats() {
     networkSimulator_.Reset();
 }

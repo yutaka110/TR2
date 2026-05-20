@@ -84,12 +84,23 @@ namespace net {
 
         std::lock_guard<std::mutex> lock(frameQueueMutex_);
 
+        uint32_t droppedByDeadline = 0;
+        while (!completedFrames_.empty() &&
+            IsFramePastDisplayDeadline(completedFrames_.front(), NowMicroseconds())) {
+            completedFrames_.pop_front();
+            droppedByDeadline++;
+        }
+
+        if (droppedByDeadline > 0) {
+            stats_.OnDeadlineDroppedFrames(droppedByDeadline);
+        }
+
         if (completedFrames_.empty()) {
             return false;
         }
 
         outFrame = std::move(completedFrames_.front());
-        completedFrames_.pop();
+        completedFrames_.pop_front();
 
         return true;
     }
@@ -105,7 +116,7 @@ namespace net {
 
         std::lock_guard<std::mutex> lock(frameQueueMutex_);
         while (!completedFrames_.empty()) {
-            completedFrames_.pop();
+            completedFrames_.pop_front();
         }
     }
 
@@ -175,33 +186,86 @@ namespace net {
             result.targetDelayMs
         );
 
+        const uint32_t deadlineDrops =
+            jitterBuffer_.DropExpiredFrames(nowUs, kMaxDisplayLatencyUs);
+
+        if (deadlineDrops > 0) {
+            stats_.OnDeadlineDroppedFrames(deadlineDrops);
+        }
+
         DrainReadyJitterBuffer(nowUs);
     }
 
     void UdpReceiver::DrainReadyJitterBuffer(uint64_t nowUs) {
         CompletedFrame readyFrame;
+        uint32_t releasedFramesThisDrain = 0;
+
+        const uint32_t deadlineDrops =
+            jitterBuffer_.DropExpiredFrames(nowUs, kMaxDisplayLatencyUs);
+
+        if (deadlineDrops > 0) {
+            stats_.OnDeadlineDroppedFrames(deadlineDrops);
+        }
 
         while (jitterBuffer_.TryPopReadyFrame(nowUs, readyFrame)) {
             stats_.OnJitterBufferReleased();
 
+            if (IsFramePastDisplayDeadline(readyFrame, nowUs)) {
+                stats_.OnDeadlineDroppedFrames(1);
+                readyFrame = CompletedFrame{};
+                continue;
+            }
+
             uint32_t droppedByOutputQueue = 0;
+            uint32_t queueSizeBeforeDrop = 0;
+            double oldestDroppedAgeMs = 0.0;
+            const double newestFrameAgeMs =
+                CalculateFrameAgeMs(readyFrame, nowUs);
+            const char* outputDropReason =
+                releasedFramesThisDrain > 0
+                ? "jitter-burst-release"
+                : "renderer-lag";
 
             {
                 std::lock_guard<std::mutex> lock(frameQueueMutex_);
 
-                while (completedFrames_.size() >= kMaxQueuedFrames) {
-                    completedFrames_.pop();
+                queueSizeBeforeDrop =
+                    static_cast<uint32_t>(completedFrames_.size());
+
+                while (!completedFrames_.empty()) {
+                    oldestDroppedAgeMs =
+                        (std::max)(
+                            oldestDroppedAgeMs,
+                            CalculateFrameAgeMs(completedFrames_.front(), nowUs)
+                        );
+                    completedFrames_.pop_front();
                     droppedByOutputQueue++;
                 }
 
-                completedFrames_.push(std::move(readyFrame));
+                while (completedFrames_.size() >= kMaxQueuedFrames) {
+                    oldestDroppedAgeMs =
+                        (std::max)(
+                            oldestDroppedAgeMs,
+                            CalculateFrameAgeMs(completedFrames_.front(), nowUs)
+                        );
+                    completedFrames_.pop_front();
+                    droppedByOutputQueue++;
+                }
+
+                completedFrames_.push_back(std::move(readyFrame));
             }
 
             if (droppedByOutputQueue > 0) {
-                for (uint32_t i = 0; i < droppedByOutputQueue; ++i) {
-                    stats_.OnDroppedFrame();
-                }
+                stats_.OnOutputQueueDropEvent(
+                    droppedByOutputQueue,
+                    queueSizeBeforeDrop,
+                    oldestDroppedAgeMs,
+                    newestFrameAgeMs,
+                    outputDropReason
+                );
             }
+
+            releasedFramesThisDrain++;
 
             stats_.OnJitterBufferUpdated(
                 jitterBuffer_.GetBufferedFrameCount(),
@@ -210,6 +274,37 @@ namespace net {
 
             readyFrame = CompletedFrame{};
         }
+    }
+
+    bool UdpReceiver::IsFramePastDisplayDeadline(
+        const CompletedFrame& frame,
+        uint64_t nowUs
+    ) const {
+        uint64_t baseTimeUs = frame.sendTimeUs;
+
+        if (baseTimeUs == 0 || nowUs < baseTimeUs) {
+            baseTimeUs = frame.receiveTimeUs;
+        }
+
+        return nowUs > baseTimeUs &&
+            nowUs - baseTimeUs > kMaxDisplayLatencyUs;
+    }
+
+    double UdpReceiver::CalculateFrameAgeMs(
+        const CompletedFrame& frame,
+        uint64_t nowUs
+    ) const {
+        uint64_t baseTimeUs = frame.sendTimeUs;
+
+        if (baseTimeUs == 0 || nowUs < baseTimeUs) {
+            baseTimeUs = frame.receiveTimeUs;
+        }
+
+        if (nowUs <= baseTimeUs) {
+            return 0.0;
+        }
+
+        return static_cast<double>(nowUs - baseTimeUs) / 1000.0;
     }
 
     void UdpReceiver::UpdateJitterBufferAutoMode(uint64_t nowUs) {

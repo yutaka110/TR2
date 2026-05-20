@@ -73,6 +73,7 @@
 #include "../network/NetworkManager.h"
 #include "../network/AdaptiveStreamingController.h"
 #include "../network/NetworkCsvLogger.h"
+#include "../network/NetworkExperimentReporter.h"
 #include "../network/NetworkExperimentRunner.h"
 #include "../network/PacketProtocol.h"
 #include <algorithm>
@@ -581,6 +582,9 @@ int AppMain::Run() {
 	}
 
 	AppRuntimeState runtimeState{};
+	if (GetEnvironmentVariableA("TR2_NETWORK_EXPERIMENT_AUTO", nullptr, 0) > 0) {
+		runtimeState.networkExperimentMode = true;
+	}
 	AppParticleSystem particleSystem;
 	runtimeState.transform.scale = { 6.0f, 6.0f, 6.0f };
 	runtimeState.transform.rotate = { 0.0f, 0.0f, 0.0f };
@@ -874,11 +878,20 @@ int AppMain::Run() {
 			stats.adaptiveLastAckMissingRate =
 				adaptiveState.lastAckMissingRate;
 
+			stats.adaptiveLastPacketLossRate =
+				adaptiveState.lastPacketLossRate;
+
 			stats.adaptiveLastRttMs =
 				adaptiveState.lastRttMs;
 
 			stats.adaptiveLastLatencyMs =
 				adaptiveState.lastLatencyMs;
+
+			stats.adaptiveLastDisplayFps =
+				adaptiveState.lastDisplayFps;
+
+			stats.adaptiveLastQoeScore =
+				adaptiveState.lastQoeScore;
 		}
 
 		return stats;
@@ -898,6 +911,15 @@ int AppMain::Run() {
 	const auto networkCsvStartTime = std::chrono::steady_clock::now();
 	auto lastNetworkCsvSampleTime = networkCsvStartTime - std::chrono::seconds(1);
 	net::NetworkExperimentRunner networkExperimentRunner;
+	net::NetworkExperimentReporter networkExperimentReporter;
+	if (networkExperimentReporter.Start("logs")) {
+		std::cout << "[AppMain] Network experiment summary started: "
+			<< networkExperimentReporter.CsvFilePath()
+			<< "\n";
+	}
+	else {
+		std::cerr << "[AppMain] Network experiment summary failed to start.\n";
+	}
 	auto lastNetworkExperimentUpdateTime = networkCsvStartTime;
 
 	runLoop.SetJitterBufferTargetDelaySetter(
@@ -1022,6 +1044,18 @@ int AppMain::Run() {
 			}
 
 			if (experimentScenarioChanged) {
+				if (networkExperimentRunner.IsActive()) {
+					if (adaptiveController) {
+						adaptiveController->Reset();
+					}
+					if (networkManager) {
+						networkManager->ResetStats();
+					}
+					if (udpReceiver) {
+						udpReceiver->ResetStats();
+					}
+				}
+
 				std::ostringstream oss;
 				if (networkExperimentRunner.IsActive()) {
 					oss << "[AppMain] Network experiment scenario: "
@@ -1225,11 +1259,18 @@ int AppMain::Run() {
 				adaptiveInput.packetLossRate = receiverStats.packetLossRate;
 				adaptiveInput.rttMs = networkManager->GetLastRttMs();
 				adaptiveInput.latencyMs = receiverStats.currentLatencyMs;
+				adaptiveInput.displayFps = receiverStats.displayFps;
+				adaptiveInput.displayedFrames = receiverStats.displayedFrames;
+				adaptiveInput.deadlineDroppedFrames =
+					receiverStats.deadlineDroppedFrames;
+				adaptiveInput.outputQueueDroppedFrames =
+					receiverStats.outputQueueDroppedFrames;
 
 				adaptiveController->Update(adaptiveInput, deltaTimeSec);
 			}
 
-			if (networkCsvLogger.IsRunning() &&
+			if ((networkCsvLogger.IsRunning() ||
+				networkExperimentReporter.IsRunning()) &&
 				std::chrono::duration_cast<std::chrono::milliseconds>(
 					now - lastNetworkCsvSampleTime).count() >= 1000) {
 				const double appTimeSec =
@@ -1237,9 +1278,22 @@ int AppMain::Run() {
 						now - networkCsvStartTime
 					).count();
 
-				networkCsvLogger.WriteSample(
-					collectNetworkStats(),
-					appTimeSec);
+				const net::NetworkStatsSnapshot networkStats =
+					collectNetworkStats();
+
+				if (networkCsvLogger.IsRunning()) {
+					networkCsvLogger.WriteSample(
+						networkStats,
+						appTimeSec);
+				}
+
+				if (networkExperimentRunner.IsActive() &&
+					networkExperimentReporter.IsRunning()) {
+					networkExperimentReporter.RecordSample(
+						networkExperimentRunner.CurrentScenarioName(),
+						networkStats,
+						appTimeSec);
+				}
 
 				lastNetworkCsvSampleTime = now;
 			}
@@ -1251,6 +1305,7 @@ int AppMain::Run() {
 
 	// Stop network components before releasing providers that may reference them.
 	runLoop.SetNetworkStatsProvider({});
+	networkExperimentReporter.Stop();
 	networkCsvLogger.Stop();
 
 	if (adaptiveController) {

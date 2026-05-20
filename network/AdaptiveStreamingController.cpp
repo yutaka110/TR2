@@ -23,7 +23,12 @@ namespace net {
 
         stableTimeSec_ = 0.0;
         badTimeSec_ = 0.0;
+        lossOnlyBadTimeSec_ = 0.0;
         cooldownSec_ = 0.0;
+        observedTimeSec_ = 0.0;
+        hasDropCounters_ = false;
+        lastDeadlineDroppedFrames_ = 0;
+        lastOutputQueueDroppedFrames_ = 0;
     }
 
     void AdaptiveStreamingController::SetEnabled(bool enabled) {
@@ -44,8 +49,36 @@ namespace net {
         state_.resolutionChanged = false;
 
         state_.lastAckMissingRate = input.ackMissingRate;
+        state_.lastPacketLossRate = input.packetLossRate;
         state_.lastRttMs = input.rttMs;
         state_.lastLatencyMs = input.latencyMs;
+        state_.lastDisplayFps = input.displayFps;
+        state_.lastDeadlineDroppedFrames = input.deadlineDroppedFrames;
+        state_.lastOutputQueueDroppedFrames = input.outputQueueDroppedFrames;
+
+        observedTimeSec_ += (std::max)(0.0, deltaTimeSec);
+
+        uint64_t deadlineDropDelta = 0;
+        uint64_t outputQueueDropDelta = 0;
+
+        if (hasDropCounters_) {
+            if (input.deadlineDroppedFrames >= lastDeadlineDroppedFrames_) {
+                deadlineDropDelta =
+                    input.deadlineDroppedFrames - lastDeadlineDroppedFrames_;
+            }
+            if (input.outputQueueDroppedFrames >= lastOutputQueueDroppedFrames_) {
+                outputQueueDropDelta =
+                    input.outputQueueDroppedFrames - lastOutputQueueDroppedFrames_;
+            }
+        }
+
+        hasDropCounters_ = true;
+        lastDeadlineDroppedFrames_ = input.deadlineDroppedFrames;
+        lastOutputQueueDroppedFrames_ = input.outputQueueDroppedFrames;
+
+        const double qoeScore =
+            CalculateQoeScore(input, deadlineDropDelta, outputQueueDropDelta);
+        state_.lastQoeScore = qoeScore;
 
         if (!enabled_) {
             return;
@@ -56,47 +89,67 @@ namespace net {
             return;
         }
 
-        const bool lossDetected =
-            input.ackMissingRate >= 0.02 ||
-            input.packetLossRate >= 0.02;
+        const bool hardQoeProblem = qoeScore >= 2.0;
+        const bool moderateQoeProblem = qoeScore >= 1.0;
+        const bool lossOnlyPressure =
+            !moderateQoeProblem &&
+            (input.ackMissingRate >= 0.03 ||
+                input.packetLossRate >= 0.03);
 
-        const bool delayCongestion =
-            input.rttMs >= 150.0 ||
-            input.latencyMs >= 150.0;
+        const bool displayHealthy =
+            input.displayedFrames < 10 ||
+            input.displayFps <= 0.0 ||
+            input.displayFps >=
+            static_cast<double>(state_.targetFps) * 0.85;
 
         const bool stableNetwork =
-            input.ackMissingRate <= 0.005 &&
-            input.packetLossRate <= 0.005 &&
-            input.rttMs <= 80.0 &&
-            input.latencyMs <= 80.0;
+            qoeScore <= 0.25 &&
+            input.ackMissingRate <= 0.02 &&
+            input.packetLossRate <= 0.02 &&
+            input.rttMs <= 100.0 &&
+            input.latencyMs <= 100.0 &&
+            displayHealthy;
 
-        if (lossDetected || delayCongestion) {
+        if (moderateQoeProblem) {
             badTimeSec_ += deltaTimeSec;
+            lossOnlyBadTimeSec_ = 0.0;
+            stableTimeSec_ = 0.0;
+        }
+        else if (lossOnlyPressure) {
+            lossOnlyBadTimeSec_ += deltaTimeSec;
+            badTimeSec_ = 0.0;
             stableTimeSec_ = 0.0;
         }
         else if (stableNetwork) {
             stableTimeSec_ += deltaTimeSec;
             badTimeSec_ = 0.0;
+            lossOnlyBadTimeSec_ = 0.0;
         }
         else {
             badTimeSec_ = 0.0;
+            lossOnlyBadTimeSec_ = 0.0;
             stableTimeSec_ = 0.0;
         }
 
-        if (lossDetected && badTimeSec_ >= 0.3) {
-            ApplyMultiplicativeDecrease(0.7);
+        if (hardQoeProblem && badTimeSec_ >= 0.6) {
+            ApplyMultiplicativeDecrease(0.82);
             badTimeSec_ = 0.0;
-            cooldownSec_ = 0.8;
+            cooldownSec_ = 1.2;
         }
-        else if (delayCongestion && badTimeSec_ >= 1.0) {
-            ApplyMultiplicativeDecrease(0.85);
+        else if (moderateQoeProblem && badTimeSec_ >= 1.8) {
+            ApplyMultiplicativeDecrease(0.90);
             badTimeSec_ = 0.0;
-            cooldownSec_ = 1.0;
+            cooldownSec_ = 1.6;
         }
-        else if (stableNetwork && stableTimeSec_ >= 2.5) {
+        else if (lossOnlyPressure && lossOnlyBadTimeSec_ >= 4.0) {
+            ApplyMultiplicativeDecrease(0.92);
+            lossOnlyBadTimeSec_ = 0.0;
+            cooldownSec_ = 2.0;
+        }
+        else if (stableNetwork && stableTimeSec_ >= 3.0) {
             ApplyAdditiveIncrease(300);
             stableTimeSec_ = 0.0;
-            cooldownSec_ = 1.0;
+            cooldownSec_ = 1.2;
         }
     }
 
@@ -217,6 +270,55 @@ namespace net {
         state_.targetHeight = ClampHeight(state_.targetHeight);
         state_.targetFps = ClampFps(state_.targetFps);
         state_.targetJpegQuality = ClampQuality(state_.targetJpegQuality);
+    }
+
+    double AdaptiveStreamingController::CalculateQoeScore(
+        const AdaptiveStreamingInput& input,
+        uint64_t deadlineDropDelta,
+        uint64_t outputQueueDropDelta
+    ) const {
+        double score = 0.0;
+
+        if (deadlineDropDelta > 0 || outputQueueDropDelta > 0) {
+            score = (std::max)(score, 3.0);
+        }
+
+        if (input.latencyMs >= 150.0 || input.rttMs >= 220.0) {
+            score = (std::max)(score, 3.0);
+        }
+        else if (input.latencyMs >= 130.0 || input.rttMs >= 180.0) {
+            score = (std::max)(score, 2.0);
+        }
+        else if (input.latencyMs >= 110.0 || input.rttMs >= 140.0) {
+            score = (std::max)(score, 1.0);
+        }
+
+        const bool displayFpsReady =
+            observedTimeSec_ >= 2.0 &&
+            input.displayedFrames >= 10 &&
+            input.displayFps > 0.0 &&
+            state_.targetFps > 0;
+
+        if (displayFpsReady) {
+            const double displayRatio =
+                input.displayFps / static_cast<double>(state_.targetFps);
+
+            if (displayRatio < 0.60) {
+                score = (std::max)(score, 2.0);
+            }
+            else if (displayRatio < 0.75) {
+                score = (std::max)(score, 1.0);
+            }
+        }
+
+        if (input.ackMissingRate >= 0.08 || input.packetLossRate >= 0.08) {
+            score = (std::max)(score, 0.75);
+        }
+        else if (input.ackMissingRate >= 0.03 || input.packetLossRate >= 0.03) {
+            score = (std::max)(score, 0.5);
+        }
+
+        return score;
     }
 
     int AdaptiveStreamingController::ClampQuality(int value) const {

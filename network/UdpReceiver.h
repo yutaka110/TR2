@@ -11,8 +11,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
-#include <queue>
 #include <thread>
 #include <vector>
 
@@ -52,6 +52,14 @@ namespace net {
         void DrainReadyJitterBuffer(uint64_t nowUs);
 
         void UpdateJitterBufferAutoMode(uint64_t nowUs);
+        bool IsFramePastDisplayDeadline(
+            const CompletedFrame& frame,
+            uint64_t nowUs
+        ) const;
+        double CalculateFrameAgeMs(
+            const CompletedFrame& frame,
+            uint64_t nowUs
+        ) const;
 
         // ============================================================
         // RNVP v1 Control Entry
@@ -126,7 +134,7 @@ namespace net {
         std::atomic<uint64_t> lastJitterAutoUpdateUs_{ 0 };
 
         std::mutex frameQueueMutex_;
-        std::queue<CompletedFrame> completedFrames_;
+        std::deque<CompletedFrame> completedFrames_;
 
         // Receiver側からPongなどを返すときのRNVP sequence
         std::atomic<uint32_t> rnvpSequence_{ 1 };
@@ -135,6 +143,7 @@ namespace net {
 
         static constexpr int kReceiveBufferSize = 4096;
         static constexpr size_t kMaxQueuedFrames = 4;
+        static constexpr uint64_t kMaxDisplayLatencyUs = 150000;
         static constexpr uint64_t kKeyFrameRequestCooldownUs = 500000;
     };
 

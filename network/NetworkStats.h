@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 namespace net {
 
@@ -25,6 +26,16 @@ namespace net {
 		// ============================================================
 		uint64_t completedFrames = 0;
 		uint64_t droppedFrames = 0;
+		uint64_t deadlineDroppedFrames = 0;
+		uint64_t outputQueueDroppedFrames = 0;
+		uint64_t outputQueueDropEvents = 0;
+		uint64_t outputQueueDropBurstEvents = 0;
+		uint32_t lastOutputQueueDropFrameCount = 0;
+		uint32_t lastOutputQueueDropQueueSize = 0;
+		double lastOutputQueueDropOldestAgeMs = 0.0;
+		double lastOutputQueueDropNewestAgeMs = 0.0;
+		double maxOutputQueueDropOldestAgeMs = 0.0;
+		std::string lastOutputQueueDropReason;
 		uint64_t decodedFrames = 0;
 		uint64_t displayedFrames = 0;
 
@@ -87,8 +98,11 @@ namespace net {
 		bool adaptiveResolutionChanged = false;
 
 		double adaptiveLastAckMissingRate = 0.0;
+		double adaptiveLastPacketLossRate = 0.0;
 		double adaptiveLastRttMs = 0.0;
 		double adaptiveLastLatencyMs = 0.0;
+		double adaptiveLastDisplayFps = 0.0;
+		double adaptiveLastQoeScore = 0.0;
 
 		// ============================================================
 		// Jitter
@@ -156,6 +170,15 @@ namespace net {
 
 		// 欠損や破棄を観測したときに呼ぶ
 		void OnDroppedFrame();
+		void OnDeadlineDroppedFrames(uint32_t droppedFrames);
+		void OnOutputQueueDroppedFrames(uint32_t droppedFrames);
+		void OnOutputQueueDropEvent(
+			uint32_t droppedFrames,
+			uint32_t queueSizeBeforeDrop,
+			double oldestDroppedAgeMs,
+			double newestFrameAgeMs,
+			const char* reason
+		);
 
 		// 重複packetを観測したときに呼ぶ
 		void OnDuplicatePacket();

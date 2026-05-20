@@ -446,6 +446,34 @@ namespace {
             ImGui::Text("Dropped Frames: %llu",
                 static_cast<unsigned long long>(stats.droppedFrames));
 
+            ImGui::Text("Deadline Drops: %llu",
+                static_cast<unsigned long long>(stats.deadlineDroppedFrames));
+
+            ImGui::Text("Output Queue Drops: %llu",
+                static_cast<unsigned long long>(stats.outputQueueDroppedFrames));
+
+            ImGui::Text("Output Drop Events: %llu",
+                static_cast<unsigned long long>(stats.outputQueueDropEvents));
+
+            ImGui::Text("Output Drop Burst Events: %llu",
+                static_cast<unsigned long long>(stats.outputQueueDropBurstEvents));
+
+            ImGui::Text("Last Output Drop Reason: %s",
+                stats.lastOutputQueueDropReason.empty()
+                ? "none"
+                : stats.lastOutputQueueDropReason.c_str());
+
+            ImGui::Text("Last Output Drop Count/Queue: %u / %u",
+                stats.lastOutputQueueDropFrameCount,
+                stats.lastOutputQueueDropQueueSize);
+
+            ImGui::Text("Last Output Drop Age old/new: %.2f / %.2f ms",
+                stats.lastOutputQueueDropOldestAgeMs,
+                stats.lastOutputQueueDropNewestAgeMs);
+
+            ImGui::Text("Max Output Drop Age: %.2f ms",
+                stats.maxOutputQueueDropOldestAgeMs);
+
             ImGui::Text("Frame Drop Rate: %.2f %%", stats.frameDropRate * 100.0);
         }
 
@@ -524,8 +552,13 @@ namespace {
             ImGui::Text("Input ACK Missing Rate: %.2f %%",
                 stats.adaptiveLastAckMissingRate * 100.0);
 
+            ImGui::Text("Input Packet Loss Rate: %.2f %%",
+                stats.adaptiveLastPacketLossRate * 100.0);
+
             ImGui::Text("Input RTT: %.2f ms", stats.adaptiveLastRttMs);
             ImGui::Text("Input Latency: %.2f ms", stats.adaptiveLastLatencyMs);
+            ImGui::Text("Input Display FPS: %.2f", stats.adaptiveLastDisplayFps);
+            ImGui::Text("QoE Score: %.2f", stats.adaptiveLastQoeScore);
         }
 
         if (ImGui::CollapsingHeader("Jitter", ImGuiTreeNodeFlags_DefaultOpen)) {
