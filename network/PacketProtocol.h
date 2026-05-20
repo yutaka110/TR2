@@ -54,11 +54,11 @@ namespace net {
     // ------------------------------------------------------------
     // Realtime Network Video Protocol v1
     //
-    // 今回追加する「独自プロトコル設計」の核。
+    //「独自プロトコル設計」の核。
     // ただし、既存コードを壊さないため、まだ既存PacketHeaderとは
     // 完全置換しない。
     //
-    // 次フェーズで NetworkManager / UdpReceiver 側をこの形式に移行する。
+    // 現在の NetworkManager / UdpReceiver は RNVP v1 を主経路として使用する。
     // ============================================================
 
     static constexpr uint32_t kRnvpMagic =
