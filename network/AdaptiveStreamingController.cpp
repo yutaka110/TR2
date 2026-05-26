@@ -5,6 +5,24 @@
 
 namespace net {
 
+    const char* ToString(AdaptiveDegradationCause cause) {
+        switch (cause) {
+        case AdaptiveDegradationCause::PacketLoss:
+            return "Loss";
+        case AdaptiveDegradationCause::Jitter:
+            return "Jitter";
+        case AdaptiveDegradationCause::Rtt:
+            return "RTT";
+        case AdaptiveDegradationCause::DecodeLoad:
+            return "DecodeLoad";
+        case AdaptiveDegradationCause::DisplayLoad:
+            return "DisplayLoad";
+        case AdaptiveDegradationCause::None:
+        default:
+            return "None";
+        }
+    }
+
     AdaptiveStreamingController::AdaptiveStreamingController() {
         Reset();
     }
@@ -29,6 +47,9 @@ namespace net {
         hasDropCounters_ = false;
         lastDeadlineDroppedFrames_ = 0;
         lastOutputQueueDroppedFrames_ = 0;
+        hasNackCounters_ = false;
+        lastDeadlineNackSentFrames_ = 0;
+        lastDeadlineNackMissingChunks_ = 0;
     }
 
     void AdaptiveStreamingController::SetEnabled(bool enabled) {
@@ -52,14 +73,21 @@ namespace net {
         state_.lastPacketLossRate = input.packetLossRate;
         state_.lastRttMs = input.rttMs;
         state_.lastLatencyMs = input.latencyMs;
+        state_.lastJitterMs = input.jitterMs;
+        state_.lastReceiveFps = input.receiveFps;
+        state_.lastDecodeFps = input.decodeFps;
         state_.lastDisplayFps = input.displayFps;
         state_.lastDeadlineDroppedFrames = input.deadlineDroppedFrames;
         state_.lastOutputQueueDroppedFrames = input.outputQueueDroppedFrames;
+        state_.lastDeadlineNackSentFrames = input.deadlineNackSentFrames;
+        state_.lastDeadlineNackMissingChunks = input.deadlineNackMissingChunks;
 
         observedTimeSec_ += (std::max)(0.0, deltaTimeSec);
 
         uint64_t deadlineDropDelta = 0;
         uint64_t outputQueueDropDelta = 0;
+        uint64_t deadlineNackDelta = 0;
+        uint64_t deadlineNackMissingChunkDelta = 0;
 
         if (hasDropCounters_) {
             if (input.deadlineDroppedFrames >= lastDeadlineDroppedFrames_) {
@@ -76,9 +104,31 @@ namespace net {
         lastDeadlineDroppedFrames_ = input.deadlineDroppedFrames;
         lastOutputQueueDroppedFrames_ = input.outputQueueDroppedFrames;
 
+        if (hasNackCounters_) {
+            if (input.deadlineNackSentFrames >= lastDeadlineNackSentFrames_) {
+                deadlineNackDelta =
+                    input.deadlineNackSentFrames - lastDeadlineNackSentFrames_;
+            }
+            if (input.deadlineNackMissingChunks >= lastDeadlineNackMissingChunks_) {
+                deadlineNackMissingChunkDelta =
+                    input.deadlineNackMissingChunks - lastDeadlineNackMissingChunks_;
+            }
+        }
+
+        hasNackCounters_ = true;
+        lastDeadlineNackSentFrames_ = input.deadlineNackSentFrames;
+        lastDeadlineNackMissingChunks_ = input.deadlineNackMissingChunks;
+
         const double qoeScore =
             CalculateQoeScore(input, deadlineDropDelta, outputQueueDropDelta);
         state_.lastQoeScore = qoeScore;
+        state_.lastDegradationCause =
+            DetermineDegradationCause(
+                input,
+                deadlineDropDelta,
+                outputQueueDropDelta,
+                deadlineNackDelta,
+                deadlineNackMissingChunkDelta);
 
         if (!enabled_) {
             return;
@@ -94,7 +144,8 @@ namespace net {
         const bool lossOnlyPressure =
             !moderateQoeProblem &&
             (input.ackMissingRate >= 0.03 ||
-                input.packetLossRate >= 0.03);
+                input.packetLossRate >= 0.03 ||
+                deadlineNackDelta > 0);
 
         const bool displayHealthy =
             input.displayedFrames < 10 ||
@@ -132,17 +183,19 @@ namespace net {
         }
 
         if (hardQoeProblem && badTimeSec_ >= 0.6) {
-            ApplyMultiplicativeDecrease(0.82);
+            ApplyCauseSpecificDecrease(state_.lastDegradationCause, true);
             badTimeSec_ = 0.0;
             cooldownSec_ = 1.2;
         }
         else if (moderateQoeProblem && badTimeSec_ >= 1.8) {
-            ApplyMultiplicativeDecrease(0.90);
+            ApplyCauseSpecificDecrease(state_.lastDegradationCause, false);
             badTimeSec_ = 0.0;
             cooldownSec_ = 1.6;
         }
         else if (lossOnlyPressure && lossOnlyBadTimeSec_ >= 4.0) {
-            ApplyMultiplicativeDecrease(0.92);
+            ApplyCauseSpecificDecrease(
+                AdaptiveDegradationCause::PacketLoss,
+                false);
             lossOnlyBadTimeSec_ = 0.0;
             cooldownSec_ = 2.0;
         }
@@ -193,6 +246,43 @@ namespace net {
         state_.resolutionChanged =
             oldWidth != state_.targetWidth ||
             oldHeight != state_.targetHeight;
+    }
+
+    void AdaptiveStreamingController::ApplyCauseSpecificDecrease(
+        AdaptiveDegradationCause cause,
+        bool hardProblem
+    ) {
+        double factor = hardProblem ? 0.82 : 0.90;
+
+        switch (cause) {
+        case AdaptiveDegradationCause::PacketLoss:
+            factor = hardProblem ? 0.84 : 0.90;
+            break;
+        case AdaptiveDegradationCause::Jitter:
+            factor = hardProblem ? 0.90 : 0.95;
+            break;
+        case AdaptiveDegradationCause::Rtt:
+            factor = hardProblem ? 0.82 : 0.88;
+            break;
+        case AdaptiveDegradationCause::DecodeLoad:
+        case AdaptiveDegradationCause::DisplayLoad:
+            factor = hardProblem ? 0.78 : 0.86;
+            break;
+        case AdaptiveDegradationCause::None:
+        default:
+            break;
+        }
+
+        ApplyMultiplicativeDecrease(factor);
+
+        if (cause == AdaptiveDegradationCause::DecodeLoad ||
+            cause == AdaptiveDegradationCause::DisplayLoad ||
+            cause == AdaptiveDegradationCause::Rtt) {
+            const int oldFps = state_.targetFps;
+            const int fpsStep = hardProblem ? 4 : 2;
+            state_.targetFps = ClampFps(state_.targetFps - fpsStep);
+            state_.fpsChanged = state_.fpsChanged || oldFps != state_.targetFps;
+        }
     }
 
     void AdaptiveStreamingController::ApplyAdditiveIncrease(int bitrateKbps) {
@@ -272,6 +362,69 @@ namespace net {
         state_.targetJpegQuality = ClampQuality(state_.targetJpegQuality);
     }
 
+    AdaptiveDegradationCause AdaptiveStreamingController::DetermineDegradationCause(
+        const AdaptiveStreamingInput& input,
+        uint64_t deadlineDropDelta,
+        uint64_t outputQueueDropDelta,
+        uint64_t deadlineNackDelta,
+        uint64_t deadlineNackMissingChunkDelta
+    ) const {
+        const bool enoughDecodeData =
+            observedTimeSec_ >= 2.0 &&
+            input.receiveFps >= 5.0 &&
+            input.decodeFps > 0.0;
+
+        const bool enoughDisplayData =
+            observedTimeSec_ >= 2.0 &&
+            input.displayedFrames >= 10 &&
+            input.decodeFps >= 5.0 &&
+            input.displayFps > 0.0;
+
+        const bool rendererLag =
+            input.lastOutputQueueDropReason == "renderer-lag";
+        const bool jitterBurst =
+            input.lastOutputQueueDropReason == "jitter-burst-release";
+
+        if (rendererLag ||
+            (enoughDisplayData &&
+                input.displayFps < input.decodeFps * 0.75)) {
+            return AdaptiveDegradationCause::DisplayLoad;
+        }
+
+        if (enoughDecodeData &&
+            input.decodeFps < input.receiveFps * 0.75) {
+            return AdaptiveDegradationCause::DecodeLoad;
+        }
+
+        if (input.rttMs >= 140.0 ||
+            (input.latencyMs >= 130.0 && input.rttMs >= 100.0)) {
+            return AdaptiveDegradationCause::Rtt;
+        }
+
+        if (deadlineNackDelta >= 3 ||
+            deadlineNackMissingChunkDelta >= 3 ||
+            ((input.ackMissingRate >= 0.03 || input.packetLossRate >= 0.08) &&
+                input.jitterMs < 35.0)) {
+            return AdaptiveDegradationCause::PacketLoss;
+        }
+
+        if (input.jitterMs >= 35.0 ||
+            jitterBurst ||
+            (outputQueueDropDelta > 0 && input.jitterMs >= 15.0)) {
+            return AdaptiveDegradationCause::Jitter;
+        }
+
+        if (input.ackMissingRate >= 0.03 ||
+            input.packetLossRate >= 0.03 ||
+            deadlineNackDelta > 0 ||
+            deadlineNackMissingChunkDelta > 0 ||
+            deadlineDropDelta > 0) {
+            return AdaptiveDegradationCause::PacketLoss;
+        }
+
+        return AdaptiveDegradationCause::None;
+    }
+
     double AdaptiveStreamingController::CalculateQoeScore(
         const AdaptiveStreamingInput& input,
         uint64_t deadlineDropDelta,
@@ -309,6 +462,45 @@ namespace net {
             else if (displayRatio < 0.75) {
                 score = (std::max)(score, 1.0);
             }
+        }
+
+        const bool decodeFpsReady =
+            observedTimeSec_ >= 2.0 &&
+            input.receiveFps >= 5.0 &&
+            input.decodeFps > 0.0;
+
+        if (decodeFpsReady) {
+            const double decodeRatio = input.decodeFps / input.receiveFps;
+            if (decodeRatio < 0.60) {
+                score = (std::max)(score, 2.0);
+            }
+            else if (decodeRatio < 0.75) {
+                score = (std::max)(score, 1.0);
+            }
+        }
+
+        const bool displayVsDecodeReady =
+            observedTimeSec_ >= 2.0 &&
+            input.displayedFrames >= 10 &&
+            input.decodeFps >= 5.0 &&
+            input.displayFps > 0.0;
+
+        if (displayVsDecodeReady) {
+            const double displayDecodeRatio =
+                input.displayFps / input.decodeFps;
+            if (displayDecodeRatio < 0.60) {
+                score = (std::max)(score, 2.0);
+            }
+            else if (displayDecodeRatio < 0.75) {
+                score = (std::max)(score, 1.0);
+            }
+        }
+
+        if (input.jitterMs >= 50.0) {
+            score = (std::max)(score, 2.0);
+        }
+        else if (input.jitterMs >= 30.0) {
+            score = (std::max)(score, 1.0);
         }
 
         if (input.ackMissingRate >= 0.08 || input.packetLossRate >= 0.08) {

@@ -115,7 +115,7 @@ bool AppPipelines::HotReloadIfNeeded(ID3D12Device* device) {
         L"resources/Object3D.PS.hlsl",
         L"resources/Sprite.VS.hlsl",
         L"resources/Sprite.PS.hlsl",
-        L"MotionDetect.CS.hlsl",
+        L"resources/MotionDetect.CS.hlsl",
         L"resources/Particle.VS.hlsl",
         L"resources/Particle.PS.hlsl",
         L"resources/TrailMesh.VS.hlsl",
@@ -524,7 +524,7 @@ bool AppPipelines::Initialize(ID3D12Device* device) {
     ps_ = Compile_(L"resources/Object3D.PS.hlsl", L"ps_6_0");
     spriteVs_ = Compile_(L"resources/Sprite.VS.hlsl", L"vs_6_0");
     spritePs_ = Compile_(L"resources/Sprite.PS.hlsl", L"ps_6_0");
-    cs_ = Compile_(L"MotionDetect.CS.hlsl", L"cs_6_0");
+    cs_ = Compile_(L"resources/MotionDetect.CS.hlsl", L"cs_6_0");
     particleVs_ = Compile_(L"resources/Particle.VS.hlsl", L"vs_6_0");
     particlePs_ = Compile_(L"resources/Particle.PS.hlsl", L"ps_6_0");
     trailMeshVs_ = Compile_(L"resources/TrailMesh.VS.hlsl", L"vs_6_0");
@@ -941,7 +941,7 @@ bool AppPipelines::Initialize(ID3D12Device* device) {
         L"resources/Object3D.PS.hlsl",
         L"resources/Sprite.VS.hlsl",
         L"resources/Sprite.PS.hlsl",
-        L"MotionDetect.CS.hlsl",
+        L"resources/MotionDetect.CS.hlsl",
         L"resources/Particle.VS.hlsl",
         L"resources/Particle.PS.hlsl",
         L"resources/TrailMesh.VS.hlsl",

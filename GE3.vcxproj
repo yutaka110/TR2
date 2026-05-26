@@ -220,13 +220,13 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="externals\imgui\imgui_impl_win32.cpp" />
     <ClCompile Include="externals\imgui\imgui_tables.cpp" />
     <ClCompile Include="externals\imgui\imgui_widgets.cpp" />
-    <ClCompile Include="KeyInput.cpp" />
+    <ClCompile Include="legacy\root_stubs\KeyInput.cpp" />
     <ClCompile Include="lib\Receiver\startTcpReciverRgb32.cpp" />
     <ClCompile Include="main.cpp">
       <Optimization Condition="'$(Configuration)|$(Platform)'=='Development|x64'">MaxSpeed</Optimization>
       <WholeProgramOptimization Condition="'$(Configuration)|$(Platform)'=='Development|x64'">true</WholeProgramOptimization>
     </ClCompile>
-    <ClCompile Include="Matrix4x4.cpp" />
+    <ClCompile Include="legacy\root_stubs\Matrix4x4.cpp" />
     <ClCompile Include="media\CameraCapture.cpp" />
     <ClCompile Include="media\ColorConverter.cpp" />
     <ClCompile Include="media\TextureHelper.cpp" />
@@ -247,10 +247,10 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="network\NetworkStats.cpp" />
     <ClCompile Include="network\UdpByteStream.cpp" />
     <ClCompile Include="network\UdpReceiver.cpp" />
-    <ClCompile Include="WinApp.cpp" />
+    <ClCompile Include="legacy\root_stubs\WinApp.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <FxCompile Include="Object3D.PS.hlsl">
+    <FxCompile Include="Resources\Object3D.PS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Development|x64'">Pixel</ShaderType>
@@ -258,7 +258,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Development|x64'">true</ExcludedFromBuild>
     </FxCompile>
-    <FxCompile Include="Object3D.VS.hlsl">
+    <FxCompile Include="Resources\Object3D.VS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Development|x64'">Vertex</ShaderType>
@@ -420,10 +420,10 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="externals\imgui\imstb_rectpack.h" />
     <ClInclude Include="externals\imgui\imstb_textedit.h" />
     <ClInclude Include="externals\imgui\imstb_truetype.h" />
-    <ClInclude Include="KeyInput.h" />
+    <ClInclude Include="legacy\root_stubs\KeyInput.h" />
     <ClInclude Include="lib\Receiver\FrameProto.h" />
     <ClInclude Include="lib\Receiver\startTcpReceiverRgb32.h" />
-    <ClInclude Include="Matrix4x4.h" />
+    <ClInclude Include="legacy\root_stubs\Matrix4x4.h" />
     <ClInclude Include="media\CameraCapture.h" />
     <ClInclude Include="media\ColorConverter.h" />
     <ClInclude Include="media\TextureHelper.h" />
@@ -445,14 +445,15 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="network\PacketProtocol.h" />
     <ClInclude Include="network\UdpByteStream.h" />
     <ClInclude Include="network\UdpReceiver.h" />
-    <ClInclude Include="Vertex.h" />
-    <ClInclude Include="WinApp.h" />
+    <ClInclude Include="legacy\root_stubs\Vertex.h" />
+    <ClInclude Include="legacy\root_stubs\WinApp.h" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="externals\imgui\LICENSE.txt" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Resources\effects\WarpCore.effect" />
+    <None Include="Resources\MotionDetect.CS.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="externals\DirectXTex\DirectXTex_Desktop_2022_Win10.vcxproj">

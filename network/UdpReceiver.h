@@ -110,6 +110,7 @@ namespace net {
             const FrameAckInfo& ackInfo,
             const sockaddr_in& toAddr
         );
+        void SendDeadlineNacks(uint64_t nowUs);
 
         void SendRnvpControl(
             const RnvpHeaderV1& dataHeader,
@@ -140,10 +141,15 @@ namespace net {
         std::atomic<uint32_t> rnvpSequence_{ 1 };
         uint32_t consecutiveIncompleteFrames_ = 0;
         uint64_t lastKeyFrameRequestUs_ = 0;
+        bool hasLastRnvpDataAddr_ = false;
+        sockaddr_in lastRnvpDataAddr_{};
 
         static constexpr int kReceiveBufferSize = 4096;
         static constexpr size_t kMaxQueuedFrames = 4;
         static constexpr uint64_t kMaxDisplayLatencyUs = 150000;
+        static constexpr uint64_t kFrameNackDeadlineUs = 80000;
+        static constexpr uint64_t kFrameNackIntervalUs = 120000;
+        static constexpr uint32_t kMaxDeadlineNacksPerFrame = 2;
         static constexpr uint64_t kKeyFrameRequestCooldownUs = 500000;
     };
 

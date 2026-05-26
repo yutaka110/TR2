@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace net {
 
@@ -52,6 +53,26 @@ namespace net {
         CleanupOldFrames(receiveTimeUs);
 
         const uint64_t frameKey = MakeFrameKey(parsed.streamId, parsed.frameId);
+
+        if (IsRecentlyCompletedFrame(frameKey)) {
+            if (stats_) {
+                stats_->OnDuplicatePacket();
+            }
+
+            if (outAckInfo && parsed.isRnvp) {
+                FrameAckInfo ack{};
+                ack.valid = true;
+                ack.frameId = parsed.frameId;
+                ack.streamId = parsed.streamId;
+                ack.latestSequence = parsed.sequence;
+                ack.receivedChunkCount = parsed.chunkCount;
+                ack.missingChunkCount = 0;
+                *outAckInfo = std::move(ack);
+            }
+
+            return std::nullopt;
+        }
+
         auto& frame = pendingFrames_[frameKey];
 
         if (frame.chunkCount == 0) {
@@ -61,7 +82,9 @@ namespace net {
 
             frame.chunkCount = parsed.chunkCount;
             frame.receivedCount = 0;
+            frame.latestSequence = parsed.sequence;
 
+            frame.firstReceiveTimeUs = receiveTimeUs;
             frame.sendTimeUs = parsed.sendTimeUs;
             frame.lastUpdateTimeUs = receiveTimeUs;
 
@@ -84,7 +107,7 @@ namespace net {
             }
 
             if (outAckInfo && parsed.isRnvp) {
-                *outAckInfo = BuildAckInfoFromPendingFrame(parsed, frame);
+                *outAckInfo = BuildAckInfoFromPendingFrame(frame);
             }
 
             return std::nullopt;
@@ -97,16 +120,22 @@ namespace net {
 
         frame.received[parsed.chunkIndex] = true;
         frame.receivedCount++;
+        frame.latestSequence = parsed.sequence;
         frame.lastUpdateTimeUs = receiveTimeUs;
 
         if (outAckInfo && parsed.isRnvp) {
-            *outAckInfo = BuildAckInfoFromPendingFrame(parsed, frame);
+            *outAckInfo = BuildAckInfoFromPendingFrame(frame);
         }
 
         if (frame.receivedCount == frame.chunkCount) {
             auto completed = TryBuildFrame(frame, receiveTimeUs);
 
+            if (frame.nackSent && completed && stats_) {
+                stats_->OnDeadlineNackRecoveredFrame();
+            }
+
             pendingFrames_.erase(frameKey);
+            TrackCompletedFrame(frameKey);
 
             if (completed && stats_) {
                 stats_->OnFrameCompleted(
@@ -123,10 +152,54 @@ namespace net {
         return std::nullopt;
     }
 
+    std::vector<FrameAckInfo> FrameReassembler::CollectExpiredAckInfos(
+        uint64_t nowUs,
+        uint64_t deadlineUs,
+        uint64_t nackIntervalUs,
+        uint32_t maxNacksPerFrame
+    ) {
+        std::vector<FrameAckInfo> ackInfos;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        CleanupOldFrames(nowUs);
+
+        for (auto& [_, frame] : pendingFrames_) {
+            if (frame.chunkCount == 0 ||
+                frame.receivedCount >= frame.chunkCount ||
+                frame.nackCount >= maxNacksPerFrame ||
+                frame.firstReceiveTimeUs == 0 ||
+                nowUs <= frame.firstReceiveTimeUs ||
+                nowUs - frame.firstReceiveTimeUs < deadlineUs) {
+                continue;
+            }
+
+            if (frame.lastNackTimeUs != 0 &&
+                nowUs > frame.lastNackTimeUs &&
+                nowUs - frame.lastNackTimeUs < nackIntervalUs) {
+                continue;
+            }
+
+            FrameAckInfo ackInfo = BuildAckInfoFromPendingFrame(frame);
+            if (!ackInfo.valid || ackInfo.missingChunkCount == 0) {
+                continue;
+            }
+
+            frame.lastNackTimeUs = nowUs;
+            frame.nackCount++;
+            frame.nackSent = true;
+            ackInfos.push_back(std::move(ackInfo));
+        }
+
+        return ackInfos;
+    }
+
     void FrameReassembler::Clear() {
         std::lock_guard<std::mutex> lock(mutex_);
 
         pendingFrames_.clear();
+        recentlyCompletedFrames_.clear();
+        recentlyCompletedFrameSet_.clear();
 
         hasLastRnvpSequence_ = false;
         lastRnvpSequence_ = 0;
@@ -260,6 +333,27 @@ namespace net {
         }
     }
 
+    bool FrameReassembler::IsRecentlyCompletedFrame(uint64_t frameKey) const {
+        return recentlyCompletedFrameSet_.find(frameKey) !=
+            recentlyCompletedFrameSet_.end();
+    }
+
+    void FrameReassembler::TrackCompletedFrame(uint64_t frameKey) {
+        if (recentlyCompletedFrameSet_.find(frameKey) !=
+            recentlyCompletedFrameSet_.end()) {
+            return;
+        }
+
+        recentlyCompletedFrames_.push_back(frameKey);
+        recentlyCompletedFrameSet_.insert(frameKey);
+
+        while (recentlyCompletedFrames_.size() > kCompletedFrameHistoryLimit) {
+            const uint64_t oldFrameKey = recentlyCompletedFrames_.front();
+            recentlyCompletedFrames_.pop_front();
+            recentlyCompletedFrameSet_.erase(oldFrameKey);
+        }
+    }
+
     uint64_t FrameReassembler::MakeFrameKey(
         uint32_t streamId,
         uint32_t frameId
@@ -269,7 +363,6 @@ namespace net {
     }
 
     FrameAckInfo FrameReassembler::BuildAckInfoFromPendingFrame(
-        const ParsedDataPacket& parsed,
         const PendingFrame& frame
     ) const {
         FrameAckInfo ack{};
@@ -278,7 +371,7 @@ namespace net {
         ack.frameId = frame.frameId;
         ack.streamId = frame.streamId;
 
-        ack.latestSequence = parsed.sequence;
+        ack.latestSequence = frame.latestSequence;
 
         ack.receivedChunkCount = frame.receivedCount;
 

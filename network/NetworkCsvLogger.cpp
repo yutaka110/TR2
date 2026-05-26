@@ -164,6 +164,9 @@ namespace {
             << stats.ackCount << ','
             << stats.lastAckMissingRate << ','
             << stats.ackRetransmittedFrames << ','
+            << stats.deadlineNackSentFrames << ','
+            << stats.deadlineNackRecoveredFrames << ','
+            << stats.deadlineNackMissingChunks << ','
             << (stats.adaptiveEnabled ? 1 : 0) << ','
             << stats.adaptiveTargetJpegQuality << ','
             << stats.adaptiveTargetFps << ','
@@ -174,8 +177,12 @@ namespace {
             << stats.adaptiveEncodedFrameBytes << ','
             << stats.adaptiveCompressionRatio << ','
             << stats.adaptiveLastPacketLossRate << ','
+            << stats.adaptiveLastReceiveFps << ','
+            << stats.adaptiveLastDecodeFps << ','
+            << stats.adaptiveLastJitterMs << ','
             << stats.adaptiveLastDisplayFps << ','
             << stats.adaptiveLastQoeScore << ','
+            << EscapeCsv(stats.adaptiveDegradationCause) << ','
             << (stats.networkCondition.enabled ? 1 : 0) << ','
             << stats.networkCondition.lossRate << ','
             << stats.networkCondition.duplicateRate << ','
@@ -241,6 +248,9 @@ namespace {
             << "ackCount,"
             << "lastAckMissingRate,"
             << "ackRetransmittedFrames,"
+            << "deadlineNackSentFrames,"
+            << "deadlineNackRecoveredFrames,"
+            << "deadlineNackMissingChunks,"
             << "adaptiveEnabled,"
             << "targetJpegQuality,"
             << "targetFps,"
@@ -251,8 +261,12 @@ namespace {
             << "encodedFrameBytes,"
             << "compressionRatio,"
             << "adaptiveInputPacketLossRate,"
+            << "adaptiveInputReceiveFps,"
+            << "adaptiveInputDecodeFps,"
+            << "adaptiveInputJitterMs,"
             << "adaptiveInputDisplayFps,"
             << "adaptiveQoeScore,"
+            << "adaptiveDegradationCause,"
             << "simEnabled,"
             << "simLossRate,"
             << "simDuplicateRate,"

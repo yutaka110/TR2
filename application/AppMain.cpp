@@ -887,11 +887,23 @@ int AppMain::Run() {
 			stats.adaptiveLastLatencyMs =
 				adaptiveState.lastLatencyMs;
 
+			stats.adaptiveLastJitterMs =
+				adaptiveState.lastJitterMs;
+
+			stats.adaptiveLastReceiveFps =
+				adaptiveState.lastReceiveFps;
+
+			stats.adaptiveLastDecodeFps =
+				adaptiveState.lastDecodeFps;
+
 			stats.adaptiveLastDisplayFps =
 				adaptiveState.lastDisplayFps;
 
 			stats.adaptiveLastQoeScore =
 				adaptiveState.lastQoeScore;
+
+			stats.adaptiveDegradationCause =
+				net::ToString(adaptiveState.lastDegradationCause);
 		}
 
 		return stats;
@@ -915,6 +927,10 @@ int AppMain::Run() {
 	if (networkExperimentReporter.Start("logs")) {
 		std::cout << "[AppMain] Network experiment summary started: "
 			<< networkExperimentReporter.CsvFilePath()
+			<< " report: "
+			<< networkExperimentReporter.MarkdownFilePath()
+			<< " before/after: "
+			<< networkExperimentReporter.BeforeAfterFilePath()
 			<< "\n";
 	}
 	else {
@@ -1259,12 +1275,21 @@ int AppMain::Run() {
 				adaptiveInput.packetLossRate = receiverStats.packetLossRate;
 				adaptiveInput.rttMs = networkManager->GetLastRttMs();
 				adaptiveInput.latencyMs = receiverStats.currentLatencyMs;
+				adaptiveInput.jitterMs = receiverStats.currentJitterMs;
+				adaptiveInput.receiveFps = receiverStats.receiveFps;
+				adaptiveInput.decodeFps = receiverStats.decodeFps;
 				adaptiveInput.displayFps = receiverStats.displayFps;
 				adaptiveInput.displayedFrames = receiverStats.displayedFrames;
 				adaptiveInput.deadlineDroppedFrames =
 					receiverStats.deadlineDroppedFrames;
 				adaptiveInput.outputQueueDroppedFrames =
 					receiverStats.outputQueueDroppedFrames;
+				adaptiveInput.deadlineNackSentFrames =
+					receiverStats.deadlineNackSentFrames;
+				adaptiveInput.deadlineNackMissingChunks =
+					receiverStats.deadlineNackMissingChunks;
+				adaptiveInput.lastOutputQueueDropReason =
+					receiverStats.lastOutputQueueDropReason;
 
 				adaptiveController->Update(adaptiveInput, deltaTimeSec);
 			}

@@ -255,6 +255,21 @@ namespace net {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
+    void NetworkStats::OnDeadlineNackSent(uint32_t missingChunkCount) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.deadlineNackSentFrames++;
+        snapshot_.deadlineNackMissingChunks += missingChunkCount;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnDeadlineNackRecoveredFrame() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.deadlineNackRecoveredFrames++;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
     void NetworkStats::OnDuplicatePacket() {
         std::lock_guard<std::mutex> lock(mutex_);
 
