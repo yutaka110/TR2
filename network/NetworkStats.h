@@ -74,6 +74,9 @@ namespace net {
 		uint64_t ackStaleDroppedFrames = 0;
 		uint64_t ackKeyFrameRequests = 0;
 		bool ackKeyFramePending = false;
+		uint64_t deadlineNackSentFrames = 0;
+		uint64_t deadlineNackRecoveredFrames = 0;
+		uint64_t deadlineNackMissingChunks = 0;
 
 		// ============================================================
         // Adaptive Streaming
@@ -101,8 +104,12 @@ namespace net {
 		double adaptiveLastPacketLossRate = 0.0;
 		double adaptiveLastRttMs = 0.0;
 		double adaptiveLastLatencyMs = 0.0;
+		double adaptiveLastJitterMs = 0.0;
+		double adaptiveLastReceiveFps = 0.0;
+		double adaptiveLastDecodeFps = 0.0;
 		double adaptiveLastDisplayFps = 0.0;
 		double adaptiveLastQoeScore = 0.0;
+		std::string adaptiveDegradationCause;
 
 		// ============================================================
 		// Jitter
@@ -179,6 +186,8 @@ namespace net {
 			double newestFrameAgeMs,
 			const char* reason
 		);
+		void OnDeadlineNackSent(uint32_t missingChunkCount);
+		void OnDeadlineNackRecoveredFrame();
 
 		// 重複packetを観測したときに呼ぶ
 		void OnDuplicatePacket();

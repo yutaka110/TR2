@@ -220,7 +220,7 @@ bool DebugSceneRenderer::CreateRootSignatureAndPSO(
     // 5. シェーダコンパイル (Object3D)
     // ============================
     auto vsBlob = shaderCompiler_.CompileFromFile(
-        L"Object3D.VS.hlsl",
+        L"resources/Object3D.VS.hlsl",
         L"main",
         L"vs_6_0"
     );
@@ -229,7 +229,7 @@ bool DebugSceneRenderer::CreateRootSignatureAndPSO(
     }
 
     auto psBlob = shaderCompiler_.CompileFromFile(
-        L"Object3D.PS.hlsl",
+        L"resources/Object3D.PS.hlsl",
         L"main",
         L"ps_6_0"
     );

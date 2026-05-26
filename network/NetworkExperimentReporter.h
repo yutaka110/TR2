@@ -2,6 +2,7 @@
 
 #include "NetworkStats.h"
 
+#include <array>
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -23,6 +24,8 @@ namespace net {
         bool IsRunning() const;
         const std::string& CsvFilePath() const;
         const std::string& TextFilePath() const;
+        const std::string& MarkdownFilePath() const;
+        const std::string& BeforeAfterFilePath() const;
 
     private:
         struct ScenarioAccumulator {
@@ -49,6 +52,7 @@ namespace net {
             int minTargetFps = 0;
             int minTargetJpegQuality = 0;
             int minTargetBitrateKbps = 0;
+            std::array<uint32_t, 6> adaptiveCauseSamples{};
 
             NetworkStatsSnapshot lastStats{};
         };
@@ -85,11 +89,15 @@ namespace net {
             std::string lastOutputQueueDropReason;
             uint64_t ackCount = 0;
             uint64_t ackRetransmittedFrames = 0;
+            uint64_t deadlineNackSentFrames = 0;
+            uint64_t deadlineNackRecoveredFrames = 0;
+            uint64_t deadlineNackMissingChunks = 0;
             uint64_t simDroppedPackets = 0;
 
             int minTargetFps = 0;
             int minTargetJpegQuality = 0;
             int minTargetBitrateKbps = 0;
+            std::string dominantAdaptiveDegradationCause;
 
             std::string verdict;
             std::string notes;
@@ -99,15 +107,30 @@ namespace net {
         void FinalizeCurrent();
         void WriteHeader();
         void WriteSummary(const ScenarioSummary& summary);
+        void WriteMarkdownReport() const;
+        void WriteBeforeAfterReport() const;
 
         static ScenarioSummary BuildSummary(const ScenarioAccumulator& current);
         static double Percentile(std::vector<double> values, double percentile);
         static std::string BuildVerdictNotes(const ScenarioSummary& summary);
+        static std::string FindPreviousSummaryCsv(
+            const std::string& directory,
+            const std::string& currentCsvPath
+        );
+        static std::vector<ScenarioSummary> LoadSummaryCsv(
+            const std::string& path
+        );
+        static std::vector<std::string> ParseCsvLine(const std::string& line);
 
         std::ofstream csvFile_;
         std::ofstream textFile_;
         std::string csvFilePath_;
         std::string textFilePath_;
+        std::string markdownFilePath_;
+        std::string beforeAfterFilePath_;
+        std::string previousSummaryCsvPath_;
+        std::string generatedTimestamp_;
+        std::vector<ScenarioSummary> summaries_;
         ScenarioAccumulator current_;
         bool hasCurrent_ = false;
         bool headerWritten_ = false;

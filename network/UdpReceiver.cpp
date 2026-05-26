@@ -49,6 +49,15 @@ namespace net {
             return false;
         }
 
+        const DWORD receiveTimeoutMs = 10;
+        setsockopt(
+            socket_,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            reinterpret_cast<const char*>(&receiveTimeoutMs),
+            sizeof(receiveTimeoutMs)
+        );
+
         running_ = true;
         receiveThread_ = std::thread(&UdpReceiver::ReceiveLoop, this);
 
@@ -113,6 +122,10 @@ namespace net {
         stats_.Reset();
         reassembler_.Clear();
         jitterBuffer_.Clear();
+        hasLastRnvpDataAddr_ = false;
+        lastRnvpDataAddr_ = sockaddr_in{};
+        consecutiveIncompleteFrames_ = 0;
+        lastKeyFrameRequestUs_ = 0;
 
         std::lock_guard<std::mutex> lock(frameQueueMutex_);
         while (!completedFrames_.empty()) {
@@ -414,6 +427,10 @@ namespace net {
             }
 
             if (received <= 0) {
+                const int error = WSAGetLastError();
+                if (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK) {
+                    SendDeadlineNacks(NowMicroseconds());
+                }
                 continue;
             }
 
@@ -436,6 +453,7 @@ namespace net {
                     fromAddr
                 );
 
+                SendDeadlineNacks(receiveTimeUs);
                 continue;
             }
 
@@ -481,6 +499,9 @@ namespace net {
 
         switch (packetType) {
         case PacketType::Data: {
+            lastRnvpDataAddr_ = fromAddr;
+            hasLastRnvpDataAddr_ = true;
+
             FrameAckInfo ackInfo{};
 
             auto completed = reassembler_.PushPacketWithAckInfo(
@@ -781,6 +802,56 @@ namespace net {
         if (sent == SOCKET_ERROR) {
             std::cerr << "[UdpReceiver] SendRnvpAck failed: "
                 << WSAGetLastError() << "\n";
+        }
+    }
+
+    void UdpReceiver::SendDeadlineNacks(uint64_t nowUs) {
+        if (!hasLastRnvpDataAddr_) {
+            return;
+        }
+
+        std::vector<FrameAckInfo> expiredAckInfos =
+            reassembler_.CollectExpiredAckInfos(
+                nowUs,
+                kFrameNackDeadlineUs,
+                kFrameNackIntervalUs,
+                kMaxDeadlineNacksPerFrame
+            );
+
+        for (const FrameAckInfo& ackInfo : expiredAckInfos) {
+            RnvpHeaderV1 syntheticHeader{};
+            syntheticHeader.streamId = ackInfo.streamId;
+            syntheticHeader.frameId = ackInfo.frameId;
+
+            SendRnvpAck(
+                syntheticHeader,
+                ackInfo,
+                lastRnvpDataAddr_
+            );
+
+            stats_.OnDeadlineNackSent(ackInfo.missingChunkCount);
+
+            consecutiveIncompleteFrames_++;
+
+            const bool cooldownElapsed =
+                lastKeyFrameRequestUs_ == 0 ||
+                nowUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
+
+            const bool shouldRequestKeyFrame =
+                cooldownElapsed &&
+                (ackInfo.missingChunkCount >= 2 ||
+                    consecutiveIncompleteFrames_ >= 3);
+
+            if (shouldRequestKeyFrame) {
+                SendRnvpControl(
+                    syntheticHeader,
+                    ControlCommand::RequestKeyFrame,
+                    ackInfo.frameId,
+                    lastRnvpDataAddr_
+                );
+
+                lastKeyFrameRequestUs_ = nowUs;
+            }
         }
     }
 

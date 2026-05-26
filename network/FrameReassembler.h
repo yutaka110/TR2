@@ -4,9 +4,11 @@
 #include "NetworkStats.h"
 
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace net {
@@ -56,6 +58,13 @@ namespace net {
             FrameAckInfo* outAckInfo
         );
 
+        std::vector<FrameAckInfo> CollectExpiredAckInfos(
+            uint64_t nowUs,
+            uint64_t deadlineUs,
+            uint64_t nackIntervalUs,
+            uint32_t maxNacksPerFrame
+        );
+
         void Clear();
 
     private:
@@ -87,9 +96,14 @@ namespace net {
 
             uint16_t chunkCount = 0;
             uint16_t receivedCount = 0;
+            uint32_t latestSequence = 0;
 
+            uint64_t firstReceiveTimeUs = 0;
             uint64_t sendTimeUs = 0;
             uint64_t lastUpdateTimeUs = 0;
+            uint64_t lastNackTimeUs = 0;
+            uint32_t nackCount = 0;
+            bool nackSent = false;
 
             std::vector<std::vector<uint8_t>> chunks;
             std::vector<bool> received;
@@ -107,12 +121,11 @@ namespace net {
             uint64_t receiveTimeUs
         );
 
-        FrameAckInfo BuildAckInfoFromPendingFrame(
-            const ParsedDataPacket& parsed,
-            const PendingFrame& frame
-        ) const;
+        FrameAckInfo BuildAckInfoFromPendingFrame(const PendingFrame& frame) const;
 
         void CleanupOldFrames(uint64_t nowUs);
+        bool IsRecentlyCompletedFrame(uint64_t frameKey) const;
+        void TrackCompletedFrame(uint64_t frameKey);
 
         uint64_t MakeFrameKey(uint32_t streamId, uint32_t frameId) const;
 
@@ -121,6 +134,8 @@ namespace net {
     private:
         std::mutex mutex_;
         std::unordered_map<uint64_t, PendingFrame> pendingFrames_;
+        std::deque<uint64_t> recentlyCompletedFrames_;
+        std::unordered_set<uint64_t> recentlyCompletedFrameSet_;
 
         NetworkStats* stats_ = nullptr;
 
@@ -129,6 +144,7 @@ namespace net {
         uint32_t lastRnvpSequence_ = 0;
 
         static constexpr uint64_t kFrameTimeoutUs = 1000000; // 1秒
+        static constexpr size_t kCompletedFrameHistoryLimit = 128;
     };
 
 } // namespace net

@@ -1,0 +1,9 @@
+[CameraCapture] log start
+[CameraCapture] MFStartup succeeded.
+[CameraCapture] Camera devices found: 1
+[CameraCapture] Camera media source activated.
+[CameraCapture] Source reader created.
+[CameraCapture] Current media size: 1280x720
+[CameraCapture] Initialized RGB32 capture 1280x720 -> 320x180.
+
+[CameraCapture] ReadSample returned no sample. flags=0x100

@@ -69,7 +69,7 @@
     <ClCompile Include="main.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
-    <ClCompile Include="Matrix4x4.cpp">
+    <ClCompile Include="legacy\root_stubs\Matrix4x4.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="externals\imgui\imgui.cpp">
@@ -93,10 +93,10 @@
     <ClCompile Include="externals\imgui\imgui_widgets.cpp">
       <Filter>imgui</Filter>
     </ClCompile>
-    <ClCompile Include="KeyInput.cpp">
+    <ClCompile Include="legacy\root_stubs\KeyInput.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
-    <ClCompile Include="WinApp.cpp">
+    <ClCompile Include="legacy\root_stubs\WinApp.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="lib\Receiver\startTcpReciverRgb32.cpp">
@@ -326,8 +326,8 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <FxCompile Include="Object3D.VS.hlsl" />
-    <FxCompile Include="Object3D.PS.hlsl" />
+    <FxCompile Include="Resources\Object3D.VS.hlsl" />
+    <FxCompile Include="Resources\Object3D.PS.hlsl" />
     <FxCompile Include="Resources\Particle.PS.hlsl" />
     <FxCompile Include="Resources\Particle.VS.hlsl" />
     <FxCompile Include="Resources\Sprite.PS.hlsl" />
@@ -339,7 +339,7 @@
     <FxCompile Include="Resources\FullscreenComposite.PS.hlsl" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Matrix4x4.h">
+    <ClInclude Include="legacy\root_stubs\Matrix4x4.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="externals\imgui\imconfig.h">
@@ -366,13 +366,13 @@
     <ClInclude Include="externals\imgui\imstb_truetype.h">
       <Filter>imgui</Filter>
     </ClInclude>
-    <ClInclude Include="Vertex.h">
+    <ClInclude Include="legacy\root_stubs\Vertex.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
-    <ClInclude Include="KeyInput.h">
+    <ClInclude Include="legacy\root_stubs\KeyInput.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
-    <ClInclude Include="WinApp.h">
+    <ClInclude Include="legacy\root_stubs\WinApp.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="application\AppRunLoop.h">
@@ -651,5 +651,6 @@
   <ItemGroup>
     <None Include="Resources\Particle.hlsli" />
     <None Include="Resources\effects\WarpCore.effect" />
+    <None Include="Resources\MotionDetect.CS.hlsl" />
   </ItemGroup>
 </Project>

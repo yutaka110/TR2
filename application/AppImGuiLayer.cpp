@@ -520,6 +520,17 @@ namespace {
 
             ImGui::Text("KeyFrame Pending: %s",
                 stats.ackKeyFramePending ? "true" : "false");
+
+            ImGui::Separator();
+
+            ImGui::Text("Deadline NACK Sent Frames: %llu",
+                static_cast<unsigned long long>(stats.deadlineNackSentFrames));
+
+            ImGui::Text("Deadline NACK Recovered Frames: %llu",
+                static_cast<unsigned long long>(stats.deadlineNackRecoveredFrames));
+
+            ImGui::Text("Deadline NACK Missing Chunks: %llu",
+                static_cast<unsigned long long>(stats.deadlineNackMissingChunks));
         }
 
         if (ImGui::CollapsingHeader("Adaptive Streaming", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -557,8 +568,15 @@ namespace {
 
             ImGui::Text("Input RTT: %.2f ms", stats.adaptiveLastRttMs);
             ImGui::Text("Input Latency: %.2f ms", stats.adaptiveLastLatencyMs);
+            ImGui::Text("Input Jitter: %.2f ms", stats.adaptiveLastJitterMs);
+            ImGui::Text("Input Receive FPS: %.2f", stats.adaptiveLastReceiveFps);
+            ImGui::Text("Input Decode FPS: %.2f", stats.adaptiveLastDecodeFps);
             ImGui::Text("Input Display FPS: %.2f", stats.adaptiveLastDisplayFps);
             ImGui::Text("QoE Score: %.2f", stats.adaptiveLastQoeScore);
+            ImGui::Text("Degradation Cause: %s",
+                stats.adaptiveDegradationCause.empty()
+                ? "None"
+                : stats.adaptiveDegradationCause.c_str());
         }
 
         if (ImGui::CollapsingHeader("Jitter", ImGuiTreeNodeFlags_DefaultOpen)) {
