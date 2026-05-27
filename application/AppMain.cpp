@@ -593,7 +593,7 @@ int AppMain::Run() {
 	runtimeState.transformSprite.scale = { 360.0f, 203.0f, 1.0f };
 	runtimeState.transformSprite.rotate = { 0.0f, 0.0f, 0.0f };
 
-	runtimeState.transformSprite.translate = { 640.0f, 560.0f, 0.0f };
+	runtimeState.transformSprite.translate = { 640.0f, 256.0f, 0.0f };
 
 	runtimeState.uvTransformSprite.scale = { 1.0f, 1.0f, 1.0f };
 	runtimeState.uvTransformSprite.rotate = { 0.0f, 0.0f, 0.0f };
@@ -778,6 +778,7 @@ int AppMain::Run() {
 	);
 
 	auto adaptiveController = std::make_unique<net::AdaptiveStreamingController>();
+	net::NetworkExperimentRunner networkExperimentRunner;
 
 	if (udpReceiver->Start(kRnvpListenPort)) {
 		std::cout << "[AppMain] UdpReceiver started. port="
@@ -802,7 +803,8 @@ int AppMain::Run() {
 		[
 			receiver = udpReceiver.get(),
 			sender = networkManager.get(),
-			adaptive = adaptiveController.get()
+			adaptive = adaptiveController.get(),
+			experiment = &networkExperimentRunner
 		]() {
 		net::NetworkStatsSnapshot stats{};
 
@@ -838,6 +840,8 @@ int AppMain::Run() {
 				adaptive->GetState();
 
 			stats.adaptiveEnabled = adaptive->IsEnabled();
+			stats.adaptiveControlMode =
+				net::ToString(adaptiveState.controlMode);
 
 			stats.adaptiveTargetJpegQuality =
 				adaptiveState.targetJpegQuality;
@@ -906,6 +910,29 @@ int AppMain::Run() {
 				net::ToString(adaptiveState.lastDegradationCause);
 		}
 
+		if (experiment) {
+			stats.networkExperimentActive = experiment->IsActive();
+			stats.networkExperimentScenarioName =
+				experiment->IsActive()
+				? experiment->CurrentScenarioName()
+				: "";
+			stats.networkExperimentAdaptiveMode =
+				experiment->IsActive()
+				? net::ToString(experiment->CurrentAdaptiveControlMode())
+				: "";
+			stats.networkExperimentRemainingSec =
+				experiment->IsActive()
+				? experiment->RemainingSec()
+				: 0.0;
+			stats.networkExperimentStepIndex =
+				static_cast<uint32_t>(
+					experiment->IsActive()
+					? experiment->CurrentIndex() + 1
+					: 0);
+			stats.networkExperimentStepCount =
+				static_cast<uint32_t>(experiment->ScenarioCount());
+		}
+
 		return stats;
 		};
 
@@ -922,7 +949,6 @@ int AppMain::Run() {
 	}
 	const auto networkCsvStartTime = std::chrono::steady_clock::now();
 	auto lastNetworkCsvSampleTime = networkCsvStartTime - std::chrono::seconds(1);
-	net::NetworkExperimentRunner networkExperimentRunner;
 	net::NetworkExperimentReporter networkExperimentReporter;
 	if (networkExperimentReporter.Start("logs")) {
 		std::cout << "[AppMain] Network experiment summary started: "
@@ -966,6 +992,21 @@ int AppMain::Run() {
 				sender->SetNetworkCondition(condition);
 			}
 		}
+				);
+
+	runLoop.SetAdaptiveControlModeSetter(
+		[
+			adaptive = adaptiveController.get()
+		](int modeIndex) {
+		if (!adaptive) {
+			return;
+		}
+
+		const int clampedMode =
+			std::clamp(modeIndex, 0, 2);
+		adaptive->SetControlMode(
+			static_cast<net::AdaptiveControlMode>(clampedMode));
+	}
 				);
 	runLoop.SetReceivedFrameProvider(
 		[
@@ -1047,6 +1088,10 @@ int AppMain::Run() {
 					networkManager->SetNetworkCondition(
 						networkExperimentRunner.CurrentCondition());
 				}
+				if (adaptiveController) {
+					adaptiveController->SetControlMode(
+						networkExperimentRunner.CurrentAdaptiveControlMode());
+				}
 
 				networkCsvLogger.SetScenarioName(
 					networkExperimentRunner.CurrentScenarioName());
@@ -1076,6 +1121,13 @@ int AppMain::Run() {
 				if (networkExperimentRunner.IsActive()) {
 					oss << "[AppMain] Network experiment scenario: "
 						<< networkExperimentRunner.CurrentScenarioName()
+						<< " step="
+						<< (networkExperimentRunner.CurrentIndex() + 1)
+						<< "/"
+						<< networkExperimentRunner.ScenarioCount()
+						<< " mode="
+						<< net::ToString(
+							networkExperimentRunner.CurrentAdaptiveControlMode())
 						<< " remainingSec="
 						<< networkExperimentRunner.RemainingSec();
 				}

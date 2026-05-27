@@ -132,6 +132,12 @@ namespace {
         file_ << std::fixed << std::setprecision(3)
             << appTimeSec << ','
             << EscapeCsv(ResolveScenarioName(stats)) << ','
+            << (stats.networkExperimentActive ? 1 : 0) << ','
+            << EscapeCsv(stats.networkExperimentScenarioName) << ','
+            << EscapeCsv(stats.networkExperimentAdaptiveMode) << ','
+            << stats.networkExperimentRemainingSec << ','
+            << stats.networkExperimentStepIndex << ','
+            << stats.networkExperimentStepCount << ','
             << stats.latestFrameId << ','
             << stats.receiveFps << ','
             << stats.decodeFps << ','
@@ -167,7 +173,11 @@ namespace {
             << stats.deadlineNackSentFrames << ','
             << stats.deadlineNackRecoveredFrames << ','
             << stats.deadlineNackMissingChunks << ','
+            << stats.deadlineNackExpiredDroppedFrames << ','
+            << stats.deadlineNackExpiredAfterNackFrames << ','
+            << stats.deadlineNackExpiredMissingChunks << ','
             << (stats.adaptiveEnabled ? 1 : 0) << ','
+            << EscapeCsv(stats.adaptiveControlMode) << ','
             << stats.adaptiveTargetJpegQuality << ','
             << stats.adaptiveTargetFps << ','
             << stats.adaptiveTargetBitrateKbps << ','
@@ -216,6 +226,12 @@ namespace {
         file_
             << "timeSec,"
             << "scenarioName,"
+            << "networkExperimentActive,"
+            << "networkExperimentScenarioName,"
+            << "networkExperimentAdaptiveMode,"
+            << "networkExperimentRemainingSec,"
+            << "networkExperimentStepIndex,"
+            << "networkExperimentStepCount,"
             << "frameId,"
             << "receiveFps,"
             << "decodeFps,"
@@ -251,7 +267,11 @@ namespace {
             << "deadlineNackSentFrames,"
             << "deadlineNackRecoveredFrames,"
             << "deadlineNackMissingChunks,"
+            << "deadlineNackExpiredDroppedFrames,"
+            << "deadlineNackExpiredAfterNackFrames,"
+            << "deadlineNackExpiredMissingChunks,"
             << "adaptiveEnabled,"
+            << "adaptiveControlMode,"
             << "targetJpegQuality,"
             << "targetFps,"
             << "targetBitrateKbps,"

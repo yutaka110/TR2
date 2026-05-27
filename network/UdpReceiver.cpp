@@ -810,15 +810,49 @@ namespace net {
             return;
         }
 
-        std::vector<FrameAckInfo> expiredAckInfos =
-            reassembler_.CollectExpiredAckInfos(
+        FrameRecoveryActions recoveryActions =
+            reassembler_.CollectRecoveryActions(
                 nowUs,
                 kFrameNackDeadlineUs,
                 kFrameNackIntervalUs,
+                kFrameNackRecoveryExpireUs,
+                kFrameNackMinRecoverySlackUs,
                 kMaxDeadlineNacksPerFrame
             );
 
-        for (const FrameAckInfo& ackInfo : expiredAckInfos) {
+        if (recoveryActions.expiredFrameCount > 0) {
+            consecutiveIncompleteFrames_ +=
+                recoveryActions.expiredFrameCount;
+
+            const bool cooldownElapsed =
+                lastKeyFrameRequestUs_ == 0 ||
+                nowUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
+
+            const bool shouldRequestKeyFrame =
+                cooldownElapsed &&
+                (recoveryActions.expiredAfterNackCount > 0 ||
+                    recoveryActions.expiredFrameCount >= 2 ||
+                    consecutiveIncompleteFrames_ >= 3);
+
+            if (shouldRequestKeyFrame) {
+                RnvpHeaderV1 syntheticHeader{};
+                syntheticHeader.streamId =
+                    recoveryActions.lastExpiredStreamId;
+                syntheticHeader.frameId =
+                    recoveryActions.lastExpiredFrameId;
+
+                SendRnvpControl(
+                    syntheticHeader,
+                    ControlCommand::RequestKeyFrame,
+                    recoveryActions.lastExpiredFrameId,
+                    lastRnvpDataAddr_
+                );
+
+                lastKeyFrameRequestUs_ = nowUs;
+            }
+        }
+
+        for (const FrameAckInfo& ackInfo : recoveryActions.nackAckInfos) {
             RnvpHeaderV1 syntheticHeader{};
             syntheticHeader.streamId = ackInfo.streamId;
             syntheticHeader.frameId = ackInfo.frameId;

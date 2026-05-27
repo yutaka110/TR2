@@ -340,6 +340,10 @@ void AppRunLoop::SetNetworkConditionSetter(
     networkConditionSetter_ = std::move(setter);
 }
 
+void AppRunLoop::SetAdaptiveControlModeSetter(std::function<void(int)> setter) {
+    adaptiveControlModeSetter_ = std::move(setter);
+}
+
 void AppRunLoop::SetReceivedFrameProvider(
     std::function<bool(net::CompletedFrame&)> provider) {
     receivedFrameProvider_ = std::move(provider);
@@ -723,6 +727,7 @@ void AppRunLoop::RenderFrame() {
         jitterBufferTargetDelaySetter_,
         jitterBufferAutoModeSetter_,
         networkConditionSetter_,
+        adaptiveControlModeSetter_,
         [&]() {
         Emitter emitterState{};
         emitterState.transform = runtimeState_.emitter.transform;

@@ -14,7 +14,7 @@ namespace net {
     // 現在の NetworkManager / UdpReceiver / FrameReassembler が使っている
     // 既存28byteヘッダー。
     //
-    // 今回は既存構造を壊さないため、このレイアウトは維持する。
+    // 
     // ============================================================
 
     static constexpr uint32_t kPacketMagic = 0x52545631; // "RTV1"
@@ -37,7 +37,7 @@ namespace net {
     };
 
     // 現在の実通信で使う既存ヘッダー。
-    // 注意：
+    // 
     // この構造体のメモリを直接送信せず、EncodeHeader() で必ずBE変換して送る。
     struct PacketHeader {
         uint32_t magic = kPacketMagic;
@@ -292,7 +292,7 @@ namespace net {
     // Current PacketHeader Encode / Decode
     // ------------------------------------------------------------
     // 既存コード用。
-    // NetworkManager.cpp / FrameReassembler.cpp は今まで通りこれを使う。
+    // NetworkManager.cpp / FrameReassembler.cpp はこれを使う。
     // ============================================================
 
     inline void EncodeHeader(uint8_t* dst, const PacketHeader& header) {

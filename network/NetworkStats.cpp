@@ -270,6 +270,33 @@ namespace net {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
+    void NetworkStats::OnDeadlineNackExpiredFrame(
+        uint32_t missingChunkCount,
+        bool nackSent
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.deadlineNackExpiredDroppedFrames++;
+        snapshot_.deadlineNackExpiredMissingChunks += missingChunkCount;
+
+        if (nackSent) {
+            snapshot_.deadlineNackExpiredAfterNackFrames++;
+        }
+
+        snapshot_.droppedFrames++;
+
+        const uint64_t totalFrames =
+            snapshot_.completedFrames + snapshot_.droppedFrames;
+
+        if (totalFrames > 0) {
+            snapshot_.frameDropRate =
+                static_cast<double>(snapshot_.droppedFrames) /
+                static_cast<double>(totalFrames);
+        }
+
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
     void NetworkStats::OnDuplicatePacket() {
         std::lock_guard<std::mutex> lock(mutex_);
 

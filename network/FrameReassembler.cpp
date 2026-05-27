@@ -87,6 +87,9 @@ namespace net {
             frame.firstReceiveTimeUs = receiveTimeUs;
             frame.sendTimeUs = parsed.sendTimeUs;
             frame.lastUpdateTimeUs = receiveTimeUs;
+            frame.recoveryExpireTimeUs =
+                receiveTimeUs + kDefaultRecoveryExpireUs;
+            frame.recoveryState = FrameRecoveryState::Waiting;
 
             frame.chunks.resize(parsed.chunkCount);
             frame.received.resize(parsed.chunkCount, false);
@@ -133,9 +136,10 @@ namespace net {
             if (frame.nackSent && completed && stats_) {
                 stats_->OnDeadlineNackRecoveredFrame();
             }
+            frame.recoveryState = FrameRecoveryState::Recovered;
 
             pendingFrames_.erase(frameKey);
-            TrackCompletedFrame(frameKey);
+            RetireFrame(frameKey);
 
             if (completed && stats_) {
                 stats_->OnFrameCompleted(
@@ -158,40 +162,109 @@ namespace net {
         uint64_t nackIntervalUs,
         uint32_t maxNacksPerFrame
     ) {
-        std::vector<FrameAckInfo> ackInfos;
+        FrameRecoveryActions actions = CollectRecoveryActions(
+            nowUs,
+            deadlineUs,
+            nackIntervalUs,
+            kDefaultRecoveryExpireUs,
+            0,
+            maxNacksPerFrame
+        );
+
+        return std::move(actions.nackAckInfos);
+    }
+
+    FrameRecoveryActions FrameReassembler::CollectRecoveryActions(
+        uint64_t nowUs,
+        uint64_t nackDeadlineUs,
+        uint64_t nackIntervalUs,
+        uint64_t recoveryExpireUs,
+        uint64_t minRecoverySlackUs,
+        uint32_t maxNacksPerFrame
+    ) {
+        FrameRecoveryActions actions;
 
         std::lock_guard<std::mutex> lock(mutex_);
 
         CleanupOldFrames(nowUs);
 
-        for (auto& [_, frame] : pendingFrames_) {
+        for (auto it = pendingFrames_.begin(); it != pendingFrames_.end();) {
+            const uint64_t frameKey = it->first;
+            PendingFrame& frame = it->second;
+
             if (frame.chunkCount == 0 ||
                 frame.receivedCount >= frame.chunkCount ||
-                frame.nackCount >= maxNacksPerFrame ||
-                frame.firstReceiveTimeUs == 0 ||
+                frame.firstReceiveTimeUs == 0) {
+                ++it;
+                continue;
+            }
+
+            if (frame.recoveryExpireTimeUs == 0) {
+                frame.recoveryExpireTimeUs =
+                    frame.firstReceiveTimeUs + recoveryExpireUs;
+            }
+
+            const bool expiredByLifetime =
+                nowUs >= frame.recoveryExpireTimeUs;
+
+            const bool notEnoughRecoverySlack =
+                minRecoverySlackUs > 0 &&
+                nowUs + minRecoverySlackUs >= frame.recoveryExpireTimeUs;
+
+            if (expiredByLifetime || notEnoughRecoverySlack) {
+                const FrameAckInfo expiredInfo =
+                    BuildAckInfoFromPendingFrame(frame);
+
+                actions.expiredFrameCount++;
+                actions.expiredAfterNackCount += frame.nackSent ? 1 : 0;
+                actions.expiredMissingChunkCount +=
+                    expiredInfo.missingChunkCount;
+                actions.lastExpiredFrameId = frame.frameId;
+                actions.lastExpiredStreamId = frame.streamId;
+
+                frame.recoveryState = FrameRecoveryState::Expired;
+
+                if (stats_) {
+                    stats_->OnDeadlineNackExpiredFrame(
+                        expiredInfo.missingChunkCount,
+                        frame.nackSent
+                    );
+                }
+
+                RetireFrame(frameKey);
+                it = pendingFrames_.erase(it);
+                continue;
+            }
+
+            if (frame.nackCount >= maxNacksPerFrame ||
                 nowUs <= frame.firstReceiveTimeUs ||
-                nowUs - frame.firstReceiveTimeUs < deadlineUs) {
+                nowUs - frame.firstReceiveTimeUs < nackDeadlineUs) {
+                ++it;
                 continue;
             }
 
             if (frame.lastNackTimeUs != 0 &&
                 nowUs > frame.lastNackTimeUs &&
                 nowUs - frame.lastNackTimeUs < nackIntervalUs) {
+                ++it;
                 continue;
             }
 
             FrameAckInfo ackInfo = BuildAckInfoFromPendingFrame(frame);
             if (!ackInfo.valid || ackInfo.missingChunkCount == 0) {
+                ++it;
                 continue;
             }
 
             frame.lastNackTimeUs = nowUs;
             frame.nackCount++;
             frame.nackSent = true;
-            ackInfos.push_back(std::move(ackInfo));
+            frame.recoveryState = FrameRecoveryState::NackSent;
+            actions.nackAckInfos.push_back(std::move(ackInfo));
+            ++it;
         }
 
-        return ackInfos;
+        return actions;
     }
 
     void FrameReassembler::Clear() {
@@ -325,12 +398,17 @@ namespace net {
                     stats_->OnDroppedFrame();
                 }
 
+                RetireFrame(it->first);
                 it = pendingFrames_.erase(it);
             }
             else {
                 ++it;
             }
         }
+    }
+
+    void FrameReassembler::RetireFrame(uint64_t frameKey) {
+        TrackCompletedFrame(frameKey);
     }
 
     bool FrameReassembler::IsRecentlyCompletedFrame(uint64_t frameKey) const {

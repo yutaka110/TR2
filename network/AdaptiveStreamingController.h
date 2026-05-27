@@ -17,6 +17,14 @@ namespace net {
 
     const char* ToString(AdaptiveDegradationCause cause);
 
+    enum class AdaptiveControlMode {
+        FixedQuality = 0,
+        LossReactive = 1,
+        QoeDeadlineAdaptive = 2
+    };
+
+    const char* ToString(AdaptiveControlMode mode);
+
     struct AdaptiveStreamingInput {
         double ackMissingRate = 0.0;
         double packetLossRate = 0.0;
@@ -61,6 +69,8 @@ namespace net {
         double lastQoeScore = 0.0;
         AdaptiveDegradationCause lastDegradationCause =
             AdaptiveDegradationCause::None;
+        AdaptiveControlMode controlMode =
+            AdaptiveControlMode::QoeDeadlineAdaptive;
         uint64_t lastDeadlineDroppedFrames = 0;
         uint64_t lastOutputQueueDroppedFrames = 0;
         uint64_t lastDeadlineNackSentFrames = 0;
@@ -81,8 +91,17 @@ namespace net {
 
         void SetEnabled(bool enabled);
         bool IsEnabled() const;
+        void SetControlMode(AdaptiveControlMode mode);
+        AdaptiveControlMode GetControlMode() const;
 
     private:
+        void InitializeTargetsForMode();
+        void UpdateLossReactive(
+            const AdaptiveStreamingInput& input,
+            double deltaTimeSec,
+            uint64_t deadlineNackDelta,
+            uint64_t deadlineNackMissingChunkDelta
+        );
         void ApplyMultiplicativeDecrease(double factor);
         void ApplyCauseSpecificDecrease(
             AdaptiveDegradationCause cause,
@@ -111,6 +130,8 @@ namespace net {
 
     private:
         bool enabled_ = true;
+        AdaptiveControlMode controlMode_ =
+            AdaptiveControlMode::QoeDeadlineAdaptive;
 
         AdaptiveStreamingState state_{};
 

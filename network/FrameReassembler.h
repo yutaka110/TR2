@@ -38,6 +38,23 @@ namespace net {
         std::vector<uint16_t> missingChunkIndices;
     };
 
+    enum class FrameRecoveryState {
+        Waiting,
+        NackSent,
+        Recovered,
+        Expired,
+        KeyFrameRequested
+    };
+
+    struct FrameRecoveryActions {
+        std::vector<FrameAckInfo> nackAckInfos;
+        uint32_t expiredFrameCount = 0;
+        uint32_t expiredAfterNackCount = 0;
+        uint32_t expiredMissingChunkCount = 0;
+        uint32_t lastExpiredFrameId = 0;
+        uint32_t lastExpiredStreamId = 0;
+    };
+
     class FrameReassembler {
     public:
         explicit FrameReassembler(NetworkStats* stats = nullptr);
@@ -62,6 +79,15 @@ namespace net {
             uint64_t nowUs,
             uint64_t deadlineUs,
             uint64_t nackIntervalUs,
+            uint32_t maxNacksPerFrame
+        );
+
+        FrameRecoveryActions CollectRecoveryActions(
+            uint64_t nowUs,
+            uint64_t nackDeadlineUs,
+            uint64_t nackIntervalUs,
+            uint64_t recoveryExpireUs,
+            uint64_t minRecoverySlackUs,
             uint32_t maxNacksPerFrame
         );
 
@@ -101,9 +127,12 @@ namespace net {
             uint64_t firstReceiveTimeUs = 0;
             uint64_t sendTimeUs = 0;
             uint64_t lastUpdateTimeUs = 0;
+            uint64_t recoveryExpireTimeUs = 0;
             uint64_t lastNackTimeUs = 0;
             uint32_t nackCount = 0;
             bool nackSent = false;
+            FrameRecoveryState recoveryState =
+                FrameRecoveryState::Waiting;
 
             std::vector<std::vector<uint8_t>> chunks;
             std::vector<bool> received;
@@ -124,6 +153,7 @@ namespace net {
         FrameAckInfo BuildAckInfoFromPendingFrame(const PendingFrame& frame) const;
 
         void CleanupOldFrames(uint64_t nowUs);
+        void RetireFrame(uint64_t frameKey);
         bool IsRecentlyCompletedFrame(uint64_t frameKey) const;
         void TrackCompletedFrame(uint64_t frameKey);
 
@@ -144,6 +174,7 @@ namespace net {
         uint32_t lastRnvpSequence_ = 0;
 
         static constexpr uint64_t kFrameTimeoutUs = 1000000; // 1秒
+        static constexpr uint64_t kDefaultRecoveryExpireUs = 150000;
         static constexpr size_t kCompletedFrameHistoryLimit = 128;
     };
 

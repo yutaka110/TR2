@@ -177,6 +177,15 @@ namespace {
         }
     }
 
+    std::string ExtractNetworkScenarioName(const std::string& scenarioName) {
+        const std::string marker = " / ";
+        const size_t markerPos = scenarioName.find(marker);
+        if (markerPos == std::string::npos) {
+            return scenarioName;
+        }
+        return scenarioName.substr(0, markerPos);
+    }
+
 } // namespace
 
     bool NetworkExperimentReporter::Start(const std::string& directory) {
@@ -320,6 +329,15 @@ namespace {
                 (std::min)(current_.minTargetBitrateKbps, stats.adaptiveTargetBitrateKbps);
         }
 
+        if (!stats.adaptiveControlMode.empty()) {
+            if (current_.adaptiveControlMode.empty()) {
+                current_.adaptiveControlMode = stats.adaptiveControlMode;
+            }
+            else if (current_.adaptiveControlMode != stats.adaptiveControlMode) {
+                current_.adaptiveControlMode = "Mixed";
+            }
+        }
+
         current_.adaptiveCauseSamples[
             AdaptiveCauseIndex(stats.adaptiveDegradationCause)]++;
 
@@ -400,10 +418,14 @@ namespace {
             << "deadlineNackSentFrames,"
             << "deadlineNackRecoveredFrames,"
             << "deadlineNackMissingChunks,"
+            << "deadlineNackExpiredDroppedFrames,"
+            << "deadlineNackExpiredAfterNackFrames,"
+            << "deadlineNackExpiredMissingChunks,"
             << "simDroppedPackets,"
             << "minTargetFps,"
             << "minTargetJpegQuality,"
             << "minTargetBitrateKbps,"
+            << "adaptiveControlMode,"
             << "dominantAdaptiveDegradationCause,"
             << "verdict,"
             << "notes"
@@ -447,10 +469,14 @@ namespace {
                 << summary.deadlineNackSentFrames << ','
                 << summary.deadlineNackRecoveredFrames << ','
                 << summary.deadlineNackMissingChunks << ','
+                << summary.deadlineNackExpiredDroppedFrames << ','
+                << summary.deadlineNackExpiredAfterNackFrames << ','
+                << summary.deadlineNackExpiredMissingChunks << ','
                 << summary.simDroppedPackets << ','
                 << summary.minTargetFps << ','
                 << summary.minTargetJpegQuality << ','
                 << summary.minTargetBitrateKbps << ','
+                << EscapeCsv(summary.adaptiveControlMode) << ','
                 << EscapeCsv(summary.dominantAdaptiveDegradationCause) << ','
                 << EscapeCsv(summary.verdict) << ','
                 << EscapeCsv(summary.notes)
@@ -487,6 +513,11 @@ namespace {
                 << summary.minTargetFps << " / "
                 << summary.minTargetJpegQuality << " / "
                 << summary.minTargetBitrateKbps << "\n";
+            textFile_ << "  adaptive control mode: "
+                << (summary.adaptiveControlMode.empty()
+                    ? "unknown"
+                    : summary.adaptiveControlMode)
+                << "\n";
             textFile_ << "  adaptive dominant cause: "
                 << (summary.dominantAdaptiveDegradationCause.empty()
                     ? "None"
@@ -496,6 +527,10 @@ namespace {
                 << summary.deadlineNackSentFrames << " / "
                 << summary.deadlineNackRecoveredFrames << " / "
                 << summary.deadlineNackMissingChunks << "\n";
+            textFile_ << "  deadline nack expired drops/afterNack/missingChunks: "
+                << summary.deadlineNackExpiredDroppedFrames << " / "
+                << summary.deadlineNackExpiredAfterNackFrames << " / "
+                << summary.deadlineNackExpiredMissingChunks << "\n";
             textFile_ << "  verdict: " << summary.verdict;
             if (!summary.notes.empty()) {
                 textFile_ << " (" << summary.notes << ")";
@@ -521,6 +556,7 @@ namespace {
         uint64_t totalDeadlineNacks = 0;
         uint64_t totalDeadlineNackRecoveries = 0;
         uint64_t totalDeadlineNackMissingChunks = 0;
+        uint64_t totalDeadlineNackExpiredDrops = 0;
         double worstP95LatencyMs = 0.0;
 
         for (const ScenarioSummary& summary : summaries_) {
@@ -532,6 +568,8 @@ namespace {
             totalDeadlineNacks += summary.deadlineNackSentFrames;
             totalDeadlineNackRecoveries += summary.deadlineNackRecoveredFrames;
             totalDeadlineNackMissingChunks += summary.deadlineNackMissingChunks;
+            totalDeadlineNackExpiredDrops +=
+                summary.deadlineNackExpiredDroppedFrames;
             worstP95LatencyMs =
                 (std::max)(worstP95LatencyMs, summary.p95LatencyMs);
         }
@@ -554,6 +592,9 @@ namespace {
                 << " ms against the 150 ms display deadline.\n";
             file << "- Deadline drops: " << totalDeadlineDrops
                 << ", output queue drops: " << totalOutputQueueDrops << ".\n";
+            file << "- NACK recovery expired drops: "
+                << totalDeadlineNackExpiredDrops
+                << " frames were discarded instead of recovering stale video.\n";
 
             if (totalDeadlineNacks > 0) {
                 const double recoveryRatio =
@@ -577,13 +618,17 @@ namespace {
 
         file << "## Scenario Results\n\n";
         file
-            << "| Scenario | Verdict | Cause | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | Notes |\n"
-            << "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+            << "| Scenario | Verdict | Mode | Cause | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | NACK Expired | Notes |\n"
+            << "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
         for (const ScenarioSummary& summary : summaries_) {
             file << "| "
                 << EscapeMarkdownTable(summary.name) << " | "
                 << summary.verdict << " | "
+                << EscapeMarkdownTable(
+                    summary.adaptiveControlMode.empty()
+                    ? "unknown"
+                    : summary.adaptiveControlMode) << " | "
                 << EscapeMarkdownTable(
                     summary.dominantAdaptiveDegradationCause.empty()
                     ? "None"
@@ -596,11 +641,64 @@ namespace {
                 << summary.outputQueueDroppedFrames << " | "
                 << summary.deadlineNackSentFrames << " | "
                 << summary.deadlineNackRecoveredFrames << " | "
+                << summary.deadlineNackExpiredDroppedFrames << " | "
                 << EscapeMarkdownTable(
                     summary.notes.empty() ? "none" : summary.notes)
                 << " |\n";
         }
         file << "\n";
+
+        file << "## Adaptive Mode Comparison\n\n";
+        if (summaries_.empty()) {
+            file << "No adaptive mode comparison is available yet.\n\n";
+        }
+        else {
+            std::vector<std::string> networkScenarioOrder;
+            std::unordered_map<std::string, std::vector<const ScenarioSummary*>>
+                summariesByNetworkScenario;
+
+            for (const ScenarioSummary& summary : summaries_) {
+                const std::string networkScenario =
+                    ExtractNetworkScenarioName(summary.name);
+                if (summariesByNetworkScenario.find(networkScenario) ==
+                    summariesByNetworkScenario.end()) {
+                    networkScenarioOrder.push_back(networkScenario);
+                }
+                summariesByNetworkScenario[networkScenario].push_back(&summary);
+            }
+
+            file
+                << "| Network Scenario | Mode | Avg FPS | P95 Latency ms | Drops | NACK Recovered | NACK Expired | Min FPS | Min JPEG Quality | Verdict |\n"
+                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+
+            for (const std::string& networkScenario : networkScenarioOrder) {
+                const auto it =
+                    summariesByNetworkScenario.find(networkScenario);
+                if (it == summariesByNetworkScenario.end()) {
+                    continue;
+                }
+
+                for (const ScenarioSummary* summary : it->second) {
+                    file << "| "
+                        << EscapeMarkdownTable(networkScenario) << " | "
+                        << EscapeMarkdownTable(
+                            summary->adaptiveControlMode.empty()
+                            ? "unknown"
+                            : summary->adaptiveControlMode) << " | "
+                        << FormatDouble(summary->avgDisplayFps) << " | "
+                        << FormatDouble(summary->p95LatencyMs) << " | "
+                        << summary->droppedFrames << " | "
+                        << summary->deadlineNackRecoveredFrames << " | "
+                        << summary->deadlineNackExpiredDroppedFrames << " | "
+                        << summary->minTargetFps << " | "
+                        << summary->minTargetJpegQuality << " | "
+                        << summary->verdict << " |\n";
+                }
+            }
+
+            file << "\n";
+            file << "This table is the A/B evidence path: Fixed Quality shows the uncontrolled baseline, Loss Reactive shows packet-loss-only adaptation, and QoE/Deadline Adaptive shows the full controller under the same network condition.\n\n";
+        }
 
         file << "## Baseline Comparison\n\n";
         if (summaries_.empty()) {
@@ -609,8 +707,8 @@ namespace {
         else {
             const ScenarioSummary& baseline = summaries_.front();
             file
-                << "| Scenario | FPS Delta | P95 Latency Delta ms | Drop Delta | Adaptive Min FPS | Adaptive Min JPEG Quality |\n"
-                << "| --- | ---: | ---: | ---: | ---: | ---: |\n";
+                << "| Scenario | Mode | FPS Delta | P95 Latency Delta ms | Drop Delta | Adaptive Min FPS | Adaptive Min JPEG Quality |\n"
+                << "| --- | --- | ---: | ---: | ---: | ---: | ---: |\n";
 
             for (const ScenarioSummary& summary : summaries_) {
                 const double fpsDelta =
@@ -623,6 +721,10 @@ namespace {
 
                 file << "| "
                     << EscapeMarkdownTable(summary.name) << " | "
+                    << EscapeMarkdownTable(
+                        summary.adaptiveControlMode.empty()
+                        ? "unknown"
+                        : summary.adaptiveControlMode) << " | "
                     << FormatDouble(fpsDelta) << " | "
                     << FormatDouble(p95Delta) << " | "
                     << dropDelta << " | "
@@ -652,6 +754,12 @@ namespace {
                         << " frames from "
                         << summary.deadlineNackSentFrames
                         << " NACK events";
+                }
+
+                if (summary.deadlineNackExpiredDroppedFrames > 0) {
+                    file << "; "
+                        << summary.deadlineNackExpiredDroppedFrames
+                        << " stale incomplete frames expired before display deadline";
                 }
 
                 if (summary.outputQueueDroppedFrames > 0 &&
@@ -723,6 +831,8 @@ namespace {
         uint64_t afterOutputDrops = 0;
         uint64_t beforeNackRecovered = 0;
         uint64_t afterNackRecovered = 0;
+        uint64_t beforeNackExpired = 0;
+        uint64_t afterNackExpired = 0;
 
         for (const ScenarioPair& pair : matched) {
             beforeFpsSum += pair.before.avgDisplayFps;
@@ -737,6 +847,10 @@ namespace {
             afterOutputDrops += pair.after.outputQueueDroppedFrames;
             beforeNackRecovered += pair.before.deadlineNackRecoveredFrames;
             afterNackRecovered += pair.after.deadlineNackRecoveredFrames;
+            beforeNackExpired +=
+                pair.before.deadlineNackExpiredDroppedFrames;
+            afterNackExpired +=
+                pair.after.deadlineNackExpiredDroppedFrames;
         }
 
         const double matchedCount =
@@ -778,6 +892,9 @@ namespace {
             const int64_t nackRecoveryDelta =
                 static_cast<int64_t>(afterNackRecovered) -
                 static_cast<int64_t>(beforeNackRecovered);
+            const int64_t nackExpiredDelta =
+                static_cast<int64_t>(afterNackExpired) -
+                static_cast<int64_t>(beforeNackExpired);
 
             file << "- Matched scenarios: " << matched.size() << ".\n";
             file << "- Average display FPS delta: "
@@ -798,13 +915,16 @@ namespace {
                 << ".\n";
             file << "- Deadline NACK recovered-frame delta: "
                 << FormatIntDelta(nackRecoveryDelta)
+                << " frames.\n";
+            file << "- Deadline NACK expired-drop delta: "
+                << FormatIntDelta(nackExpiredDelta)
                 << " frames.\n\n";
         }
 
         file << "## Scenario Comparison\n\n";
         file
-            << "| Scenario | Cause Before | Cause After | FPS Before | FPS After | FPS Delta | P95 Before ms | P95 After ms | P95 Delta ms | Drops Before | Drops After | Drop Delta | Drop Change | NACK Recovered Before | NACK Recovered After |\n"
-            << "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n";
+            << "| Scenario | Mode Before | Mode After | Cause Before | Cause After | FPS Before | FPS After | FPS Delta | P95 Before ms | P95 After ms | P95 Delta ms | Drops Before | Drops After | Drop Delta | Drop Change | NACK Recovered Before | NACK Recovered After | NACK Expired Before | NACK Expired After |\n"
+            << "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n";
 
         for (const ScenarioPair& pair : matched) {
             const double fpsDelta =
@@ -817,6 +937,14 @@ namespace {
 
             file << "| "
                 << EscapeMarkdownTable(pair.after.name) << " | "
+                << EscapeMarkdownTable(
+                    pair.before.adaptiveControlMode.empty()
+                    ? "unknown"
+                    : pair.before.adaptiveControlMode) << " | "
+                << EscapeMarkdownTable(
+                    pair.after.adaptiveControlMode.empty()
+                    ? "unknown"
+                    : pair.after.adaptiveControlMode) << " | "
                 << EscapeMarkdownTable(
                     pair.before.dominantAdaptiveDegradationCause.empty()
                     ? "None"
@@ -839,7 +967,9 @@ namespace {
                     pair.after.droppedFrames)
                 << " | "
                 << pair.before.deadlineNackRecoveredFrames << " | "
-                << pair.after.deadlineNackRecoveredFrames << " |\n";
+                << pair.after.deadlineNackRecoveredFrames << " | "
+                << pair.before.deadlineNackExpiredDroppedFrames << " | "
+                << pair.after.deadlineNackExpiredDroppedFrames << " |\n";
         }
         file << "\n";
 
@@ -859,6 +989,9 @@ namespace {
                 const int64_t nackRecoveryDelta =
                     static_cast<int64_t>(pair.after.deadlineNackRecoveredFrames) -
                     static_cast<int64_t>(pair.before.deadlineNackRecoveredFrames);
+                const int64_t nackExpiredDelta =
+                    static_cast<int64_t>(pair.after.deadlineNackExpiredDroppedFrames) -
+                    static_cast<int64_t>(pair.before.deadlineNackExpiredDroppedFrames);
 
                 file << "- " << pair.after.name << ": ";
 
@@ -905,6 +1038,14 @@ namespace {
                         << "selective retransmit recovered "
                         << nackRecoveryDelta
                         << " more frames";
+                    wroteFinding = true;
+                }
+
+                if (nackExpiredDelta > 0) {
+                    file << (wroteFinding ? "; " : "")
+                        << "stale NACK recovery expired "
+                        << nackExpiredDelta
+                        << " more frames before display deadline";
                     wroteFinding = true;
                 }
 
@@ -1087,6 +1228,15 @@ namespace {
             summary.deadlineNackMissingChunks =
                 ParseUint64OrDefault(
                     getCell(row, "deadlineNackMissingChunks"));
+            summary.deadlineNackExpiredDroppedFrames =
+                ParseUint64OrDefault(
+                    getCell(row, "deadlineNackExpiredDroppedFrames"));
+            summary.deadlineNackExpiredAfterNackFrames =
+                ParseUint64OrDefault(
+                    getCell(row, "deadlineNackExpiredAfterNackFrames"));
+            summary.deadlineNackExpiredMissingChunks =
+                ParseUint64OrDefault(
+                    getCell(row, "deadlineNackExpiredMissingChunks"));
             summary.simDroppedPackets =
                 ParseUint64OrDefault(getCell(row, "simDroppedPackets"));
             summary.minTargetFps =
@@ -1095,6 +1245,8 @@ namespace {
                 ParseIntOrDefault(getCell(row, "minTargetJpegQuality"));
             summary.minTargetBitrateKbps =
                 ParseIntOrDefault(getCell(row, "minTargetBitrateKbps"));
+            summary.adaptiveControlMode =
+                getCell(row, "adaptiveControlMode");
             summary.dominantAdaptiveDegradationCause =
                 getCell(row, "dominantAdaptiveDegradationCause");
             summary.verdict = getCell(row, "verdict");
@@ -1205,6 +1357,12 @@ namespace {
             current.lastStats.deadlineNackRecoveredFrames;
         summary.deadlineNackMissingChunks =
             current.lastStats.deadlineNackMissingChunks;
+        summary.deadlineNackExpiredDroppedFrames =
+            current.lastStats.deadlineNackExpiredDroppedFrames;
+        summary.deadlineNackExpiredAfterNackFrames =
+            current.lastStats.deadlineNackExpiredAfterNackFrames;
+        summary.deadlineNackExpiredMissingChunks =
+            current.lastStats.deadlineNackExpiredMissingChunks;
         summary.simDroppedPackets =
             current.lastStats.networkSimulation.droppedPackets;
 
@@ -1220,6 +1378,7 @@ namespace {
             current.minTargetBitrateKbps == (std::numeric_limits<int>::max)()
             ? 0
             : current.minTargetBitrateKbps;
+        summary.adaptiveControlMode = current.adaptiveControlMode;
 
         size_t dominantCauseIndex = 0;
         uint32_t dominantCauseSamples = 0;

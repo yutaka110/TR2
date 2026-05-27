@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AdaptiveStreamingController.h"
 #include "NetworkConditionSimulator.h"
 
 #include <cstddef>
@@ -10,7 +11,10 @@ namespace net {
 
     struct NetworkExperimentScenario {
         std::string name;
+        std::string networkScenarioName;
         NetworkCondition condition{};
+        AdaptiveControlMode adaptiveControlMode =
+            AdaptiveControlMode::QoeDeadlineAdaptive;
         double durationSec = 30.0;
     };
 
@@ -24,8 +28,12 @@ namespace net {
         bool IsActive() const;
         const NetworkExperimentScenario& CurrentScenario() const;
         const NetworkCondition& CurrentCondition() const;
+        AdaptiveControlMode CurrentAdaptiveControlMode() const;
         const std::string& CurrentScenarioName() const;
+        const std::string& CurrentNetworkScenarioName() const;
         double RemainingSec() const;
+        size_t CurrentIndex() const;
+        size_t ScenarioCount() const;
 
     private:
         static std::vector<NetworkExperimentScenario> CreateDefaultScenarios();
