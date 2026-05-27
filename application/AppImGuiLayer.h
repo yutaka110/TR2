@@ -41,6 +41,7 @@ public:
         const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
         const std::function<void(bool)>& onJitterBufferAutoModeChanged,
         const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged,
+        const std::function<void(int)>& onAdaptiveControlModeChanged,
         const std::function<void()>& onAddParticle);
     void EndFrame();
 

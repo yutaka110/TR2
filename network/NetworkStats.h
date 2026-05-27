@@ -77,6 +77,9 @@ namespace net {
 		uint64_t deadlineNackSentFrames = 0;
 		uint64_t deadlineNackRecoveredFrames = 0;
 		uint64_t deadlineNackMissingChunks = 0;
+		uint64_t deadlineNackExpiredDroppedFrames = 0;
+		uint64_t deadlineNackExpiredAfterNackFrames = 0;
+		uint64_t deadlineNackExpiredMissingChunks = 0;
 
 		// ============================================================
         // Adaptive Streaming
@@ -85,6 +88,7 @@ namespace net {
         // UI表示用。実際のJPEG品質/FPS反映は次Stepで行う。
         // ============================================================
 		bool adaptiveEnabled = false;
+		std::string adaptiveControlMode;
 
 		int adaptiveTargetJpegQuality = 0;
 		int adaptiveTargetFps = 0;
@@ -135,6 +139,13 @@ namespace net {
 		// ============================================================
 		NetworkCondition networkCondition{};
 		NetworkSimulationStats networkSimulation{};
+
+		bool networkExperimentActive = false;
+		std::string networkExperimentScenarioName;
+		std::string networkExperimentAdaptiveMode;
+		double networkExperimentRemainingSec = 0.0;
+		uint32_t networkExperimentStepIndex = 0;
+		uint32_t networkExperimentStepCount = 0;
 
 		// ============================================================
 		// Bandwidth
@@ -188,6 +199,10 @@ namespace net {
 		);
 		void OnDeadlineNackSent(uint32_t missingChunkCount);
 		void OnDeadlineNackRecoveredFrame();
+		void OnDeadlineNackExpiredFrame(
+			uint32_t missingChunkCount,
+			bool nackSent
+		);
 
 		// 重複packetを観測したときに呼ぶ
 		void OnDuplicatePacket();

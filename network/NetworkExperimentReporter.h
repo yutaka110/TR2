@@ -52,6 +52,7 @@ namespace net {
             int minTargetFps = 0;
             int minTargetJpegQuality = 0;
             int minTargetBitrateKbps = 0;
+            std::string adaptiveControlMode;
             std::array<uint32_t, 6> adaptiveCauseSamples{};
 
             NetworkStatsSnapshot lastStats{};
@@ -92,11 +93,15 @@ namespace net {
             uint64_t deadlineNackSentFrames = 0;
             uint64_t deadlineNackRecoveredFrames = 0;
             uint64_t deadlineNackMissingChunks = 0;
+            uint64_t deadlineNackExpiredDroppedFrames = 0;
+            uint64_t deadlineNackExpiredAfterNackFrames = 0;
+            uint64_t deadlineNackExpiredMissingChunks = 0;
             uint64_t simDroppedPackets = 0;
 
             int minTargetFps = 0;
             int minTargetJpegQuality = 0;
             int minTargetBitrateKbps = 0;
+            std::string adaptiveControlMode;
             std::string dominantAdaptiveDegradationCause;
 
             std::string verdict;

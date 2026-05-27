@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -192,6 +194,256 @@ namespace {
         ImGui::Text(format, value);
     }
 
+    ImVec4 MetricColor(double value, double warnThreshold, double badThreshold) {
+        if (value >= badThreshold) {
+            return ImVec4(1.0f, 0.35f, 0.30f, 1.0f);
+        }
+        if (value >= warnThreshold) {
+            return ImVec4(1.0f, 0.78f, 0.25f, 1.0f);
+        }
+        return ImVec4(0.38f, 0.95f, 0.55f, 1.0f);
+    }
+
+    ImVec4 CauseColor(const std::string& cause) {
+        if (cause == "None" || cause.empty()) {
+            return ImVec4(0.38f, 0.95f, 0.55f, 1.0f);
+        }
+        if (cause == "DecodeLoad" || cause == "DisplayLoad") {
+            return ImVec4(1.0f, 0.35f, 0.30f, 1.0f);
+        }
+        return ImVec4(1.0f, 0.78f, 0.25f, 1.0f);
+    }
+
+    void DrawDashboardValue(
+        const char* label,
+        const char* value,
+        const ImVec4& color
+    ) {
+        ImGui::TextDisabled("%s", label);
+        ImGui::SameLine(145.0f);
+        ImGui::TextColored(color, "%s", value);
+    }
+
+    void DrawDashboardDouble(
+        const char* label,
+        double value,
+        const char* suffix,
+        const ImVec4& color
+    ) {
+        char buffer[64]{};
+        std::snprintf(buffer, sizeof(buffer), "%.2f%s", value, suffix);
+        DrawDashboardValue(label, buffer, color);
+    }
+
+    void DrawDashboardUInt(
+        const char* label,
+        uint64_t value,
+        const ImVec4& color
+    ) {
+        char buffer[64]{};
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "%llu",
+            static_cast<unsigned long long>(value));
+        DrawDashboardValue(label, buffer, color);
+    }
+
+    void DrawDashboardSectionHeader(const char* label) {
+        ImGui::TextColored(ImVec4(0.65f, 0.82f, 1.0f, 1.0f), "%s", label);
+        ImGui::Separator();
+    }
+
+    int AdaptiveModeIndexFromName(const std::string& mode) {
+        if (mode == "Fixed Quality") {
+            return 0;
+        }
+        if (mode == "Loss Reactive") {
+            return 1;
+        }
+        return 2;
+    }
+
+    void DrawNetworkDemoDashboard(
+        const net::NetworkStatsSnapshot& stats,
+        const std::function<void(int)>& onAdaptiveControlModeChanged) {
+        if (!ImGui::CollapsingHeader("Demo Dashboard", ImGuiTreeNodeFlags_DefaultOpen)) {
+            return;
+        }
+
+        const char* adaptiveModes[] = {
+            "Fixed Quality",
+            "Loss Reactive",
+            "QoE/Deadline Adaptive"
+        };
+        int adaptiveModeIndex =
+            AdaptiveModeIndexFromName(stats.adaptiveControlMode);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo(
+            "Adaptive Mode",
+            &adaptiveModeIndex,
+            adaptiveModes,
+            IM_ARRAYSIZE(adaptiveModes))) {
+            if (onAdaptiveControlModeChanged) {
+                onAdaptiveControlModeChanged(adaptiveModeIndex);
+            }
+        }
+        if (stats.networkExperimentActive) {
+            ImGui::Text(
+                "Experiment Step: %u/%u  %.1f sec left",
+                stats.networkExperimentStepIndex,
+                stats.networkExperimentStepCount,
+                stats.networkExperimentRemainingSec);
+            ImGui::Text("Current: %s",
+                stats.networkExperimentScenarioName.empty()
+                ? "unknown"
+                : stats.networkExperimentScenarioName.c_str());
+        }
+        else {
+            ImGui::TextDisabled("Experiment Step: inactive");
+        }
+
+        const ImGuiTableFlags flags =
+            ImGuiTableFlags_BordersInnerV |
+            ImGuiTableFlags_SizingStretchSame |
+            ImGuiTableFlags_RowBg;
+
+        if (!ImGui::BeginTable("NetworkDemoDashboardTable", 2, flags)) {
+            return;
+        }
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        DrawDashboardSectionHeader("Transport");
+        DrawDashboardDouble(
+            "Packet Loss",
+            stats.packetLossRate * 100.0,
+            "%",
+            MetricColor(stats.packetLossRate, 0.03, 0.08));
+        DrawDashboardDouble(
+            "RTT",
+            stats.currentRttMs,
+            " ms",
+            MetricColor(stats.currentRttMs, 100.0, 180.0));
+        DrawDashboardDouble(
+            "Jitter",
+            stats.currentJitterMs,
+            " ms",
+            MetricColor(stats.currentJitterMs, 20.0, 40.0));
+        DrawDashboardDouble(
+            "Throughput",
+            stats.throughputMbps,
+            " Mbps",
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+
+        ImGui::TableNextColumn();
+        DrawDashboardSectionHeader("Frame Pipeline");
+        DrawDashboardDouble(
+            "Receive FPS",
+            stats.receiveFps,
+            "",
+            MetricColor(stats.adaptiveTargetFps > 0
+                ? static_cast<double>(stats.adaptiveTargetFps) - stats.receiveFps
+                : 0.0,
+                5.0,
+                10.0));
+        DrawDashboardDouble(
+            "Decode FPS",
+            stats.decodeFps,
+            "",
+            MetricColor(stats.receiveFps - stats.decodeFps, 3.0, 8.0));
+        DrawDashboardDouble(
+            "Display FPS",
+            stats.displayFps,
+            "",
+            MetricColor(stats.adaptiveTargetFps > 0
+                ? static_cast<double>(stats.adaptiveTargetFps) - stats.displayFps
+                : 0.0,
+                5.0,
+                10.0));
+        DrawDashboardUInt(
+            "Dropped Frames",
+            stats.droppedFrames,
+            stats.droppedFrames > 20
+            ? ImVec4(1.0f, 0.35f, 0.30f, 1.0f)
+            : stats.droppedFrames > 0
+            ? ImVec4(1.0f, 0.78f, 0.25f, 1.0f)
+            : ImVec4(0.38f, 0.95f, 0.55f, 1.0f));
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        DrawDashboardSectionHeader("Adaptive Control");
+        DrawDashboardValue(
+            "Mode",
+            stats.adaptiveControlMode.empty()
+            ? "QoE/Deadline Adaptive"
+            : stats.adaptiveControlMode.c_str(),
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+        DrawDashboardValue(
+            "Degradation Cause",
+            stats.adaptiveDegradationCause.empty()
+            ? "None"
+            : stats.adaptiveDegradationCause.c_str(),
+            CauseColor(stats.adaptiveDegradationCause));
+        DrawDashboardDouble(
+            "QoE Score",
+            stats.adaptiveLastQoeScore,
+            "",
+            MetricColor(stats.adaptiveLastQoeScore, 1.0, 2.0));
+        DrawDashboardUInt(
+            "Target FPS",
+            static_cast<uint64_t>((std::max)(0, stats.adaptiveTargetFps)),
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+        char qualityBuffer[64]{};
+        std::snprintf(
+            qualityBuffer,
+            sizeof(qualityBuffer),
+            "Q%d  %dx%d",
+            stats.adaptiveTargetJpegQuality,
+            stats.adaptiveTargetWidth,
+            stats.adaptiveTargetHeight);
+        DrawDashboardValue(
+            "Quality / Resolution",
+            qualityBuffer,
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+
+        ImGui::TableNextColumn();
+        DrawDashboardSectionHeader("Recovery");
+        DrawDashboardUInt(
+            "ACK",
+            stats.ackCount,
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+        DrawDashboardUInt(
+            "NACK Sent",
+            stats.deadlineNackSentFrames,
+            stats.deadlineNackSentFrames > 0
+            ? ImVec4(1.0f, 0.78f, 0.25f, 1.0f)
+            : ImVec4(0.38f, 0.95f, 0.55f, 1.0f));
+        DrawDashboardUInt(
+            "Retrans Chunks",
+            stats.ackRetransmittedChunks,
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+        DrawDashboardUInt(
+            "Recovered / Expired",
+            stats.deadlineNackRecoveredFrames,
+            ImVec4(0.38f, 0.95f, 0.55f, 1.0f));
+        ImGui::SameLine();
+        ImGui::TextColored(
+            stats.deadlineNackExpiredDroppedFrames > 0
+            ? ImVec4(1.0f, 0.78f, 0.25f, 1.0f)
+            : ImVec4(0.55f, 0.65f, 0.75f, 1.0f),
+            "/ %llu",
+            static_cast<unsigned long long>(stats.deadlineNackExpiredDroppedFrames));
+        DrawDashboardUInt(
+            "KeyFrameRequest",
+            stats.ackKeyFrameRequests,
+            stats.ackKeyFrameRequests > 0
+            ? ImVec4(1.0f, 0.78f, 0.25f, 1.0f)
+            : ImVec4(0.55f, 0.65f, 0.75f, 1.0f));
+
+        ImGui::EndTable();
+    }
+
     void DrawEvaluationGraphBaseline(
         const net::NetworkStatsSnapshot& stats,
         const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged) {
@@ -343,7 +595,10 @@ namespace {
     void DrawNetworkMonitorContents(const net::NetworkStatsSnapshot& stats,
         const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
         const std::function<void(bool)>& onJitterBufferAutoModeChanged,
-        const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged) {
+        const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged,
+        const std::function<void(int)>& onAdaptiveControlModeChanged) {
+        DrawNetworkDemoDashboard(stats, onAdaptiveControlModeChanged);
+
         if (ImGui::CollapsingHeader("Network Condition Simulator", ImGuiTreeNodeFlags_DefaultOpen)) {
             net::NetworkCondition condition = stats.networkCondition;
             bool changed = false;
@@ -531,10 +786,23 @@ namespace {
 
             ImGui::Text("Deadline NACK Missing Chunks: %llu",
                 static_cast<unsigned long long>(stats.deadlineNackMissingChunks));
+
+            ImGui::Text("Deadline NACK Expired Drops: %llu",
+                static_cast<unsigned long long>(stats.deadlineNackExpiredDroppedFrames));
+
+            ImGui::Text("Expired After NACK: %llu",
+                static_cast<unsigned long long>(stats.deadlineNackExpiredAfterNackFrames));
+
+            ImGui::Text("Expired Missing Chunks: %llu",
+                static_cast<unsigned long long>(stats.deadlineNackExpiredMissingChunks));
         }
 
         if (ImGui::CollapsingHeader("Adaptive Streaming", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Enabled: %s", stats.adaptiveEnabled ? "true" : "false");
+            ImGui::Text("Control Mode: %s",
+                stats.adaptiveControlMode.empty()
+                ? "QoE/Deadline Adaptive"
+                : stats.adaptiveControlMode.c_str());
 
             ImGui::Separator();
 
@@ -1112,6 +1380,7 @@ void AppImGuiLayer::BuildUi(
     const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
     const std::function<void(bool)>& onJitterBufferAutoModeChanged,
     const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged,
+    const std::function<void(int)>& onAdaptiveControlModeChanged,
     const std::function<void()>& onAddParticle) {
     if (!initialized_) {
         return;
@@ -1166,7 +1435,8 @@ void AppImGuiLayer::BuildUi(
                 *networkStats,
                 onJitterBufferTargetDelayChanged,
                 onJitterBufferAutoModeChanged,
-                onNetworkConditionChanged);
+                onNetworkConditionChanged,
+                onAdaptiveControlModeChanged);
         } else {
             ImGui::TextDisabled("Network stats unavailable.");
         }

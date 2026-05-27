@@ -24,6 +24,22 @@ namespace {
         return condition;
     }
 
+    NetworkExperimentScenario MakeScenario(
+        const char* networkName,
+        const NetworkCondition& condition,
+        AdaptiveControlMode mode,
+        double durationSec
+    ) {
+        NetworkExperimentScenario scenario{};
+        scenario.networkScenarioName = networkName;
+        scenario.condition = condition;
+        scenario.adaptiveControlMode = mode;
+        scenario.durationSec = durationSec;
+        scenario.name =
+            scenario.networkScenarioName + " / " + ToString(mode);
+        return scenario;
+    }
+
 } // namespace
 
     NetworkExperimentRunner::NetworkExperimentRunner()
@@ -83,8 +99,16 @@ namespace {
         return CurrentScenario().condition;
     }
 
+    AdaptiveControlMode NetworkExperimentRunner::CurrentAdaptiveControlMode() const {
+        return CurrentScenario().adaptiveControlMode;
+    }
+
     const std::string& NetworkExperimentRunner::CurrentScenarioName() const {
         return CurrentScenario().name;
+    }
+
+    const std::string& NetworkExperimentRunner::CurrentNetworkScenarioName() const {
+        return CurrentScenario().networkScenarioName;
     }
 
     double NetworkExperimentRunner::RemainingSec() const {
@@ -93,14 +117,52 @@ namespace {
         return (std::max)(0.0, durationSec - elapsedSec_);
     }
 
+    size_t NetworkExperimentRunner::CurrentIndex() const {
+        return currentIndex_;
+    }
+
+    size_t NetworkExperimentRunner::ScenarioCount() const {
+        return scenarios_.size();
+    }
+
     std::vector<NetworkExperimentScenario>
         NetworkExperimentRunner::CreateDefaultScenarios() {
+        const NetworkCondition baseline =
+            MakeCondition(false, 0.0, 0, 0, 0);
+        const NetworkCondition loss10 =
+            MakeCondition(true, 0.10, 0, 0, 0);
+        const NetworkCondition jitter50 =
+            MakeCondition(true, 0.0, 0, 50, 0);
+        const NetworkCondition burstLoss =
+            MakeCondition(true, 0.03, 0, 0, 8);
+        const double durationSec = 20.0;
+
         return {
-            { "Baseline", MakeCondition(false, 0.0, 0, 0, 0), 30.0 },
-            { "10% loss", MakeCondition(true, 0.10, 0, 0, 0), 30.0 },
-            { "50ms jitter", MakeCondition(true, 0.0, 0, 50, 0), 30.0 },
-            { "100ms delay", MakeCondition(true, 0.0, 100, 100, 0), 30.0 },
-            { "Burst loss", MakeCondition(true, 0.03, 0, 0, 8), 30.0 },
+            MakeScenario("Baseline", baseline,
+                AdaptiveControlMode::FixedQuality, durationSec),
+            MakeScenario("Baseline", baseline,
+                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
+
+            MakeScenario("10% loss", loss10,
+                AdaptiveControlMode::FixedQuality, durationSec),
+            MakeScenario("10% loss", loss10,
+                AdaptiveControlMode::LossReactive, durationSec),
+            MakeScenario("10% loss", loss10,
+                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
+
+            MakeScenario("50ms jitter", jitter50,
+                AdaptiveControlMode::FixedQuality, durationSec),
+            MakeScenario("50ms jitter", jitter50,
+                AdaptiveControlMode::LossReactive, durationSec),
+            MakeScenario("50ms jitter", jitter50,
+                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
+
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::FixedQuality, durationSec),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::LossReactive, durationSec),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
         };
     }
 

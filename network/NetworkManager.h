@@ -218,7 +218,7 @@ private:
     static constexpr size_t kSentFrameHistoryLimit = 24;
     static constexpr uint32_t kMaxRetransmitsPerFrame = 1;
     static constexpr uint32_t kMaxRetransmitFrameLag = 2;
-    static constexpr uint64_t kMaxRetransmitAgeUs = 500000;
+    static constexpr uint64_t kMaxRetransmitAgeUs = 180000;
 
     static constexpr int kControlReceiveBufferSize = 2048;
 };

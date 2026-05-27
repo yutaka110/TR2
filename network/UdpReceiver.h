@@ -148,7 +148,9 @@ namespace net {
         static constexpr size_t kMaxQueuedFrames = 4;
         static constexpr uint64_t kMaxDisplayLatencyUs = 150000;
         static constexpr uint64_t kFrameNackDeadlineUs = 80000;
-        static constexpr uint64_t kFrameNackIntervalUs = 120000;
+        static constexpr uint64_t kFrameNackIntervalUs = 40000;
+        static constexpr uint64_t kFrameNackRecoveryExpireUs = 140000;
+        static constexpr uint64_t kFrameNackMinRecoverySlackUs = 12000;
         static constexpr uint32_t kMaxDeadlineNacksPerFrame = 2;
         static constexpr uint64_t kKeyFrameRequestCooldownUs = 500000;
     };

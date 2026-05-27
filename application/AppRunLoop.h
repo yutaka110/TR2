@@ -80,6 +80,7 @@ public:
     void SetJitterBufferTargetDelaySetter(std::function<void(uint32_t)> setter);
     void SetJitterBufferAutoModeSetter(std::function<void(bool)> setter);
     void SetNetworkConditionSetter(std::function<void(const net::NetworkCondition&)> setter);
+    void SetAdaptiveControlModeSetter(std::function<void(int)> setter);
 
     void SetReceivedFrameProvider(std::function<bool(net::CompletedFrame&)> provider);
     void SetNetworkFrameDecodeNotifier(std::function<void()> notifier);
@@ -149,6 +150,7 @@ private:
     std::function<void(uint32_t)> jitterBufferTargetDelaySetter_;
     std::function<void(bool)> jitterBufferAutoModeSetter_;
     std::function<void(const net::NetworkCondition&)> networkConditionSetter_;
+    std::function<void(int)> adaptiveControlModeSetter_;
 
     std::function<bool(net::CompletedFrame&)> receivedFrameProvider_;
     std::function<void()> networkFrameDecodeNotifier_;

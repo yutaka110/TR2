@@ -23,16 +23,26 @@ namespace net {
         }
     }
 
+    const char* ToString(AdaptiveControlMode mode) {
+        switch (mode) {
+        case AdaptiveControlMode::FixedQuality:
+            return "Fixed Quality";
+        case AdaptiveControlMode::LossReactive:
+            return "Loss Reactive";
+        case AdaptiveControlMode::QoeDeadlineAdaptive:
+        default:
+            return "QoE/Deadline Adaptive";
+        }
+    }
+
     AdaptiveStreamingController::AdaptiveStreamingController() {
         Reset();
     }
 
     void AdaptiveStreamingController::Reset() {
-        enabled_ = true;
-
         state_ = AdaptiveStreamingState{};
-        state_.targetBitrateKbps = 6000;
-        DeriveTargetsFromBitrate();
+        state_.controlMode = controlMode_;
+        InitializeTargetsForMode();
 
         state_.qualityChanged = false;
         state_.fpsChanged = false;
@@ -60,6 +70,19 @@ namespace net {
         return enabled_;
     }
 
+    void AdaptiveStreamingController::SetControlMode(AdaptiveControlMode mode) {
+        if (controlMode_ == mode) {
+            return;
+        }
+
+        controlMode_ = mode;
+        Reset();
+    }
+
+    AdaptiveControlMode AdaptiveStreamingController::GetControlMode() const {
+        return controlMode_;
+    }
+
     void AdaptiveStreamingController::Update(
         const AdaptiveStreamingInput& input,
         double deltaTimeSec
@@ -81,6 +104,7 @@ namespace net {
         state_.lastOutputQueueDroppedFrames = input.outputQueueDroppedFrames;
         state_.lastDeadlineNackSentFrames = input.deadlineNackSentFrames;
         state_.lastDeadlineNackMissingChunks = input.deadlineNackMissingChunks;
+        state_.controlMode = controlMode_;
 
         observedTimeSec_ += (std::max)(0.0, deltaTimeSec);
 
@@ -130,7 +154,20 @@ namespace net {
                 deadlineNackDelta,
                 deadlineNackMissingChunkDelta);
 
-        if (!enabled_) {
+        if (!enabled_ ||
+            controlMode_ == AdaptiveControlMode::FixedQuality) {
+            stableTimeSec_ = 0.0;
+            badTimeSec_ = 0.0;
+            lossOnlyBadTimeSec_ = 0.0;
+            return;
+        }
+
+        if (controlMode_ == AdaptiveControlMode::LossReactive) {
+            UpdateLossReactive(
+                input,
+                deltaTimeSec,
+                deadlineNackDelta,
+                deadlineNackMissingChunkDelta);
             return;
         }
 
@@ -224,6 +261,90 @@ namespace net {
         }
         else {
             state_.lastCompressionRatio = 0.0;
+        }
+    }
+
+    void AdaptiveStreamingController::InitializeTargetsForMode() {
+        if (controlMode_ == AdaptiveControlMode::FixedQuality) {
+            state_.targetJpegQuality = 85;
+            state_.targetFps = 30;
+            state_.targetBitrateKbps = 9500;
+            state_.targetWidth = 320;
+            state_.targetHeight = 180;
+            return;
+        }
+
+        state_.targetBitrateKbps = 6000;
+        DeriveTargetsFromBitrate();
+    }
+
+    void AdaptiveStreamingController::UpdateLossReactive(
+        const AdaptiveStreamingInput& input,
+        double deltaTimeSec,
+        uint64_t deadlineNackDelta,
+        uint64_t deadlineNackMissingChunkDelta
+    ) {
+        if (cooldownSec_ > 0.0) {
+            cooldownSec_ = (std::max)(0.0, cooldownSec_ - deltaTimeSec);
+            return;
+        }
+
+        const bool lossPressure =
+            input.ackMissingRate >= 0.03 ||
+            input.packetLossRate >= 0.03 ||
+            deadlineNackDelta > 0 ||
+            deadlineNackMissingChunkDelta > 0;
+
+        const bool hardLossPressure =
+            input.ackMissingRate >= 0.08 ||
+            input.packetLossRate >= 0.08 ||
+            deadlineNackMissingChunkDelta >= 3;
+
+        const bool stableLoss =
+            input.ackMissingRate <= 0.02 &&
+            input.packetLossRate <= 0.02 &&
+            deadlineNackDelta == 0 &&
+            deadlineNackMissingChunkDelta == 0;
+
+        state_.lastDegradationCause =
+            lossPressure
+            ? AdaptiveDegradationCause::PacketLoss
+            : AdaptiveDegradationCause::None;
+
+        if (lossPressure) {
+            lossOnlyBadTimeSec_ += deltaTimeSec;
+            stableTimeSec_ = 0.0;
+            badTimeSec_ = 0.0;
+        }
+        else if (stableLoss) {
+            stableTimeSec_ += deltaTimeSec;
+            lossOnlyBadTimeSec_ = 0.0;
+            badTimeSec_ = 0.0;
+        }
+        else {
+            stableTimeSec_ = 0.0;
+            lossOnlyBadTimeSec_ = 0.0;
+            badTimeSec_ = 0.0;
+        }
+
+        if (hardLossPressure && lossOnlyBadTimeSec_ >= 0.8) {
+            ApplyCauseSpecificDecrease(
+                AdaptiveDegradationCause::PacketLoss,
+                true);
+            lossOnlyBadTimeSec_ = 0.0;
+            cooldownSec_ = 1.2;
+        }
+        else if (lossPressure && lossOnlyBadTimeSec_ >= 3.0) {
+            ApplyCauseSpecificDecrease(
+                AdaptiveDegradationCause::PacketLoss,
+                false);
+            lossOnlyBadTimeSec_ = 0.0;
+            cooldownSec_ = 2.0;
+        }
+        else if (stableLoss && stableTimeSec_ >= 4.0) {
+            ApplyAdditiveIncrease(300);
+            stableTimeSec_ = 0.0;
+            cooldownSec_ = 1.5;
         }
     }
 
