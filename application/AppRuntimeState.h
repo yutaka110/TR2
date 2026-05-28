@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <d3d12.h>
 
+#include "../network/NetworkRuntimeMode.h"
 #include "utils/math/MathUtils.h"
 
 struct RuntimeAabbState {
@@ -46,6 +47,8 @@ struct AppRuntimeState {
     bool showReceivedVideoPreviewWindow = true;
     bool showImGui = true;
     bool networkExperimentMode = false;
+    net::NetworkRuntimeMode networkRuntimeMode =
+        net::NetworkRuntimeMode::Loopback;
     bool enableVfxRenderPasses = true;
     bool enablePostProcessPasses = true;
     bool enableDebugPreviewPasses = true;

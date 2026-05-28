@@ -279,6 +279,9 @@
     <ClCompile Include="network\NalUtils.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
+    <ClCompile Include="network\BandwidthEstimator.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
     <ClCompile Include="network\NetworkManager.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
@@ -292,6 +295,9 @@
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="network\NetworkExperimentRunner.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="network\PacketPacer.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="network\UdpByteStream.cpp">
@@ -594,6 +600,9 @@
     <ClInclude Include="network\NalUtils.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
+    <ClInclude Include="network\BandwidthEstimator.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
     <ClInclude Include="network\NetworkManager.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
@@ -625,6 +634,9 @@
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\PacketProtocol.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="network\PacketPacer.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\NetworkStats.h">

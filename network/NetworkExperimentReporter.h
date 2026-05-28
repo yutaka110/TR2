@@ -28,6 +28,31 @@ namespace net {
         const std::string& BeforeAfterFilePath() const;
 
     private:
+        struct TimeSeriesSample {
+            double relativeTimeSec = 0.0;
+            double displayFps = 0.0;
+            double currentLatencyMs = 0.0;
+            double rollingP95LatencyMs = 0.0;
+            double adaptiveQoeScore = 0.0;
+            std::string adaptiveDegradationCause;
+            double adaptiveCauseScore = 0.0;
+            int targetJpegQuality = 0;
+            int targetFps = 0;
+            int targetBitrateKbps = 0;
+            int bandwidthCeilingKbps = 0;
+            uint32_t estimatedBandwidthBps = 0;
+            uint32_t deliveryRateBps = 0;
+            double bandwidthQueueDelayMs = 0.0;
+            double bandwidthLossTrend = 0.0;
+            double bandwidthJitterTrendMs = 0.0;
+            uint64_t deadlineNackSentFrames = 0;
+            uint64_t deadlineNackRecoveredFrames = 0;
+            uint64_t deadlineNackExpiredDroppedFrames = 0;
+            uint64_t ackRetransmittedChunks = 0;
+            double packetLossRate = 0.0;
+            double currentJitterMs = 0.0;
+        };
+
         struct ScenarioAccumulator {
             std::string name;
             double startTimeSec = 0.0;
@@ -52,8 +77,11 @@ namespace net {
             int minTargetFps = 0;
             int minTargetJpegQuality = 0;
             int minTargetBitrateKbps = 0;
+            std::string networkRuntimeMode;
             std::string adaptiveControlMode;
-            std::array<uint32_t, 6> adaptiveCauseSamples{};
+            std::string adaptiveCongestionControlMode;
+            std::array<uint32_t, 7> adaptiveCauseSamples{};
+            std::vector<TimeSeriesSample> timeSeriesSamples;
 
             NetworkStatsSnapshot lastStats{};
         };
@@ -101,8 +129,11 @@ namespace net {
             int minTargetFps = 0;
             int minTargetJpegQuality = 0;
             int minTargetBitrateKbps = 0;
+            std::string networkRuntimeMode;
             std::string adaptiveControlMode;
+            std::string adaptiveCongestionControlMode;
             std::string dominantAdaptiveDegradationCause;
+            std::vector<TimeSeriesSample> timeSeriesSamples;
 
             std::string verdict;
             std::string notes;

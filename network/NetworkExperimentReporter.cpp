@@ -62,12 +62,46 @@ namespace {
         return oss.str();
     }
 
+    std::string FormatSignedPercent(double ratio) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(1);
+        if (ratio > 0.0) {
+            oss << '+';
+        }
+        oss << (ratio * 100.0) << "%";
+        return oss.str();
+    }
+
+    std::string FormatImprovementRatio(
+        double baseline,
+        double current,
+        bool higherIsBetter
+    ) {
+        if (std::abs(baseline) < 0.0001) {
+            return std::abs(current) < 0.0001 ? "0.0%" : "n/a";
+        }
+
+        const double ratio = higherIsBetter
+            ? (current - baseline) / baseline
+            : (baseline - current) / baseline;
+        return FormatSignedPercent(ratio);
+    }
+
     std::string EscapeMarkdownTable(std::string value) {
         for (char& ch : value) {
             if (ch == '|') {
                 ch = '/';
             }
             else if (ch == '\r' || ch == '\n') {
+                ch = ' ';
+            }
+        }
+        return value;
+    }
+
+    std::string EscapeMermaidText(std::string value) {
+        for (char& ch : value) {
+            if (ch == '"' || ch == '\r' || ch == '\n') {
                 ch = ' ';
             }
         }
@@ -150,11 +184,14 @@ namespace {
         if (cause == "RTT") {
             return 3;
         }
-        if (cause == "DecodeLoad") {
+        if (cause == "Bandwidth") {
             return 4;
         }
-        if (cause == "DisplayLoad") {
+        if (cause == "DecodeLoad") {
             return 5;
+        }
+        if (cause == "DisplayLoad") {
+            return 6;
         }
         return 0;
     }
@@ -168,8 +205,10 @@ namespace {
         case 3:
             return "RTT";
         case 4:
-            return "DecodeLoad";
+            return "Bandwidth";
         case 5:
+            return "DecodeLoad";
+        case 6:
             return "DisplayLoad";
         case 0:
         default:
@@ -329,6 +368,15 @@ namespace {
                 (std::min)(current_.minTargetBitrateKbps, stats.adaptiveTargetBitrateKbps);
         }
 
+        if (!stats.networkRuntimeModeName.empty()) {
+            if (current_.networkRuntimeMode.empty()) {
+                current_.networkRuntimeMode = stats.networkRuntimeModeName;
+            }
+            else if (current_.networkRuntimeMode != stats.networkRuntimeModeName) {
+                current_.networkRuntimeMode = "Mixed";
+            }
+        }
+
         if (!stats.adaptiveControlMode.empty()) {
             if (current_.adaptiveControlMode.empty()) {
                 current_.adaptiveControlMode = stats.adaptiveControlMode;
@@ -338,8 +386,64 @@ namespace {
             }
         }
 
+        if (!stats.adaptiveCongestionControlMode.empty()) {
+            if (current_.adaptiveCongestionControlMode.empty()) {
+                current_.adaptiveCongestionControlMode =
+                    stats.adaptiveCongestionControlMode;
+            }
+            else if (current_.adaptiveCongestionControlMode !=
+                stats.adaptiveCongestionControlMode) {
+                current_.adaptiveCongestionControlMode = "Mixed";
+            }
+        }
+
         current_.adaptiveCauseSamples[
             AdaptiveCauseIndex(stats.adaptiveDegradationCause)]++;
+
+        TimeSeriesSample timeSeriesSample{};
+        timeSeriesSample.relativeTimeSec =
+            (std::max)(0.0, appTimeSec - current_.startTimeSec);
+        timeSeriesSample.displayFps = stats.displayFps;
+        timeSeriesSample.currentLatencyMs = stats.currentLatencyMs;
+        timeSeriesSample.rollingP95LatencyMs =
+            Percentile(current_.latencySamplesMs, 0.95);
+        timeSeriesSample.adaptiveQoeScore = stats.adaptiveLastQoeScore;
+        timeSeriesSample.adaptiveDegradationCause =
+            stats.adaptiveDegradationCause.empty()
+            ? "None"
+            : stats.adaptiveDegradationCause;
+        timeSeriesSample.adaptiveCauseScore =
+            static_cast<double>(
+                AdaptiveCauseIndex(timeSeriesSample.adaptiveDegradationCause)) *
+            20.0;
+        timeSeriesSample.targetJpegQuality =
+            stats.adaptiveTargetJpegQuality;
+        timeSeriesSample.targetFps = stats.adaptiveTargetFps;
+        timeSeriesSample.targetBitrateKbps =
+            stats.adaptiveTargetBitrateKbps;
+        timeSeriesSample.bandwidthCeilingKbps =
+            stats.adaptiveBandwidthCeilingKbps;
+        timeSeriesSample.estimatedBandwidthBps =
+            stats.estimatedBandwidthBps;
+        timeSeriesSample.deliveryRateBps =
+            stats.deliveryRateBps;
+        timeSeriesSample.bandwidthQueueDelayMs =
+            stats.bandwidthQueueDelayMs;
+        timeSeriesSample.bandwidthLossTrend =
+            stats.bandwidthLossTrend;
+        timeSeriesSample.bandwidthJitterTrendMs =
+            stats.bandwidthJitterTrendMs;
+        timeSeriesSample.deadlineNackSentFrames =
+            stats.deadlineNackSentFrames;
+        timeSeriesSample.deadlineNackRecoveredFrames =
+            stats.deadlineNackRecoveredFrames;
+        timeSeriesSample.deadlineNackExpiredDroppedFrames =
+            stats.deadlineNackExpiredDroppedFrames;
+        timeSeriesSample.ackRetransmittedChunks =
+            stats.ackRetransmittedChunks;
+        timeSeriesSample.packetLossRate = stats.packetLossRate;
+        timeSeriesSample.currentJitterMs = stats.currentJitterMs;
+        current_.timeSeriesSamples.push_back(timeSeriesSample);
 
         current_.lastStats = stats;
     }
@@ -425,7 +529,9 @@ namespace {
             << "minTargetFps,"
             << "minTargetJpegQuality,"
             << "minTargetBitrateKbps,"
+            << "networkRuntimeMode,"
             << "adaptiveControlMode,"
+            << "adaptiveCongestionControlMode,"
             << "dominantAdaptiveDegradationCause,"
             << "verdict,"
             << "notes"
@@ -476,7 +582,9 @@ namespace {
                 << summary.minTargetFps << ','
                 << summary.minTargetJpegQuality << ','
                 << summary.minTargetBitrateKbps << ','
+                << EscapeCsv(summary.networkRuntimeMode) << ','
                 << EscapeCsv(summary.adaptiveControlMode) << ','
+                << EscapeCsv(summary.adaptiveCongestionControlMode) << ','
                 << EscapeCsv(summary.dominantAdaptiveDegradationCause) << ','
                 << EscapeCsv(summary.verdict) << ','
                 << EscapeCsv(summary.notes)
@@ -513,10 +621,20 @@ namespace {
                 << summary.minTargetFps << " / "
                 << summary.minTargetJpegQuality << " / "
                 << summary.minTargetBitrateKbps << "\n";
+            textFile_ << "  network runtime mode: "
+                << (summary.networkRuntimeMode.empty()
+                    ? "unknown"
+                    : summary.networkRuntimeMode)
+                << "\n";
             textFile_ << "  adaptive control mode: "
                 << (summary.adaptiveControlMode.empty()
                     ? "unknown"
                     : summary.adaptiveControlMode)
+                << "\n";
+            textFile_ << "  congestion control mode: "
+                << (summary.adaptiveCongestionControlMode.empty()
+                    ? "unknown"
+                    : summary.adaptiveCongestionControlMode)
                 << "\n";
             textFile_ << "  adaptive dominant cause: "
                 << (summary.dominantAdaptiveDegradationCause.empty()
@@ -576,6 +694,7 @@ namespace {
 
         file << "# Network Experiment Report\n\n";
         file << "Generated: " << generatedTimestamp_ << "\n\n";
+        file << "Runtime mode note: Loopback runs sender and receiver in one process for development experiments; Sender transmits camera video only; Receiver rebuilds and displays RNVP frames; Monitor keeps telemetry/reporting visible without sending or displaying video.\n\n";
 
         file << "## Executive Summary\n\n";
         if (summaries_.empty()) {
@@ -618,17 +737,25 @@ namespace {
 
         file << "## Scenario Results\n\n";
         file
-            << "| Scenario | Verdict | Mode | Cause | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | NACK Expired | Notes |\n"
-            << "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+            << "| Scenario | Verdict | Runtime | Adaptive Mode | Congestion Mode | Cause | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | NACK Expired | Notes |\n"
+            << "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
         for (const ScenarioSummary& summary : summaries_) {
             file << "| "
                 << EscapeMarkdownTable(summary.name) << " | "
                 << summary.verdict << " | "
                 << EscapeMarkdownTable(
+                    summary.networkRuntimeMode.empty()
+                    ? "unknown"
+                    : summary.networkRuntimeMode) << " | "
+                << EscapeMarkdownTable(
                     summary.adaptiveControlMode.empty()
                     ? "unknown"
                     : summary.adaptiveControlMode) << " | "
+                << EscapeMarkdownTable(
+                    summary.adaptiveCongestionControlMode.empty()
+                    ? "unknown"
+                    : summary.adaptiveCongestionControlMode) << " | "
                 << EscapeMarkdownTable(
                     summary.dominantAdaptiveDegradationCause.empty()
                     ? "None"
@@ -648,9 +775,9 @@ namespace {
         }
         file << "\n";
 
-        file << "## Adaptive Mode Comparison\n\n";
+        file << "## Controller A/B Comparison\n\n";
         if (summaries_.empty()) {
-            file << "No adaptive mode comparison is available yet.\n\n";
+            file << "No controller comparison is available yet.\n\n";
         }
         else {
             std::vector<std::string> networkScenarioOrder;
@@ -667,9 +794,65 @@ namespace {
                 summariesByNetworkScenario[networkScenario].push_back(&summary);
             }
 
+            const auto modeName =
+                [](const ScenarioSummary& summary) -> std::string {
+                return summary.adaptiveControlMode.empty()
+                    ? std::string("unknown")
+                    : summary.adaptiveControlMode;
+            };
+
+            const auto isFixedQuality =
+                [&](const ScenarioSummary& summary) -> bool {
+                return modeName(summary) == "Fixed Quality" ||
+                    summary.name.find(" / Fixed Quality") !=
+                    std::string::npos;
+            };
+
+            const auto frameDropRate =
+                [](const ScenarioSummary& summary) -> double {
+                const uint64_t totalFrames =
+                    summary.displayedFrames + summary.droppedFrames;
+                if (totalFrames == 0) {
+                    return 0.0;
+                }
+                return static_cast<double>(summary.droppedFrames) /
+                    static_cast<double>(totalFrames);
+            };
+
+            const auto averageQoeScore =
+                [](const ScenarioSummary& summary) -> double {
+                if (summary.timeSeriesSamples.empty()) {
+                    return 0.0;
+                }
+
+                double sum = 0.0;
+                for (const TimeSeriesSample& sample :
+                    summary.timeSeriesSamples) {
+                    sum += sample.adaptiveQoeScore;
+                }
+                return sum /
+                    static_cast<double>(summary.timeSeriesSamples.size());
+            };
+
+            const auto scoreController =
+                [&](const ScenarioSummary& summary) -> double {
+                double score = summary.p95LatencyMs;
+                score += frameDropRate(summary) * 500.0;
+                score += static_cast<double>(summary.droppedFrames) * 8.0;
+                score += static_cast<double>(summary.deadlineDroppedFrames) *
+                    12.0;
+                score += static_cast<double>(
+                    summary.outputQueueDroppedFrames) * 5.0;
+                score += static_cast<double>(
+                    summary.deadlineNackExpiredDroppedFrames) * 3.0;
+                score -= summary.avgDisplayFps * 0.75;
+                score -= averageQoeScore(summary) * 8.0;
+                return score;
+            };
+
             file
-                << "| Network Scenario | Mode | Avg FPS | P95 Latency ms | Drops | NACK Recovered | NACK Expired | Min FPS | Min JPEG Quality | Verdict |\n"
-                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+                << "| Network Scenario | Controller | Frame Drop | Drop vs Fixed | Avg Latency ms | Latency vs Fixed | Display FPS | FPS vs Fixed | Avg QoE | NACK Recovered | NACK Expired | Target FPS | Target JPEG | Verdict |\n"
+                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
             for (const std::string& networkScenario : networkScenarioOrder) {
                 const auto it =
@@ -678,16 +861,46 @@ namespace {
                     continue;
                 }
 
+                const ScenarioSummary* fixedBaseline = nullptr;
                 for (const ScenarioSummary* summary : it->second) {
+                    if (isFixedQuality(*summary)) {
+                        fixedBaseline = summary;
+                        break;
+                    }
+                }
+
+                for (const ScenarioSummary* summary : it->second) {
+                    const double dropRate = frameDropRate(*summary);
+                    const double avgQoeScore = averageQoeScore(*summary);
+                    const std::string dropVsFixed = fixedBaseline == nullptr
+                        ? "n/a"
+                        : FormatImprovementRatio(
+                            frameDropRate(*fixedBaseline),
+                            dropRate,
+                            false);
+                    const std::string latencyVsFixed = fixedBaseline == nullptr
+                        ? "n/a"
+                        : FormatImprovementRatio(
+                            fixedBaseline->avgLatencyMs,
+                            summary->avgLatencyMs,
+                            false);
+                    const std::string fpsVsFixed = fixedBaseline == nullptr
+                        ? "n/a"
+                        : FormatImprovementRatio(
+                            fixedBaseline->avgDisplayFps,
+                            summary->avgDisplayFps,
+                            true);
+
                     file << "| "
                         << EscapeMarkdownTable(networkScenario) << " | "
-                        << EscapeMarkdownTable(
-                            summary->adaptiveControlMode.empty()
-                            ? "unknown"
-                            : summary->adaptiveControlMode) << " | "
+                        << EscapeMarkdownTable(modeName(*summary)) << " | "
+                        << FormatPercent(dropRate) << " | "
+                        << dropVsFixed << " | "
+                        << FormatDouble(summary->avgLatencyMs) << " | "
+                        << latencyVsFixed << " | "
                         << FormatDouble(summary->avgDisplayFps) << " | "
-                        << FormatDouble(summary->p95LatencyMs) << " | "
-                        << summary->droppedFrames << " | "
+                        << fpsVsFixed << " | "
+                        << FormatDouble(avgQoeScore) << " | "
                         << summary->deadlineNackRecoveredFrames << " | "
                         << summary->deadlineNackExpiredDroppedFrames << " | "
                         << summary->minTargetFps << " | "
@@ -697,7 +910,364 @@ namespace {
             }
 
             file << "\n";
-            file << "This table is the A/B evidence path: Fixed Quality shows the uncontrolled baseline, Loss Reactive shows packet-loss-only adaptation, and QoE/Deadline Adaptive shows the full controller under the same network condition.\n\n";
+
+            file << "### Best Controller By Scenario\n\n";
+            file
+                << "| Network Scenario | Best Controller | Why It Wins | Fixed Baseline | Evidence |\n"
+                << "| --- | --- | --- | --- | --- |\n";
+
+            for (const std::string& networkScenario : networkScenarioOrder) {
+                const auto it =
+                    summariesByNetworkScenario.find(networkScenario);
+                if (it == summariesByNetworkScenario.end() ||
+                    it->second.empty()) {
+                    continue;
+                }
+
+                const ScenarioSummary* fixedBaseline = nullptr;
+                const ScenarioSummary* winner = it->second.front();
+                double winnerScore = scoreController(*winner);
+
+                for (const ScenarioSummary* candidate : it->second) {
+                    if (isFixedQuality(*candidate)) {
+                        fixedBaseline = candidate;
+                    }
+
+                    const double candidateScore =
+                        scoreController(*candidate);
+                    if (candidateScore < winnerScore) {
+                        winner = candidate;
+                        winnerScore = candidateScore;
+                    }
+                }
+
+                std::string why = "best latency/drop/FPS balance";
+                if (winner->p95LatencyMs < 150.0 &&
+                    frameDropRate(*winner) <= 0.01) {
+                    why = "kept p95 under 150ms with almost no frame drops";
+                }
+                else if (fixedBaseline != nullptr &&
+                    frameDropRate(*winner) < frameDropRate(*fixedBaseline) &&
+                    winner->avgDisplayFps >= fixedBaseline->avgDisplayFps) {
+                    why = "reduced drops without sacrificing display FPS";
+                }
+                else if (winner->deadlineNackRecoveredFrames > 0 &&
+                    winner->deadlineNackExpiredDroppedFrames <=
+                    winner->deadlineNackRecoveredFrames) {
+                    why = "recovered missing frames while bounding stale recovery";
+                }
+
+                std::string fixedBaselineText = "not available";
+                std::string evidence = "score "
+                    + FormatDouble(winnerScore);
+                if (fixedBaseline != nullptr) {
+                    fixedBaselineText =
+                        FormatPercent(frameDropRate(*fixedBaseline)) +
+                        " drop, " +
+                        FormatDouble(fixedBaseline->avgLatencyMs) +
+                        " ms latency, " +
+                        FormatDouble(fixedBaseline->avgDisplayFps) +
+                        " fps";
+                    evidence =
+                        "drop " +
+                        FormatImprovementRatio(
+                            frameDropRate(*fixedBaseline),
+                            frameDropRate(*winner),
+                            false) +
+                        ", latency " +
+                        FormatImprovementRatio(
+                            fixedBaseline->avgLatencyMs,
+                            winner->avgLatencyMs,
+                            false) +
+                        ", fps " +
+                        FormatImprovementRatio(
+                            fixedBaseline->avgDisplayFps,
+                            winner->avgDisplayFps,
+                            true) +
+                        " vs Fixed";
+                }
+
+                file << "| "
+                    << EscapeMarkdownTable(networkScenario) << " | "
+                    << EscapeMarkdownTable(modeName(*winner)) << " | "
+                    << EscapeMarkdownTable(why) << " | "
+                    << EscapeMarkdownTable(fixedBaselineText) << " | "
+                    << EscapeMarkdownTable(evidence) << " |\n";
+            }
+
+            file << "\n";
+            file << "This section is the controller A/B evidence path: Fixed Quality is the uncontrolled baseline, Loss Reactive is packet-loss-only adaptation, and QoE/Deadline Adaptive is evaluated against the same network condition using drop rate, latency, display FPS, QoE, and recovery events.\n\n";
+        }
+
+        file << "## Time-Series Controller Response\n\n";
+        if (summaries_.empty()) {
+            file << "No time-series samples are available yet.\n\n";
+        }
+        else {
+            constexpr size_t kMaxChartSamples = 30;
+
+            const auto shouldPreferScenario =
+                [](const ScenarioSummary& summary) -> bool {
+                return
+                    summary.name == "Baseline / Fixed Quality" ||
+                    summary.name == "10% loss / Fixed Quality" ||
+                    summary.name == "10% loss / QoE/Deadline Adaptive" ||
+                    summary.name == "50ms jitter / QoE/Deadline Adaptive" ||
+                    summary.name == "Burst loss / QoE/Deadline Adaptive";
+            };
+
+            std::vector<const ScenarioSummary*> chartSummaries;
+            for (const ScenarioSummary& summary : summaries_) {
+                if (!summary.timeSeriesSamples.empty() &&
+                    shouldPreferScenario(summary)) {
+                    chartSummaries.push_back(&summary);
+                }
+            }
+            if (chartSummaries.empty()) {
+                for (const ScenarioSummary& summary : summaries_) {
+                    if (!summary.timeSeriesSamples.empty()) {
+                        chartSummaries.push_back(&summary);
+                    }
+                    if (chartSummaries.size() >= 4) {
+                        break;
+                    }
+                }
+            }
+
+            file << "Selected scenarios are capped at "
+                << kMaxChartSamples
+                << " points each so the Markdown stays readable while preserving controller reaction trends.\n\n";
+
+            const auto buildNumberArray =
+                [](const std::vector<double>& values) -> std::string {
+                std::ostringstream oss;
+                oss << "[";
+                for (size_t i = 0; i < values.size(); ++i) {
+                    if (i > 0) {
+                        oss << ", ";
+                    }
+                    oss << FormatDouble(values[i]);
+                }
+                oss << "]";
+                return oss.str();
+            };
+
+            const auto collectSamples =
+                [&](const ScenarioSummary& summary) {
+                std::vector<const TimeSeriesSample*> samples;
+                if (summary.timeSeriesSamples.empty()) {
+                    return samples;
+                }
+
+                const size_t stride =
+                    (std::max)(
+                        size_t{ 1 },
+                        (summary.timeSeriesSamples.size() +
+                            kMaxChartSamples - 1) / kMaxChartSamples);
+
+                for (size_t i = 0; i < summary.timeSeriesSamples.size(); i += stride) {
+                    samples.push_back(&summary.timeSeriesSamples[i]);
+                }
+
+                if (samples.empty() ||
+                    samples.back() != &summary.timeSeriesSamples.back()) {
+                    samples.push_back(&summary.timeSeriesSamples.back());
+                }
+
+                return samples;
+            };
+
+            const auto writeChart =
+                [&](const std::string& title,
+                    const std::string& yLabel,
+                    double yMax,
+                    const std::vector<double>& xValues,
+                    const std::vector<std::pair<std::string, std::vector<double>>>& lines) {
+                if (xValues.empty() || lines.empty()) {
+                    return;
+                }
+
+                file << "```mermaid\n";
+                file << "xychart-beta\n";
+                file << "  title \"" << EscapeMermaidText(title) << "\"\n";
+                file << "  x-axis " << buildNumberArray(xValues) << "\n";
+                file << "  y-axis \"" << EscapeMermaidText(yLabel)
+                    << "\" 0 --> " << FormatDouble((std::max)(1.0, yMax)) << "\n";
+                for (const auto& line : lines) {
+                    file << "  line \"" << EscapeMermaidText(line.first)
+                        << "\" " << buildNumberArray(line.second) << "\n";
+                }
+                file << "```\n\n";
+            };
+
+            for (const ScenarioSummary* summary : chartSummaries) {
+                const std::vector<const TimeSeriesSample*> samples =
+                    collectSamples(*summary);
+                if (samples.empty()) {
+                    continue;
+                }
+
+                std::vector<double> x;
+                std::vector<double> displayFps;
+                std::vector<double> currentLatency;
+                std::vector<double> rollingP95Latency;
+                std::vector<double> deadlineLine;
+                std::vector<double> qoeScoreScaled;
+                std::vector<double> causeScore;
+                std::vector<double> targetQuality;
+                std::vector<double> targetFps;
+                std::vector<double> targetBitrateScaled;
+                std::vector<double> bandwidthCeilingScaled;
+                std::vector<double> estimatedBandwidthMbps;
+                std::vector<double> deliveryRateMbps;
+                std::vector<double> bandwidthQueueDelayMs;
+                std::vector<double> bandwidthLossPercent;
+                std::vector<double> bandwidthJitterMs;
+                std::vector<double> nackSent;
+                std::vector<double> nackRecovered;
+                std::vector<double> nackExpired;
+                std::vector<double> retransmittedChunks;
+                std::vector<double> packetLossPercent;
+                std::vector<double> jitterMs;
+
+                double recoveryMax = 1.0;
+                double networkInputMax = 10.0;
+                double bandwidthMax = 1.0;
+
+                for (const TimeSeriesSample* sample : samples) {
+                    x.push_back(sample->relativeTimeSec);
+                    displayFps.push_back(sample->displayFps);
+                    currentLatency.push_back(sample->currentLatencyMs);
+                    rollingP95Latency.push_back(sample->rollingP95LatencyMs);
+                    deadlineLine.push_back(150.0);
+                    qoeScoreScaled.push_back(sample->adaptiveQoeScore * 20.0);
+                    causeScore.push_back(sample->adaptiveCauseScore);
+                    targetQuality.push_back(
+                        static_cast<double>(sample->targetJpegQuality));
+                    targetFps.push_back(static_cast<double>(sample->targetFps));
+                    targetBitrateScaled.push_back(
+                        static_cast<double>(sample->targetBitrateKbps) / 120.0);
+                    bandwidthCeilingScaled.push_back(
+                        static_cast<double>(sample->bandwidthCeilingKbps) / 120.0);
+                    estimatedBandwidthMbps.push_back(
+                        static_cast<double>(sample->estimatedBandwidthBps) /
+                        1000.0 / 1000.0);
+                    deliveryRateMbps.push_back(
+                        static_cast<double>(sample->deliveryRateBps) /
+                        1000.0 / 1000.0);
+                    bandwidthQueueDelayMs.push_back(
+                        sample->bandwidthQueueDelayMs);
+                    bandwidthLossPercent.push_back(
+                        sample->bandwidthLossTrend * 100.0);
+                    bandwidthJitterMs.push_back(
+                        sample->bandwidthJitterTrendMs);
+                    nackSent.push_back(
+                        static_cast<double>(sample->deadlineNackSentFrames));
+                    nackRecovered.push_back(
+                        static_cast<double>(sample->deadlineNackRecoveredFrames));
+                    nackExpired.push_back(
+                        static_cast<double>(sample->deadlineNackExpiredDroppedFrames));
+                    retransmittedChunks.push_back(
+                        static_cast<double>(sample->ackRetransmittedChunks));
+                    packetLossPercent.push_back(sample->packetLossRate * 100.0);
+                    jitterMs.push_back(sample->currentJitterMs);
+
+                    recoveryMax =
+                        (std::max)(recoveryMax, nackSent.back());
+                    recoveryMax =
+                        (std::max)(recoveryMax, nackRecovered.back());
+                    recoveryMax =
+                        (std::max)(recoveryMax, nackExpired.back());
+                    recoveryMax =
+                        (std::max)(recoveryMax, retransmittedChunks.back());
+                    networkInputMax =
+                        (std::max)(networkInputMax, packetLossPercent.back());
+                    networkInputMax =
+                        (std::max)(networkInputMax, jitterMs.back());
+                    bandwidthMax =
+                        (std::max)(bandwidthMax, estimatedBandwidthMbps.back());
+                    bandwidthMax =
+                        (std::max)(bandwidthMax, deliveryRateMbps.back());
+                    bandwidthMax =
+                        (std::max)(bandwidthMax, bandwidthQueueDelayMs.back());
+                    bandwidthMax =
+                        (std::max)(bandwidthMax, bandwidthLossPercent.back());
+                    bandwidthMax =
+                        (std::max)(bandwidthMax, bandwidthJitterMs.back());
+                }
+
+                file << "### " << summary->name << "\n\n";
+                file << "Adaptive cause score legend: None=0, Loss=20, Jitter=40, RTT=60, Bandwidth=80, DecodeLoad=100, DisplayLoad=120. Target bitrate and bandwidth ceiling are drawn as `kbps / 120` to share the same axis as quality and FPS.\n\n";
+
+                writeChart(
+                    summary->name + " - FPS and Latency",
+                    "FPS / ms",
+                    160.0,
+                    x,
+                    {
+                        { "Display FPS", displayFps },
+                        { "Current latency ms", currentLatency },
+                        { "Rolling p95 latency ms", rollingP95Latency },
+                        { "150ms deadline", deadlineLine },
+                    });
+
+                writeChart(
+                    summary->name + " - QoE and Adaptive Cause",
+                    "Score",
+                    120.0,
+                    x,
+                    {
+                        { "QoE score x20", qoeScoreScaled },
+                        { "Cause score", causeScore },
+                    });
+
+                writeChart(
+                    summary->name + " - Target Quality, FPS, Bitrate",
+                    "Control target",
+                    100.0,
+                    x,
+                    {
+                        { "JPEG quality", targetQuality },
+                        { "Target FPS", targetFps },
+                        { "Bitrate kbps / 120", targetBitrateScaled },
+                        { "BW ceiling kbps / 120", bandwidthCeilingScaled },
+                    });
+
+                writeChart(
+                    summary->name + " - Bandwidth Estimator",
+                    "Mbps / ms / %",
+                    bandwidthMax + 2.0,
+                    x,
+                    {
+                        { "Estimated bandwidth Mbps", estimatedBandwidthMbps },
+                        { "Delivery rate Mbps", deliveryRateMbps },
+                        { "Queue delay ms", bandwidthQueueDelayMs },
+                        { "Loss trend %", bandwidthLossPercent },
+                        { "Jitter trend ms", bandwidthJitterMs },
+                    });
+
+                writeChart(
+                    summary->name + " - Recovery Events",
+                    "Count",
+                    recoveryMax + 1.0,
+                    x,
+                    {
+                        { "Deadline NACK sent", nackSent },
+                        { "NACK recovered", nackRecovered },
+                        { "NACK expired", nackExpired },
+                        { "Retransmitted chunks", retransmittedChunks },
+                    });
+
+                writeChart(
+                    summary->name + " - Packet Loss and Jitter",
+                    "Loss % / ms",
+                    networkInputMax + 5.0,
+                    x,
+                    {
+                        { "Packet loss %", packetLossPercent },
+                        { "Jitter ms", jitterMs },
+                    });
+            }
         }
 
         file << "## Baseline Comparison\n\n";
@@ -778,6 +1348,166 @@ namespace {
             }
         }
 
+        file << "\n## Interview Summary\n\n";
+        if (summaries_.empty()) {
+            file << "- Waiting for completed scenarios.\n\n";
+        }
+        else {
+            std::vector<std::string> networkScenarioOrder;
+            std::unordered_map<std::string, std::vector<const ScenarioSummary*>>
+                summariesByNetworkScenario;
+
+            for (const ScenarioSummary& summary : summaries_) {
+                const std::string networkScenario =
+                    ExtractNetworkScenarioName(summary.name);
+                if (summariesByNetworkScenario.find(networkScenario) ==
+                    summariesByNetworkScenario.end()) {
+                    networkScenarioOrder.push_back(networkScenario);
+                }
+                summariesByNetworkScenario[networkScenario].push_back(&summary);
+            }
+
+            const auto modeName =
+                [](const ScenarioSummary& summary) -> std::string {
+                return summary.adaptiveControlMode.empty()
+                    ? std::string("unknown")
+                    : summary.adaptiveControlMode;
+            };
+
+            const auto isFixedQuality =
+                [&](const ScenarioSummary& summary) -> bool {
+                return modeName(summary) == "Fixed Quality" ||
+                    summary.name.find(" / Fixed Quality") !=
+                    std::string::npos;
+            };
+
+            const auto frameDropRate =
+                [](const ScenarioSummary& summary) -> double {
+                const uint64_t totalFrames =
+                    summary.displayedFrames + summary.droppedFrames;
+                if (totalFrames == 0) {
+                    return 0.0;
+                }
+                return static_cast<double>(summary.droppedFrames) /
+                    static_cast<double>(totalFrames);
+            };
+
+            const auto scoreController =
+                [&](const ScenarioSummary& summary) -> double {
+                double score = summary.p95LatencyMs;
+                score += frameDropRate(summary) * 500.0;
+                score += static_cast<double>(summary.droppedFrames) * 8.0;
+                score += static_cast<double>(summary.deadlineDroppedFrames) *
+                    12.0;
+                score += static_cast<double>(
+                    summary.outputQueueDroppedFrames) * 5.0;
+                score += static_cast<double>(
+                    summary.deadlineNackExpiredDroppedFrames) * 3.0;
+                score -= summary.avgDisplayFps * 0.75;
+                return score;
+            };
+
+            uint32_t comparableScenarioCount = 0;
+            uint32_t adaptiveWinCount = 0;
+            double bestDropImprovement = -std::numeric_limits<double>::infinity();
+            double bestLatencyImprovement = -std::numeric_limits<double>::infinity();
+            double bestFpsImprovement = -std::numeric_limits<double>::infinity();
+            std::string bestDropScenario;
+            std::string bestLatencyScenario;
+            std::string bestFpsScenario;
+
+            for (const std::string& networkScenario : networkScenarioOrder) {
+                const auto it =
+                    summariesByNetworkScenario.find(networkScenario);
+                if (it == summariesByNetworkScenario.end() ||
+                    it->second.empty()) {
+                    continue;
+                }
+
+                const ScenarioSummary* fixedBaseline = nullptr;
+                const ScenarioSummary* winner = it->second.front();
+                double winnerScore = scoreController(*winner);
+
+                for (const ScenarioSummary* candidate : it->second) {
+                    if (isFixedQuality(*candidate)) {
+                        fixedBaseline = candidate;
+                    }
+
+                    const double candidateScore =
+                        scoreController(*candidate);
+                    if (candidateScore < winnerScore) {
+                        winner = candidate;
+                        winnerScore = candidateScore;
+                    }
+                }
+
+                if (fixedBaseline == nullptr) {
+                    continue;
+                }
+
+                comparableScenarioCount++;
+                if (!isFixedQuality(*winner)) {
+                    adaptiveWinCount++;
+                }
+
+                const double fixedDropRate = frameDropRate(*fixedBaseline);
+                const double winnerDropRate = frameDropRate(*winner);
+                const double dropImprovement =
+                    std::abs(fixedDropRate) < 0.0001
+                    ? 0.0
+                    : (fixedDropRate - winnerDropRate) / fixedDropRate;
+                const double latencyImprovement =
+                    std::abs(fixedBaseline->avgLatencyMs) < 0.0001
+                    ? 0.0
+                    : (fixedBaseline->avgLatencyMs - winner->avgLatencyMs) /
+                    fixedBaseline->avgLatencyMs;
+                const double fpsImprovement =
+                    std::abs(fixedBaseline->avgDisplayFps) < 0.0001
+                    ? 0.0
+                    : (winner->avgDisplayFps -
+                        fixedBaseline->avgDisplayFps) /
+                    fixedBaseline->avgDisplayFps;
+
+                if (dropImprovement > bestDropImprovement) {
+                    bestDropImprovement = dropImprovement;
+                    bestDropScenario =
+                        networkScenario + " / " + modeName(*winner);
+                }
+                if (latencyImprovement > bestLatencyImprovement) {
+                    bestLatencyImprovement = latencyImprovement;
+                    bestLatencyScenario =
+                        networkScenario + " / " + modeName(*winner);
+                }
+                if (fpsImprovement > bestFpsImprovement) {
+                    bestFpsImprovement = fpsImprovement;
+                    bestFpsScenario =
+                        networkScenario + " / " + modeName(*winner);
+                }
+            }
+
+            if (comparableScenarioCount == 0) {
+                file << "- Fixed Quality baseline was not found for the completed scenarios. Run the Adaptive A/B experiment so each network condition has Fixed Quality, Loss Reactive, and QoE/Deadline Adaptive rows.\n\n";
+            }
+            else {
+                file << "- Compared " << comparableScenarioCount
+                    << " network scenarios against Fixed Quality baselines.\n";
+                file << "- Non-fixed adaptive controllers won "
+                    << adaptiveWinCount << " / "
+                    << comparableScenarioCount
+                    << " comparable scenarios by the latency/drop/FPS score.\n";
+                file << "- Best frame-drop reduction: "
+                    << FormatSignedPercent(bestDropImprovement)
+                    << " at " << bestDropScenario << ".\n";
+                file << "- Best average-latency improvement: "
+                    << FormatSignedPercent(bestLatencyImprovement)
+                    << " at " << bestLatencyScenario << ".\n";
+                file << "- Best display-FPS improvement: "
+                    << FormatSignedPercent(bestFpsImprovement)
+                    << " at " << bestFpsScenario << ".\n";
+                file << "- Interview framing: under the same network condition, Fixed Quality is the baseline and the adaptive modes are judged by user-visible outcomes: deadline latency, displayed FPS, frame drop rate, QoE, and selective retransmit recovery.\n\n";
+            }
+        }
+
         file << "\n## Portfolio Summary\n\n";
         file << "This engine now covers implementation, measurement, evaluation, and improvement in one loop: CSV telemetry records raw runtime behavior, scenario summaries condense each network condition, and this report converts the run into reviewable evidence. Deadline-based NACK and selective retransmission preserve UDP latency while recovering missing chunks when a frame misses its receive deadline.\n";
         file.flush();
@@ -855,8 +1585,55 @@ namespace {
 
         const double matchedCount =
             (std::max)(1.0, static_cast<double>(matched.size()));
+        const double avgFpsDelta =
+            matched.empty()
+            ? 0.0
+            : (afterFpsSum - beforeFpsSum) / matchedCount;
+        const double avgP95Delta =
+            matched.empty()
+            ? 0.0
+            : (afterP95Sum - beforeP95Sum) / matchedCount;
+        const int64_t dropDelta =
+            static_cast<int64_t>(afterDrops) -
+            static_cast<int64_t>(beforeDrops);
+        const int64_t deadlineDropDelta =
+            static_cast<int64_t>(afterDeadlineDrops) -
+            static_cast<int64_t>(beforeDeadlineDrops);
+        const int64_t outputDropDelta =
+            static_cast<int64_t>(afterOutputDrops) -
+            static_cast<int64_t>(beforeOutputDrops);
+        const int64_t nackRecoveryDelta =
+            static_cast<int64_t>(afterNackRecovered) -
+            static_cast<int64_t>(beforeNackRecovered);
+        const int64_t nackExpiredDelta =
+            static_cast<int64_t>(afterNackExpired) -
+            static_cast<int64_t>(beforeNackExpired);
 
-        file << "# Network Before/After Report\n\n";
+        const bool hasLatencyImprovement = avgP95Delta <= -1.0;
+        const bool hasDropImprovement = dropDelta < 0;
+        const bool hasFpsImprovement = avgFpsDelta >= 1.0;
+        const bool hasMeaningfulRegression =
+            avgP95Delta >= 5.0 ||
+            dropDelta > 3 ||
+            avgFpsDelta <= -3.0;
+
+        const char* overallResult = "INCONCLUSIVE";
+        if (!matched.empty()) {
+            if ((hasLatencyImprovement || hasDropImprovement || hasFpsImprovement) &&
+                !hasMeaningfulRegression) {
+                overallResult = "IMPROVED";
+            }
+            else if (hasMeaningfulRegression &&
+                !hasLatencyImprovement &&
+                !hasDropImprovement) {
+                overallResult = "REGRESSED";
+            }
+            else {
+                overallResult = "MIXED";
+            }
+        }
+
+        file << "# Network Before/After Portfolio Report\n\n";
         file << "Generated: " << generatedTimestamp_ << "\n\n";
         file << "- Before CSV: "
             << (previousSummaryCsvPath_.empty()
@@ -876,26 +1653,7 @@ namespace {
             file << "- No matching scenario names were found between the previous and current summaries.\n\n";
         }
         else {
-            const double avgFpsDelta =
-                (afterFpsSum - beforeFpsSum) / matchedCount;
-            const double avgP95Delta =
-                (afterP95Sum - beforeP95Sum) / matchedCount;
-            const int64_t dropDelta =
-                static_cast<int64_t>(afterDrops) -
-                static_cast<int64_t>(beforeDrops);
-            const int64_t deadlineDropDelta =
-                static_cast<int64_t>(afterDeadlineDrops) -
-                static_cast<int64_t>(beforeDeadlineDrops);
-            const int64_t outputDropDelta =
-                static_cast<int64_t>(afterOutputDrops) -
-                static_cast<int64_t>(beforeOutputDrops);
-            const int64_t nackRecoveryDelta =
-                static_cast<int64_t>(afterNackRecovered) -
-                static_cast<int64_t>(beforeNackRecovered);
-            const int64_t nackExpiredDelta =
-                static_cast<int64_t>(afterNackExpired) -
-                static_cast<int64_t>(beforeNackExpired);
-
+            file << "- Overall result: **" << overallResult << "**.\n";
             file << "- Matched scenarios: " << matched.size() << ".\n";
             file << "- Average display FPS delta: "
                 << FormatDelta(avgFpsDelta)
@@ -921,10 +1679,90 @@ namespace {
                 << " frames.\n\n";
         }
 
+        file << "## Portfolio Snapshot\n\n";
+        file
+            << "| Item | Summary |\n"
+            << "| --- | --- |\n"
+            << "| What changed | Compared persisted `network_summary_*.csv` runs and generated a scenario-matched evaluation report. |\n"
+            << "| Why it matters | The engine now demonstrates the full implementation -> measurement -> evaluation -> improvement loop expected in realtime networking work. |\n"
+            << "| Evidence source | CSV telemetry condensed into scenario summaries, then compared by scenario name and adaptive mode. |\n"
+            << "| Primary result | " << overallResult << " across "
+            << matched.size() << " matched scenarios. |\n"
+            << "| Main trade-off | Low-latency recovery may intentionally expire stale frames instead of displaying late video. |\n\n";
+
+        file << "## Key Metrics\n\n";
+        file
+            << "| Metric | Before | After | Delta | Interpretation |\n"
+            << "| --- | ---: | ---: | ---: | --- |\n";
+
+        file << "| Avg display FPS | "
+            << FormatDouble(matched.empty() ? 0.0 : beforeFpsSum / matchedCount)
+            << " | "
+            << FormatDouble(matched.empty() ? 0.0 : afterFpsSum / matchedCount)
+            << " | "
+            << FormatDelta(avgFpsDelta)
+            << " | "
+            << (avgFpsDelta >= 1.0
+                ? "smoother display"
+                : avgFpsDelta <= -1.0
+                ? "lower display rate"
+                : "roughly unchanged")
+            << " |\n";
+
+        file << "| Avg p95 latency ms | "
+            << FormatDouble(matched.empty() ? 0.0 : beforeP95Sum / matchedCount)
+            << " | "
+            << FormatDouble(matched.empty() ? 0.0 : afterP95Sum / matchedCount)
+            << " | "
+            << FormatDelta(avgP95Delta)
+            << " | "
+            << (avgP95Delta <= -1.0
+                ? "lower tail latency"
+                : avgP95Delta >= 1.0
+                ? "higher tail latency"
+                : "roughly unchanged")
+            << " |\n";
+
+        file << "| Total frame drops | "
+            << beforeDrops << " | "
+            << afterDrops << " | "
+            << FormatIntDelta(dropDelta)
+            << " | "
+            << (dropDelta < 0
+                ? "fewer lost frames"
+                : dropDelta > 0
+                ? "more dropped frames"
+                : "unchanged")
+            << " |\n";
+
+        file << "| Deadline drops | "
+            << beforeDeadlineDrops << " | "
+            << afterDeadlineDrops << " | "
+            << FormatIntDelta(deadlineDropDelta)
+            << " | display-deadline pressure |\n";
+
+        file << "| Output queue drops | "
+            << beforeOutputDrops << " | "
+            << afterOutputDrops << " | "
+            << FormatIntDelta(outputDropDelta)
+            << " | renderer/jitter backlog pressure |\n";
+
+        file << "| NACK recovered frames | "
+            << beforeNackRecovered << " | "
+            << afterNackRecovered << " | "
+            << FormatIntDelta(nackRecoveryDelta)
+            << " | selective retransmit recovery evidence |\n";
+
+        file << "| NACK expired drops | "
+            << beforeNackExpired << " | "
+            << afterNackExpired << " | "
+            << FormatIntDelta(nackExpiredDelta)
+            << " | stale recovery discarded before missing deadline |\n\n";
+
         file << "## Scenario Comparison\n\n";
         file
-            << "| Scenario | Mode Before | Mode After | Cause Before | Cause After | FPS Before | FPS After | FPS Delta | P95 Before ms | P95 After ms | P95 Delta ms | Drops Before | Drops After | Drop Delta | Drop Change | NACK Recovered Before | NACK Recovered After | NACK Expired Before | NACK Expired After |\n"
-            << "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n";
+            << "| Scenario | Runtime Before | Runtime After | Mode Before | Mode After | Cause Before | Cause After | FPS Before | FPS After | FPS Delta | P95 Before ms | P95 After ms | P95 Delta ms | Drops Before | Drops After | Drop Delta | Drop Change | NACK Recovered Before | NACK Recovered After | NACK Expired Before | NACK Expired After |\n"
+            << "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n";
 
         for (const ScenarioPair& pair : matched) {
             const double fpsDelta =
@@ -937,6 +1775,14 @@ namespace {
 
             file << "| "
                 << EscapeMarkdownTable(pair.after.name) << " | "
+                << EscapeMarkdownTable(
+                    pair.before.networkRuntimeMode.empty()
+                    ? "unknown"
+                    : pair.before.networkRuntimeMode) << " | "
+                << EscapeMarkdownTable(
+                    pair.after.networkRuntimeMode.empty()
+                    ? "unknown"
+                    : pair.after.networkRuntimeMode) << " | "
                 << EscapeMarkdownTable(
                     pair.before.adaptiveControlMode.empty()
                     ? "unknown"
@@ -972,6 +1818,102 @@ namespace {
                 << pair.after.deadlineNackExpiredDroppedFrames << " |\n";
         }
         file << "\n";
+
+        file << "## After-Run Mode Winners\n\n";
+        if (summaries_.empty()) {
+            file << "- Waiting for current-run scenarios.\n\n";
+        }
+        else {
+            std::vector<std::string> networkScenarioOrder;
+            std::unordered_map<std::string, std::vector<const ScenarioSummary*>>
+                summariesByNetworkScenario;
+
+            for (const ScenarioSummary& summary : summaries_) {
+                const std::string networkScenario =
+                    ExtractNetworkScenarioName(summary.name);
+                if (summariesByNetworkScenario.find(networkScenario) ==
+                    summariesByNetworkScenario.end()) {
+                    networkScenarioOrder.push_back(networkScenario);
+                }
+                summariesByNetworkScenario[networkScenario].push_back(&summary);
+            }
+
+            const auto scoreScenario =
+                [](const ScenarioSummary& summary) -> double {
+                double score = summary.p95LatencyMs;
+                score += static_cast<double>(summary.droppedFrames) * 8.0;
+                score += static_cast<double>(summary.deadlineDroppedFrames) * 12.0;
+                score += static_cast<double>(summary.outputQueueDroppedFrames) * 5.0;
+                score += static_cast<double>(
+                    summary.deadlineNackExpiredDroppedFrames) * 3.0;
+                score -= summary.avgDisplayFps * 0.75;
+                return score;
+            };
+
+            file
+                << "| Network Scenario | Best Mode | Why It Wins | FPS | P95 Latency ms | Drops | NACK Recovered | Trade-off |\n"
+                << "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |\n";
+
+            for (const std::string& networkScenario : networkScenarioOrder) {
+                const auto it =
+                    summariesByNetworkScenario.find(networkScenario);
+                if (it == summariesByNetworkScenario.end() ||
+                    it->second.empty()) {
+                    continue;
+                }
+
+                const ScenarioSummary* winner = it->second.front();
+                double winnerScore = scoreScenario(*winner);
+                for (const ScenarioSummary* candidate : it->second) {
+                    const double candidateScore = scoreScenario(*candidate);
+                    if (candidateScore < winnerScore) {
+                        winner = candidate;
+                        winnerScore = candidateScore;
+                    }
+                }
+
+                std::string why = "best latency/drop balance";
+                if (winner->droppedFrames == 0 &&
+                    winner->p95LatencyMs < 150.0) {
+                    why = "met the 150ms deadline with no frame drops";
+                }
+                else if (winner->deadlineNackRecoveredFrames > 0 &&
+                    winner->droppedFrames <= winner->deadlineNackRecoveredFrames) {
+                    why = "used selective retransmit while keeping drops bounded";
+                }
+                else if (winner->avgDisplayFps >= 24.0 &&
+                    winner->p95LatencyMs < 150.0) {
+                    why = "kept interactive FPS under the latency deadline";
+                }
+
+                std::string tradeoff = "none observed";
+                if (winner->minTargetJpegQuality <= 40 ||
+                    winner->minTargetFps <= 8) {
+                    tradeoff = "quality or FPS reached the lower adaptive bound";
+                }
+                else if (winner->deadlineNackExpiredDroppedFrames > 0) {
+                    tradeoff = "expired stale recovery to protect latency";
+                }
+                else if (winner->avgDisplayFps < 20.0) {
+                    tradeoff = "lower display FPS";
+                }
+
+                file << "| "
+                    << EscapeMarkdownTable(networkScenario) << " | "
+                    << EscapeMarkdownTable(
+                        winner->adaptiveControlMode.empty()
+                        ? "unknown"
+                        : winner->adaptiveControlMode) << " | "
+                    << EscapeMarkdownTable(why) << " | "
+                    << FormatDouble(winner->avgDisplayFps) << " | "
+                    << FormatDouble(winner->p95LatencyMs) << " | "
+                    << winner->droppedFrames << " | "
+                    << winner->deadlineNackRecoveredFrames << " | "
+                    << EscapeMarkdownTable(tradeoff) << " |\n";
+            }
+
+            file << "\n";
+        }
 
         file << "## Automatic Evaluation\n\n";
         if (matched.empty()) {
@@ -1058,7 +2000,33 @@ namespace {
         }
 
         file << "\n## Interview-Ready Summary\n\n";
-        file << "The engine can now compare two experiment runs directly from persisted CSV summaries. This makes the improvement loop explicit: run the old build, run the new build under the same scenarios, and produce a scenario-matched report showing FPS, latency, drop, and selective retransmission changes.\n";
+        file << "### What Changed\n\n";
+        file << "The engine compares two persisted experiment runs directly from `network_summary_*.csv`, matches scenarios by name, and reports FPS, p95 latency, frame drops, deadline drops, output queue drops, NACK recovery, and stale-recovery expiry.\n\n";
+
+        file << "### Why It Matters\n\n";
+        file << "Realtime video networking is not only about sending packets. This report shows whether reliability and adaptive-control changes actually improved the user-visible pipeline under repeatable network conditions.\n\n";
+
+        file << "### Evidence\n\n";
+        if (matched.empty()) {
+            file << "No matching scenarios are available yet. Run the same automatic experiment sequence twice to populate this section with true before/after evidence.\n\n";
+        }
+        else {
+            file << "- Overall result: " << overallResult << ".\n";
+            file << "- Average display FPS delta: "
+                << FormatDelta(avgFpsDelta) << " fps.\n";
+            file << "- Average p95 latency delta: "
+                << FormatDelta(avgP95Delta) << " ms.\n";
+            file << "- Total frame drop delta: "
+                << FormatIntDelta(dropDelta) << " frames.\n";
+            file << "- NACK recovered-frame delta: "
+                << FormatIntDelta(nackRecoveryDelta) << " frames.\n\n";
+        }
+
+        file << "### Trade-Off\n\n";
+        file << "The low-latency policy may drop or expire incomplete frames that cannot arrive before the display deadline. That is intentional for interactive video: a late frame is less useful than a fresh frame.\n\n";
+
+        file << "### Next Improvement\n\n";
+        file << "The next portfolio-level step is to add time-series charts for FPS, p95 latency, QoE score, target quality, and recovery events so the report shows both summary evidence and how the controller reacted over time.\n";
         file.flush();
     }
 
@@ -1245,8 +2213,12 @@ namespace {
                 ParseIntOrDefault(getCell(row, "minTargetJpegQuality"));
             summary.minTargetBitrateKbps =
                 ParseIntOrDefault(getCell(row, "minTargetBitrateKbps"));
+            summary.networkRuntimeMode =
+                getCell(row, "networkRuntimeMode");
             summary.adaptiveControlMode =
                 getCell(row, "adaptiveControlMode");
+            summary.adaptiveCongestionControlMode =
+                getCell(row, "adaptiveCongestionControlMode");
             summary.dominantAdaptiveDegradationCause =
                 getCell(row, "dominantAdaptiveDegradationCause");
             summary.verdict = getCell(row, "verdict");
@@ -1378,7 +2350,10 @@ namespace {
             current.minTargetBitrateKbps == (std::numeric_limits<int>::max)()
             ? 0
             : current.minTargetBitrateKbps;
+        summary.networkRuntimeMode = current.networkRuntimeMode;
         summary.adaptiveControlMode = current.adaptiveControlMode;
+        summary.adaptiveCongestionControlMode =
+            current.adaptiveCongestionControlMode;
 
         size_t dominantCauseIndex = 0;
         uint32_t dominantCauseSamples = 0;
@@ -1390,6 +2365,7 @@ namespace {
         }
         summary.dominantAdaptiveDegradationCause =
             AdaptiveCauseName(dominantCauseIndex);
+        summary.timeSeriesSamples = current.timeSeriesSamples;
 
         summary.notes = BuildVerdictNotes(summary);
         summary.verdict = summary.notes.empty() ? "PASS" : "WARN";

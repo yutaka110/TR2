@@ -132,6 +132,9 @@ namespace {
         file_ << std::fixed << std::setprecision(3)
             << appTimeSec << ','
             << EscapeCsv(ResolveScenarioName(stats)) << ','
+            << EscapeCsv(stats.networkRuntimeModeName) << ','
+            << (stats.networkModeSendingEnabled ? 1 : 0) << ','
+            << (stats.networkModeReceivingEnabled ? 1 : 0) << ','
             << (stats.networkExperimentActive ? 1 : 0) << ','
             << EscapeCsv(stats.networkExperimentScenarioName) << ','
             << EscapeCsv(stats.networkExperimentAdaptiveMode) << ','
@@ -170,6 +173,34 @@ namespace {
             << stats.ackCount << ','
             << stats.lastAckMissingRate << ','
             << stats.ackRetransmittedFrames << ','
+            << (stats.pacingEnabled ? 1 : 0) << ','
+            << stats.pacingTargetBitrateBps << ','
+            << stats.pacingQueuedPackets << ','
+            << stats.pacingHighPriorityQueuedPackets << ','
+            << stats.pacingNormalQueuedPackets << ','
+            << stats.pacingEnqueuedPackets << ','
+            << stats.pacingSentPackets << ','
+            << stats.pacingSentBytes << ','
+            << stats.pacingDroppedPackets << ','
+            << stats.pacingDeadlineDroppedPackets << ','
+            << stats.pacingOverflowDroppedPackets << ','
+            << stats.pacingCurrentQueueDelayMs << ','
+            << stats.pacingMaxQueueDelayMs << ','
+            << stats.transportFeedbackPackets << ','
+            << stats.transportFeedbackPacketStatuses << ','
+            << stats.transportFeedbackReceivedPackets << ','
+            << stats.transportFeedbackMissingPackets << ','
+            << stats.transportFeedbackLossRate << ','
+            << stats.transportFeedbackArrivalJitterMs << ','
+            << stats.transportFeedbackQueueDelayTrendMs << ','
+            << stats.transportFeedbackLastSequence << ','
+            << stats.estimatedBandwidthBps << ','
+            << stats.deliveryRateBps << ','
+            << stats.bandwidthQueueDelayMs << ','
+            << stats.bandwidthRttTrendMs << ','
+            << stats.bandwidthLossTrend << ','
+            << stats.bandwidthJitterTrendMs << ','
+            << stats.bandwidthFeedbackSamples << ','
             << stats.deadlineNackSentFrames << ','
             << stats.deadlineNackRecoveredFrames << ','
             << stats.deadlineNackMissingChunks << ','
@@ -178,9 +209,11 @@ namespace {
             << stats.deadlineNackExpiredMissingChunks << ','
             << (stats.adaptiveEnabled ? 1 : 0) << ','
             << EscapeCsv(stats.adaptiveControlMode) << ','
+            << EscapeCsv(stats.adaptiveCongestionControlMode) << ','
             << stats.adaptiveTargetJpegQuality << ','
             << stats.adaptiveTargetFps << ','
             << stats.adaptiveTargetBitrateKbps << ','
+            << stats.adaptiveBandwidthCeilingKbps << ','
             << stats.adaptiveTargetWidth << ','
             << stats.adaptiveTargetHeight << ','
             << stats.adaptiveRawFrameBytes << ','
@@ -226,6 +259,9 @@ namespace {
         file_
             << "timeSec,"
             << "scenarioName,"
+            << "networkRuntimeMode,"
+            << "networkModeSendingEnabled,"
+            << "networkModeReceivingEnabled,"
             << "networkExperimentActive,"
             << "networkExperimentScenarioName,"
             << "networkExperimentAdaptiveMode,"
@@ -264,6 +300,34 @@ namespace {
             << "ackCount,"
             << "lastAckMissingRate,"
             << "ackRetransmittedFrames,"
+            << "pacingEnabled,"
+            << "pacingTargetBitrateBps,"
+            << "pacingQueuedPackets,"
+            << "pacingHighPriorityQueuedPackets,"
+            << "pacingNormalQueuedPackets,"
+            << "pacingEnqueuedPackets,"
+            << "pacingSentPackets,"
+            << "pacingSentBytes,"
+            << "pacingDroppedPackets,"
+            << "pacingDeadlineDroppedPackets,"
+            << "pacingOverflowDroppedPackets,"
+            << "pacingCurrentQueueDelayMs,"
+            << "pacingMaxQueueDelayMs,"
+            << "transportFeedbackPackets,"
+            << "transportFeedbackPacketStatuses,"
+            << "transportFeedbackReceivedPackets,"
+            << "transportFeedbackMissingPackets,"
+            << "transportFeedbackLossRate,"
+            << "transportFeedbackArrivalJitterMs,"
+            << "transportFeedbackQueueDelayTrendMs,"
+            << "transportFeedbackLastSequence,"
+            << "estimatedBandwidthBps,"
+            << "deliveryRateBps,"
+            << "bandwidthQueueDelayMs,"
+            << "bandwidthRttTrendMs,"
+            << "bandwidthLossTrend,"
+            << "bandwidthJitterTrendMs,"
+            << "bandwidthFeedbackSamples,"
             << "deadlineNackSentFrames,"
             << "deadlineNackRecoveredFrames,"
             << "deadlineNackMissingChunks,"
@@ -272,9 +336,11 @@ namespace {
             << "deadlineNackExpiredMissingChunks,"
             << "adaptiveEnabled,"
             << "adaptiveControlMode,"
+            << "adaptiveCongestionControlMode,"
             << "targetJpegQuality,"
             << "targetFps,"
             << "targetBitrateKbps,"
+            << "adaptiveBandwidthCeilingKbps,"
             << "targetWidth,"
             << "targetHeight,"
             << "rawFrameBytes,"

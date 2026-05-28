@@ -6,6 +6,8 @@
 #pragma comment(lib, "ws2_32.lib")
 
 #include "PacketProtocol.h"
+#include "PacketPacer.h"
+#include "BandwidthEstimator.h"
 #include "NetworkConditionSimulator.h"
 
 #include <atomic>
@@ -58,6 +60,7 @@ public:
 
     double GetLastRttMs() const;
     double GetAverageRttMs() const;
+    double GetMaxRttMs() const;
     uint64_t GetRttSampleCount() const;
 
     uint32_t GetLastAckFrameId() const;
@@ -71,6 +74,25 @@ public:
     uint64_t GetAckKeyFrameRequestCount() const;
     bool IsKeyFrameRequestPending() const;
     bool ConsumeKeyFrameRequest();
+
+    void SetPacingEnabled(bool enabled);
+    bool IsPacingEnabled() const;
+    void SetPacingTargetBitrateKbps(uint32_t bitrateKbps);
+    net::PacketPacerStats GetPacingStats() const;
+
+    struct TransportFeedbackStats {
+        uint64_t feedbackPackets = 0;
+        uint64_t feedbackPacketStatuses = 0;
+        uint64_t feedbackReceivedPackets = 0;
+        uint64_t feedbackMissingPackets = 0;
+        double feedbackLossRate = 0.0;
+        double feedbackArrivalJitterMs = 0.0;
+        double feedbackQueueDelayTrendMs = 0.0;
+        uint16_t lastFeedbackSequence = 0;
+    };
+
+    TransportFeedbackStats GetTransportFeedbackStats() const;
+    net::BandwidthEstimatorStats GetBandwidthEstimatorStats() const;
 
     void SetNetworkCondition(const net::NetworkCondition& condition);
     net::NetworkCondition GetNetworkCondition() const;
@@ -90,6 +112,12 @@ private:
         bool acked = false;
         bool keyFrame = false;
         std::vector<uint8_t> payload;
+    };
+
+    struct SentPacketRecord {
+        uint32_t sequence = 0;
+        uint64_t sendTimeUs = 0;
+        uint32_t packetBytes = 0;
     };
 
     void SendRNVPFragmentedInternal(
@@ -158,6 +186,12 @@ private:
         size_t payloadSize
     );
 
+    void HandleRnvpTransportFeedback(
+        const net::RnvpHeaderV1& header,
+        const uint8_t* payload,
+        size_t payloadSize
+    );
+
     void HandleRnvpControl(
         const net::RnvpHeaderV1& header,
         const uint8_t* payload,
@@ -174,9 +208,22 @@ private:
         const char* context
     );
 
+    void SendPacedPacketWithSimulation(
+        std::vector<uint8_t>&& packet,
+        const char* context,
+        net::PacketPacingPriority priority,
+        uint64_t deadlineUs
+    );
+
     void SendPacketWithSimulation(
         std::vector<uint8_t>&& packet,
         const char* context
+    );
+
+    void TrackSentRnvpDataPacket(
+        const uint8_t* packetData,
+        size_t packetSize,
+        uint64_t sendTimeUs
     );
 
 private:
@@ -185,6 +232,8 @@ private:
     mutable std::mutex udpSendMutex_;
 
     net::NetworkConditionSimulator networkSimulator_;
+    net::PacketPacer packetPacer_;
+    net::BandwidthEstimator bandwidthEstimator_;
 
     std::atomic<uint32_t> rnvpSequence_{ 1 };
 
@@ -196,6 +245,7 @@ private:
     mutable std::mutex rttMutex_;
     double lastRttMs_ = 0.0;
     double averageRttMs_ = 0.0;
+    double maxRttMs_ = 0.0;
     uint64_t rttSampleCount_ = 0;
 
     // ACK統計
@@ -215,7 +265,14 @@ private:
     uint64_t ackKeyFrameRequestCount_ = 0;
     std::atomic<bool> forceNextKeyFrame_{ false };
 
+    mutable std::mutex sentPacketsMutex_;
+    std::deque<SentPacketRecord> sentPackets_;
+
+    mutable std::mutex transportFeedbackMutex_;
+    TransportFeedbackStats transportFeedbackStats_{};
+
     static constexpr size_t kSentFrameHistoryLimit = 24;
+    static constexpr size_t kSentPacketHistoryLimit = 2048;
     static constexpr uint32_t kMaxRetransmitsPerFrame = 1;
     static constexpr uint32_t kMaxRetransmitFrameLag = 2;
     static constexpr uint64_t kMaxRetransmitAgeUs = 180000;

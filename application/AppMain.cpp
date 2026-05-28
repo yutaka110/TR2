@@ -75,6 +75,7 @@
 #include "../network/NetworkCsvLogger.h"
 #include "../network/NetworkExperimentReporter.h"
 #include "../network/NetworkExperimentRunner.h"
+#include "../network/NetworkRuntimeMode.h"
 #include "../network/PacketProtocol.h"
 #include <algorithm>
 #include <cstring>
@@ -582,8 +583,20 @@ int AppMain::Run() {
 	}
 
 	AppRuntimeState runtimeState{};
+	if (char networkModeBuffer[64]{};
+		GetEnvironmentVariableA(
+			"TR2_NETWORK_MODE",
+			networkModeBuffer,
+			static_cast<DWORD>(sizeof(networkModeBuffer))) > 0) {
+		runtimeState.networkRuntimeMode =
+			net::ParseNetworkRuntimeMode(networkModeBuffer);
+	}
 	if (GetEnvironmentVariableA("TR2_NETWORK_EXPERIMENT_AUTO", nullptr, 0) > 0) {
 		runtimeState.networkExperimentMode = true;
+	}
+	if (!net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
+		runtimeState.showReceivedVideoInGame = false;
+		runtimeState.showReceivedVideoPreviewWindow = false;
 	}
 	AppParticleSystem particleSystem;
 	runtimeState.transform.scale = { 6.0f, 6.0f, 6.0f };
@@ -780,13 +793,19 @@ int AppMain::Run() {
 	auto adaptiveController = std::make_unique<net::AdaptiveStreamingController>();
 	net::NetworkExperimentRunner networkExperimentRunner;
 
-	if (udpReceiver->Start(kRnvpListenPort)) {
-		std::cout << "[AppMain] UdpReceiver started. port="
-			<< kRnvpListenPort << "\n";
+	if (net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
+		if (udpReceiver->Start(kRnvpListenPort)) {
+			std::cout << "[AppMain] UdpReceiver started. port="
+				<< kRnvpListenPort << "\n";
+		}
+		else {
+			std::cerr << "[AppMain] Failed to start UdpReceiver. port="
+				<< kRnvpListenPort << "\n";
+		}
 	}
 	else {
-		std::cerr << "[AppMain] Failed to start UdpReceiver. port="
-			<< kRnvpListenPort << "\n";
+		std::cout << "[AppMain] UdpReceiver disabled for network mode="
+			<< net::ToString(runtimeState.networkRuntimeMode) << "\n";
 	}
 
 	if (networkManager) {
@@ -804,11 +823,12 @@ int AppMain::Run() {
 			receiver = udpReceiver.get(),
 			sender = networkManager.get(),
 			adaptive = adaptiveController.get(),
-			experiment = &networkExperimentRunner
+			experiment = &networkExperimentRunner,
+			runtimeState = &runtimeState
 		]() {
 		net::NetworkStatsSnapshot stats{};
 
-		if (receiver) {
+		if (receiver && receiver->IsRunning()) {
 			stats = receiver->GetStats();
 		}
 
@@ -824,10 +844,67 @@ int AppMain::Run() {
 			stats.ackKeyFrameRequests = sender->GetAckKeyFrameRequestCount();
 			stats.ackKeyFramePending = sender->IsKeyFrameRequestPending();
 
+			const net::PacketPacerStats pacingStats =
+				sender->GetPacingStats();
+			stats.pacingEnabled = pacingStats.enabled;
+			stats.pacingTargetBitrateBps = pacingStats.targetBitrateBps;
+			stats.pacingQueuedPackets = pacingStats.queuedPackets;
+			stats.pacingHighPriorityQueuedPackets =
+				pacingStats.highPriorityQueuedPackets;
+			stats.pacingNormalQueuedPackets =
+				pacingStats.normalQueuedPackets;
+			stats.pacingEnqueuedPackets = pacingStats.enqueuedPackets;
+			stats.pacingSentPackets = pacingStats.sentPackets;
+			stats.pacingSentBytes = pacingStats.sentBytes;
+			stats.pacingDroppedPackets = pacingStats.droppedPackets;
+			stats.pacingDeadlineDroppedPackets =
+				pacingStats.deadlineDroppedPackets;
+			stats.pacingOverflowDroppedPackets =
+				pacingStats.overflowDroppedPackets;
+			stats.pacingCurrentQueueDelayMs =
+				pacingStats.currentQueueDelayMs;
+			stats.pacingMaxQueueDelayMs = pacingStats.maxQueueDelayMs;
+
+			const NetworkManager::TransportFeedbackStats feedbackStats =
+				sender->GetTransportFeedbackStats();
+			stats.transportFeedbackPackets =
+				feedbackStats.feedbackPackets;
+			stats.transportFeedbackPacketStatuses =
+				feedbackStats.feedbackPacketStatuses;
+			stats.transportFeedbackReceivedPackets =
+				feedbackStats.feedbackReceivedPackets;
+			stats.transportFeedbackMissingPackets =
+				feedbackStats.feedbackMissingPackets;
+			stats.transportFeedbackLossRate =
+				feedbackStats.feedbackLossRate;
+			stats.transportFeedbackArrivalJitterMs =
+				feedbackStats.feedbackArrivalJitterMs;
+			stats.transportFeedbackQueueDelayTrendMs =
+				feedbackStats.feedbackQueueDelayTrendMs;
+			stats.transportFeedbackLastSequence =
+				feedbackStats.lastFeedbackSequence;
+
+			const net::BandwidthEstimatorStats bandwidthStats =
+				sender->GetBandwidthEstimatorStats();
+			stats.estimatedBandwidthBps =
+				bandwidthStats.estimatedBandwidthBps;
+			stats.deliveryRateBps =
+				bandwidthStats.deliveryRateBps;
+			stats.bandwidthQueueDelayMs =
+				bandwidthStats.queueDelayMs;
+			stats.bandwidthRttTrendMs =
+				bandwidthStats.rttTrendMs;
+			stats.bandwidthLossTrend =
+				bandwidthStats.lossTrend;
+			stats.bandwidthJitterTrendMs =
+				bandwidthStats.jitterTrendMs;
+			stats.bandwidthFeedbackSamples =
+				bandwidthStats.feedbackSamples;
+
 			stats.currentRttMs = sender->GetLastRttMs();
 			stats.averageRttMs = sender->GetAverageRttMs();
 
-			stats.maxRttMs = sender->GetLastRttMs();
+			stats.maxRttMs = sender->GetMaxRttMs();
 
 			stats.rttSamples = sender->GetRttSampleCount();
 
@@ -842,6 +919,8 @@ int AppMain::Run() {
 			stats.adaptiveEnabled = adaptive->IsEnabled();
 			stats.adaptiveControlMode =
 				net::ToString(adaptiveState.controlMode);
+			stats.adaptiveCongestionControlMode =
+				net::ToString(adaptiveState.congestionControlMode);
 
 			stats.adaptiveTargetJpegQuality =
 				adaptiveState.targetJpegQuality;
@@ -851,6 +930,9 @@ int AppMain::Run() {
 
 			stats.adaptiveTargetBitrateKbps =
 				adaptiveState.targetBitrateKbps;
+
+			stats.adaptiveBandwidthCeilingKbps =
+				adaptiveState.bandwidthCeilingKbps;
 
 			stats.adaptiveTargetWidth =
 				adaptiveState.targetWidth;
@@ -933,6 +1015,16 @@ int AppMain::Run() {
 				static_cast<uint32_t>(experiment->ScenarioCount());
 		}
 
+		if (runtimeState) {
+			stats.networkRuntimeMode = runtimeState->networkRuntimeMode;
+			stats.networkRuntimeModeName =
+				net::ToString(runtimeState->networkRuntimeMode);
+			stats.networkModeSendingEnabled =
+				net::NetworkModeCanSendVideo(runtimeState->networkRuntimeMode);
+			stats.networkModeReceivingEnabled =
+				net::NetworkModeCanReceiveVideo(runtimeState->networkRuntimeMode);
+		}
+
 		return stats;
 		};
 
@@ -1008,11 +1100,31 @@ int AppMain::Run() {
 			static_cast<net::AdaptiveControlMode>(clampedMode));
 	}
 				);
+	runLoop.SetCongestionControlModeSetter(
+		[
+			adaptive = adaptiveController.get()
+		](int modeIndex) {
+		if (!adaptive) {
+			return;
+		}
+
+		const int clampedMode =
+			std::clamp(modeIndex, 0, 2);
+		adaptive->SetCongestionControlMode(
+			static_cast<net::CongestionControlMode>(clampedMode));
+	}
+				);
 	runLoop.SetReceivedFrameProvider(
 		[
-			receiver = udpReceiver.get()
+			receiver = udpReceiver.get(),
+			runtimeState = &runtimeState
 		](net::CompletedFrame& outFrame) {
 			if (!receiver) {
+				return false;
+			}
+			if (!runtimeState ||
+				!net::NetworkModeCanReceiveVideo(
+					runtimeState->networkRuntimeMode)) {
 				return false;
 			}
 
@@ -1059,6 +1171,10 @@ int AppMain::Run() {
 		OutputDebugStringA("[AppMain] Camera capture unavailable; RNVP falls back to generated test video.\n");
 	}
 
+	bool receiverRuntimeActive =
+		udpReceiver &&
+		udpReceiver->IsRunning();
+
 	while (msg.message != WM_QUIT) {
 		if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
 			TranslateMessage(&msg);
@@ -1067,8 +1183,38 @@ int AppMain::Run() {
 		else {
 			static auto lastPingTime = std::chrono::steady_clock::now();
 			const auto now = std::chrono::steady_clock::now();
+			const net::NetworkRuntimeMode networkRuntimeMode =
+				runtimeState.networkRuntimeMode;
+			const bool networkSendEnabled =
+				net::NetworkModeCanSendVideo(networkRuntimeMode);
+			const bool networkReceiveEnabled =
+				net::NetworkModeCanReceiveVideo(networkRuntimeMode);
+			const bool networkExperimentEnabled =
+				runtimeState.networkExperimentMode &&
+				net::NetworkModeCanRunExperiment(networkRuntimeMode);
+			const bool receiverShouldRun = networkReceiveEnabled;
 
-			if (networkManager) {
+			if (udpReceiver &&
+				receiverShouldRun != receiverRuntimeActive) {
+				if (receiverShouldRun) {
+					if (udpReceiver->Start(kRnvpListenPort)) {
+						receiverRuntimeActive = true;
+						udpReceiver->ResetStats();
+						OutputDebugStringA("[AppMain] UdpReceiver enabled by network mode.\n");
+					}
+					else {
+						OutputDebugStringA("[AppMain] Failed to enable UdpReceiver by network mode.\n");
+					}
+				}
+				else {
+					udpReceiver->Stop();
+					udpReceiver->ResetStats();
+					receiverRuntimeActive = false;
+					OutputDebugStringA("[AppMain] UdpReceiver disabled by network mode.\n");
+				}
+			}
+
+			if (networkManager && networkSendEnabled) {
 				networkManager->FlushNetworkSimulator();
 			}
 
@@ -1080,10 +1226,10 @@ int AppMain::Run() {
 
 			const bool experimentScenarioChanged =
 				networkExperimentRunner.Update(
-					runtimeState.networkExperimentMode,
+					networkExperimentEnabled,
 					networkExperimentDeltaSec);
 
-			if (networkExperimentRunner.IsActive()) {
+			if (networkExperimentRunner.IsActive() && networkSendEnabled) {
 				if (networkManager) {
 					networkManager->SetNetworkCondition(
 						networkExperimentRunner.CurrentCondition());
@@ -1098,7 +1244,9 @@ int AppMain::Run() {
 			}
 			else {
 				networkCsvLogger.SetScenarioName("Auto");
-				if (experimentScenarioChanged && networkManager) {
+				if (experimentScenarioChanged &&
+					networkManager &&
+					networkSendEnabled) {
 					networkManager->SetNetworkCondition(
 						networkExperimentRunner.CurrentCondition());
 				}
@@ -1141,6 +1289,7 @@ int AppMain::Run() {
 			}
 
 			if (networkManager &&
+				networkSendEnabled &&
 				std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPingTime).count() >= 1000) {
 				networkManager->SendRNVPPing(1);
 				lastPingTime = now;
@@ -1150,7 +1299,7 @@ int AppMain::Run() {
 			static auto nextDummyFrameTime = std::chrono::steady_clock::now();
 			static uint32_t dummyFrameId = 1;
 
-			if (networkManager && adaptiveController) {
+			if (networkSendEnabled && networkManager && adaptiveController) {
 				const net::AdaptiveStreamingState adaptiveState =
 					adaptiveController->GetState();
 
@@ -1161,6 +1310,14 @@ int AppMain::Run() {
 				}
 				if (targetFps > 30) {
 					targetFps = 30;
+				}
+
+				if (networkManager) {
+					networkManager->SetPacingTargetBitrateKbps(
+						static_cast<uint32_t>(
+							(std::max)(1, adaptiveState.targetBitrateKbps)
+						)
+					);
 				}
 
 				const uint32_t targetWidth =
@@ -1320,7 +1477,10 @@ int AppMain::Run() {
 
 				lastAdaptiveUpdateTime = adaptiveNow;
 
-				const net::NetworkStatsSnapshot receiverStats = udpReceiver->GetStats();
+				const net::NetworkStatsSnapshot receiverStats =
+					networkReceiveEnabled
+					? udpReceiver->GetStats()
+					: net::NetworkStatsSnapshot{};
 
 				net::AdaptiveStreamingInput adaptiveInput{};
 				adaptiveInput.ackMissingRate = networkManager->GetLastAckMissingRate();
@@ -1342,6 +1502,22 @@ int AppMain::Run() {
 					receiverStats.deadlineNackMissingChunks;
 				adaptiveInput.lastOutputQueueDropReason =
 					receiverStats.lastOutputQueueDropReason;
+				const net::BandwidthEstimatorStats bandwidthStats =
+					networkManager->GetBandwidthEstimatorStats();
+				adaptiveInput.estimatedBandwidthBps =
+					bandwidthStats.estimatedBandwidthBps;
+				adaptiveInput.deliveryRateBps =
+					bandwidthStats.deliveryRateBps;
+				adaptiveInput.bandwidthQueueDelayMs =
+					bandwidthStats.queueDelayMs;
+				adaptiveInput.bandwidthRttTrendMs =
+					bandwidthStats.rttTrendMs;
+				adaptiveInput.bandwidthLossTrend =
+					bandwidthStats.lossTrend;
+				adaptiveInput.bandwidthJitterTrendMs =
+					bandwidthStats.jitterTrendMs;
+				adaptiveInput.bandwidthFeedbackSamples =
+					bandwidthStats.feedbackSamples;
 
 				adaptiveController->Update(adaptiveInput, deltaTimeSec);
 			}
