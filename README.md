@@ -1,5 +1,11 @@
 # Realtime Video Communication Engine
 
+## Portfolio Documentation
+
+- [RNVP v1 Protocol Specification](docs/RNVP_v1_Protocol_Spec.md)
+
+This project includes RNVP v1, a custom UDP-based realtime video protocol with frame/chunk headers, ACK/NACK feedback, deadline-based selective retransmission, jitter-buffer control, display-deadline dropping, RTT measurement, control commands, and QoE-driven adaptive streaming.
+
 ## 概要
 C++とDirectX12を用いた自作エンジン上で、リアルタイム映像通信を行うための通信基盤です。  
 対戦ゲームにおいて、離れた相手の映像をゲーム画面上に低遅延で表示し、臨場感のある体験を実現することを目的に開発しています。

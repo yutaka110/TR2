@@ -232,6 +232,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="media\TextureHelper.cpp" />
     <ClCompile Include="media\TextureUploader.cpp" />
     <ClCompile Include="network\AdaptiveStreamingController.cpp" />
+    <ClCompile Include="network\BandwidthEstimator.cpp" />
     <ClCompile Include="network\CustomByteStream.cpp" />
     <ClCompile Include="network\FrameReassembler.cpp" />
     <ClCompile Include="network\H264Encoder.cpp" />
@@ -245,6 +246,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="network\NetworkExperimentRunner.cpp" />
     <ClCompile Include="network\NetworkManager.cpp" />
     <ClCompile Include="network\NetworkStats.cpp" />
+    <ClCompile Include="network\PacketPacer.cpp" />
     <ClCompile Include="network\UdpByteStream.cpp" />
     <ClCompile Include="network\UdpReceiver.cpp" />
     <ClCompile Include="legacy\root_stubs\WinApp.cpp" />
@@ -436,6 +438,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="network\MfH264Receiver.h" />
     <ClInclude Include="network\MfH264Sender.h" />
     <ClInclude Include="network\NalUtils.h" />
+    <ClInclude Include="network\BandwidthEstimator.h" />
     <ClInclude Include="network\NetworkConditionSimulator.h" />
     <ClInclude Include="network\NetworkCsvLogger.h" />
     <ClInclude Include="network\NetworkExperimentReporter.h" />
@@ -443,6 +446,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="network\NetworkManager.h" />
     <ClInclude Include="network\NetworkStats.h" />
     <ClInclude Include="network\PacketProtocol.h" />
+    <ClInclude Include="network\PacketPacer.h" />
     <ClInclude Include="network\UdpByteStream.h" />
     <ClInclude Include="network\UdpReceiver.h" />
     <ClInclude Include="legacy\root_stubs\Vertex.h" />

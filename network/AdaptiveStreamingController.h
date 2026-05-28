@@ -11,6 +11,7 @@ namespace net {
         PacketLoss,
         Jitter,
         Rtt,
+        Bandwidth,
         DecodeLoad,
         DisplayLoad
     };
@@ -24,6 +25,14 @@ namespace net {
     };
 
     const char* ToString(AdaptiveControlMode mode);
+
+    enum class CongestionControlMode {
+        LossBased = 0,
+        DelayBased = 1,
+        Hybrid = 2
+    };
+
+    const char* ToString(CongestionControlMode mode);
 
     struct AdaptiveStreamingInput {
         double ackMissingRate = 0.0;
@@ -40,6 +49,13 @@ namespace net {
         uint64_t deadlineNackSentFrames = 0;
         uint64_t deadlineNackMissingChunks = 0;
         std::string lastOutputQueueDropReason;
+        uint32_t estimatedBandwidthBps = 0;
+        uint32_t deliveryRateBps = 0;
+        double bandwidthQueueDelayMs = 0.0;
+        double bandwidthRttTrendMs = 0.0;
+        double bandwidthLossTrend = 0.0;
+        double bandwidthJitterTrendMs = 0.0;
+        uint64_t bandwidthFeedbackSamples = 0;
     };
 
     struct AdaptiveStreamingState {
@@ -48,6 +64,7 @@ namespace net {
         int targetBitrateKbps = 6000;
         int targetWidth = 320;
         int targetHeight = 180;
+        int bandwidthCeilingKbps = 12000;
 
         bool qualityChanged = false;
         bool fpsChanged = false;
@@ -67,10 +84,18 @@ namespace net {
         double lastDecodeFps = 0.0;
         double lastDisplayFps = 0.0;
         double lastQoeScore = 0.0;
+        int lastEstimatedBandwidthKbps = 0;
+        int lastDeliveryRateKbps = 0;
+        double lastBandwidthQueueDelayMs = 0.0;
+        double lastBandwidthRttTrendMs = 0.0;
+        double lastBandwidthLossTrend = 0.0;
+        double lastBandwidthJitterTrendMs = 0.0;
         AdaptiveDegradationCause lastDegradationCause =
             AdaptiveDegradationCause::None;
         AdaptiveControlMode controlMode =
             AdaptiveControlMode::QoeDeadlineAdaptive;
+        CongestionControlMode congestionControlMode =
+            CongestionControlMode::Hybrid;
         uint64_t lastDeadlineDroppedFrames = 0;
         uint64_t lastOutputQueueDroppedFrames = 0;
         uint64_t lastDeadlineNackSentFrames = 0;
@@ -93,6 +118,8 @@ namespace net {
         bool IsEnabled() const;
         void SetControlMode(AdaptiveControlMode mode);
         AdaptiveControlMode GetControlMode() const;
+        void SetCongestionControlMode(CongestionControlMode mode);
+        CongestionControlMode GetCongestionControlMode() const;
 
     private:
         void InitializeTargetsForMode();
@@ -102,13 +129,46 @@ namespace net {
             uint64_t deadlineNackDelta,
             uint64_t deadlineNackMissingChunkDelta
         );
-        void ApplyMultiplicativeDecrease(double factor);
-        void ApplyCauseSpecificDecrease(
+        void ApplyAimdMultiplicativeDecrease(double factor);
+        void ApplyAimdDecrease(
+            const AdaptiveStreamingInput& input,
             AdaptiveDegradationCause cause,
             bool hardProblem
         );
-        void ApplyAdditiveIncrease(int bitrateKbps);
+        void ApplyAimdIncrease(int bitrateKbps);
         void DeriveTargetsFromBitrate();
+        CongestionControlMode ResolveActiveCongestionControlMode() const;
+        bool HasLossPressure(
+            const AdaptiveStreamingInput& input,
+            uint64_t deadlineNackDelta,
+            uint64_t deadlineNackMissingChunkDelta
+        ) const;
+        bool HasDelayPressure(const AdaptiveStreamingInput& input) const;
+        bool HasCongestionPressure(
+            const AdaptiveStreamingInput& input,
+            uint64_t deadlineNackDelta,
+            uint64_t deadlineNackMissingChunkDelta
+        ) const;
+        bool IsCongestionRecoveryAllowed(
+            const AdaptiveStreamingInput& input,
+            uint64_t deadlineNackDelta,
+            uint64_t deadlineNackMissingChunkDelta
+        ) const;
+        double CalculateAimdDecreaseFactor(
+            const AdaptiveStreamingInput& input,
+            AdaptiveDegradationCause cause,
+            bool hardProblem
+        ) const;
+        bool HasBandwidthEstimate(const AdaptiveStreamingInput& input) const;
+        int CalculateBandwidthCeilingKbps(
+            const AdaptiveStreamingInput& input
+        ) const;
+        bool HasBandwidthPressure(
+            const AdaptiveStreamingInput& input
+        ) const;
+        bool IsBandwidthRecoveryAllowed(
+            const AdaptiveStreamingInput& input
+        ) const;
         AdaptiveDegradationCause DetermineDegradationCause(
             const AdaptiveStreamingInput& input,
             uint64_t deadlineDropDelta,
@@ -132,6 +192,8 @@ namespace net {
         bool enabled_ = true;
         AdaptiveControlMode controlMode_ =
             AdaptiveControlMode::QoeDeadlineAdaptive;
+        CongestionControlMode congestionControlMode_ =
+            CongestionControlMode::Hybrid;
 
         AdaptiveStreamingState state_{};
 
@@ -147,6 +209,7 @@ namespace net {
         bool hasNackCounters_ = false;
         uint64_t lastDeadlineNackSentFrames_ = 0;
         uint64_t lastDeadlineNackMissingChunks_ = 0;
+        int activeBandwidthCeilingKbps_ = 12000;
 
         static constexpr int kMinQuality = 35;
         static constexpr int kMaxQuality = 95;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NetworkConditionSimulator.h"
+#include "NetworkRuntimeMode.h"
 
 #include <cstdint>
 #include <mutex>
@@ -74,6 +75,34 @@ namespace net {
 		uint64_t ackStaleDroppedFrames = 0;
 		uint64_t ackKeyFrameRequests = 0;
 		bool ackKeyFramePending = false;
+		bool pacingEnabled = false;
+		uint32_t pacingTargetBitrateBps = 0;
+		uint32_t pacingQueuedPackets = 0;
+		uint32_t pacingHighPriorityQueuedPackets = 0;
+		uint32_t pacingNormalQueuedPackets = 0;
+		uint64_t pacingEnqueuedPackets = 0;
+		uint64_t pacingSentPackets = 0;
+		uint64_t pacingSentBytes = 0;
+		uint64_t pacingDroppedPackets = 0;
+		uint64_t pacingDeadlineDroppedPackets = 0;
+		uint64_t pacingOverflowDroppedPackets = 0;
+		double pacingCurrentQueueDelayMs = 0.0;
+		double pacingMaxQueueDelayMs = 0.0;
+		uint64_t transportFeedbackPackets = 0;
+		uint64_t transportFeedbackPacketStatuses = 0;
+		uint64_t transportFeedbackReceivedPackets = 0;
+		uint64_t transportFeedbackMissingPackets = 0;
+		double transportFeedbackLossRate = 0.0;
+		double transportFeedbackArrivalJitterMs = 0.0;
+		double transportFeedbackQueueDelayTrendMs = 0.0;
+		uint16_t transportFeedbackLastSequence = 0;
+		uint32_t estimatedBandwidthBps = 0;
+		uint32_t deliveryRateBps = 0;
+		double bandwidthQueueDelayMs = 0.0;
+		double bandwidthRttTrendMs = 0.0;
+		double bandwidthLossTrend = 0.0;
+		double bandwidthJitterTrendMs = 0.0;
+		uint64_t bandwidthFeedbackSamples = 0;
 		uint64_t deadlineNackSentFrames = 0;
 		uint64_t deadlineNackRecoveredFrames = 0;
 		uint64_t deadlineNackMissingChunks = 0;
@@ -89,10 +118,12 @@ namespace net {
         // ============================================================
 		bool adaptiveEnabled = false;
 		std::string adaptiveControlMode;
+		std::string adaptiveCongestionControlMode;
 
 		int adaptiveTargetJpegQuality = 0;
 		int adaptiveTargetFps = 0;
 		int adaptiveTargetBitrateKbps = 0;
+		int adaptiveBandwidthCeilingKbps = 0;
 		int adaptiveTargetWidth = 0;
 		int adaptiveTargetHeight = 0;
 		uint64_t adaptiveRawFrameBytes = 0;
@@ -139,6 +170,12 @@ namespace net {
 		// ============================================================
 		NetworkCondition networkCondition{};
 		NetworkSimulationStats networkSimulation{};
+
+		NetworkRuntimeMode networkRuntimeMode =
+			NetworkRuntimeMode::Loopback;
+		std::string networkRuntimeModeName;
+		bool networkModeSendingEnabled = true;
+		bool networkModeReceivingEnabled = true;
 
 		bool networkExperimentActive = false;
 		std::string networkExperimentScenarioName;

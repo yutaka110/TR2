@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -87,9 +88,16 @@ NetworkManager::NetworkManager(const std::string& ip, uint16_t port) {
         reinterpret_cast<const char*>(&timeoutMs),
         sizeof(timeoutMs)
     );
+
+    packetPacer_.SetTargetBitrateBps(6000000);
+    packetPacer_.Start(
+        [this](std::vector<uint8_t>&& packet, const char* context) {
+            SendPacketWithSimulation(std::move(packet), context);
+        });
 }
 
 NetworkManager::~NetworkManager() {
+    packetPacer_.Stop();
     StopRNVPControlReceiver();
 
     if (udpSocket_ != INVALID_SOCKET) {
@@ -303,9 +311,11 @@ bool NetworkManager::SendRNVPFramePackets(
             payloadSize
         );
 
-        SendPacketWithSimulation(
+        SendPacedPacketWithSimulation(
             std::move(packet),
-            context
+            context,
+            net::PacketPacingPriority::Normal,
+            sendTimeUs + 150000ull
         );
     }
 
@@ -379,7 +389,12 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
             payloadSize
         );
 
-        SendPacketWithSimulation(std::move(packet), context);
+        SendPacedPacketWithSimulation(
+            std::move(packet),
+            context,
+            net::PacketPacingPriority::High,
+            sendTimeUs + 150000ull
+        );
         sentChunkCount++;
     }
 
@@ -611,6 +626,10 @@ void NetworkManager::HandleRnvpControlPacket(
         HandleRnvpControl(header, payload, payloadSize);
         break;
 
+    case net::PacketType::TransportFeedback:
+        HandleRnvpTransportFeedback(header, payload, payloadSize);
+        break;
+
     default:
         // NetworkManager側では基本的にDataやPingは処理しない
         break;
@@ -642,6 +661,7 @@ void NetworkManager::HandleRnvpPong(
         std::lock_guard<std::mutex> lock(rttMutex_);
 
         lastRttMs_ = rttMs;
+        maxRttMs_ = (std::max)(maxRttMs_, rttMs);
         rttSampleCount_++;
 
         if (rttSampleCount_ == 1) {
@@ -651,6 +671,8 @@ void NetworkManager::HandleRnvpPong(
             averageRttMs_ += (rttMs - averageRttMs_) / static_cast<double>(rttSampleCount_);
         }
     }
+
+    bandwidthEstimator_.OnRttSample(rttMs);
 
     {
         std::ostringstream oss;
@@ -846,6 +868,141 @@ void NetworkManager::HandleAckControl(
     }
 }
 
+void NetworkManager::HandleRnvpTransportFeedback(
+    const net::RnvpHeaderV1& header,
+    const uint8_t* payload,
+    size_t payloadSize
+) {
+    (void)header;
+
+    net::TransportFeedbackPayload feedback{};
+    if (!net::DecodeTransportFeedbackPayload(
+        payload,
+        payloadSize,
+        feedback)) {
+        return;
+    }
+
+    uint64_t receivedCount = 0;
+    uint64_t missingCount = 0;
+    double jitterSumMs = 0.0;
+    uint32_t jitterSamples = 0;
+    double queueTrendSumMs = 0.0;
+    uint32_t queueTrendSamples = 0;
+    std::vector<net::BandwidthFeedbackPacket> bandwidthFeedbackPackets;
+    bandwidthFeedbackPackets.reserve(feedback.entries.size());
+
+    bool hasPreviousReceived = false;
+    uint64_t previousSendTimeUs = 0;
+    uint64_t previousReceiveTimeUs = 0;
+
+    {
+        std::lock_guard<std::mutex> sentLock(sentPacketsMutex_);
+
+        for (const net::TransportFeedbackEntry& entry : feedback.entries) {
+            const uint32_t sequence =
+                feedback.baseSequence + entry.sequenceDelta;
+            const bool received =
+                (entry.flags & net::TransportFeedbackFlag_Received) != 0;
+            const bool missing =
+                (entry.flags & net::TransportFeedbackFlag_Missing) != 0;
+
+            if (missing && !received) {
+                missingCount++;
+                net::BandwidthFeedbackPacket bandwidthPacket{};
+                bandwidthPacket.sequence = sequence;
+                bandwidthPacket.received = false;
+                bandwidthFeedbackPackets.push_back(bandwidthPacket);
+                continue;
+            }
+
+            if (!received) {
+                continue;
+            }
+
+            receivedCount++;
+
+            const auto sentIt = std::find_if(
+                sentPackets_.begin(),
+                sentPackets_.end(),
+                [sequence](const SentPacketRecord& record) {
+                    return record.sequence == sequence;
+                });
+
+            const uint64_t receiveTimeUs =
+                feedback.referenceReceiveTimeUs + entry.receiveDeltaUs;
+
+            if (sentIt == sentPackets_.end()) {
+                net::BandwidthFeedbackPacket bandwidthPacket{};
+                bandwidthPacket.sequence = sequence;
+                bandwidthPacket.receiveTimeUs = receiveTimeUs;
+                bandwidthPacket.received = true;
+                bandwidthFeedbackPackets.push_back(bandwidthPacket);
+                hasPreviousReceived = false;
+                continue;
+            }
+
+            net::BandwidthFeedbackPacket bandwidthPacket{};
+            bandwidthPacket.sequence = sequence;
+            bandwidthPacket.sendTimeUs = sentIt->sendTimeUs;
+            bandwidthPacket.receiveTimeUs = receiveTimeUs;
+            bandwidthPacket.packetBytes = sentIt->packetBytes;
+            bandwidthPacket.received = true;
+            bandwidthFeedbackPackets.push_back(bandwidthPacket);
+
+            if (hasPreviousReceived &&
+                sentIt->sendTimeUs >= previousSendTimeUs &&
+                receiveTimeUs >= previousReceiveTimeUs) {
+                const double sendIntervalMs =
+                    static_cast<double>(
+                        sentIt->sendTimeUs - previousSendTimeUs) / 1000.0;
+                const double receiveIntervalMs =
+                    static_cast<double>(
+                        receiveTimeUs - previousReceiveTimeUs) / 1000.0;
+                const double intervalDeltaMs =
+                    receiveIntervalMs - sendIntervalMs;
+
+                jitterSumMs += std::abs(intervalDeltaMs);
+                jitterSamples++;
+                if (intervalDeltaMs > 0.0) {
+                    queueTrendSumMs += intervalDeltaMs;
+                    queueTrendSamples++;
+                }
+            }
+
+            previousSendTimeUs = sentIt->sendTimeUs;
+            previousReceiveTimeUs = receiveTimeUs;
+            hasPreviousReceived = true;
+        }
+    }
+
+    const uint64_t statusCount = receivedCount + missingCount;
+    const double lossRate = statusCount > 0
+        ? static_cast<double>(missingCount) / static_cast<double>(statusCount)
+        : 0.0;
+    const double arrivalJitterMs = jitterSamples > 0
+        ? jitterSumMs / static_cast<double>(jitterSamples)
+        : 0.0;
+    const double queueDelayTrendMs = queueTrendSamples > 0
+        ? queueTrendSumMs / static_cast<double>(queueTrendSamples)
+        : 0.0;
+
+    {
+        std::lock_guard<std::mutex> lock(transportFeedbackMutex_);
+        transportFeedbackStats_.feedbackPackets++;
+        transportFeedbackStats_.feedbackPacketStatuses += statusCount;
+        transportFeedbackStats_.feedbackReceivedPackets += receivedCount;
+        transportFeedbackStats_.feedbackMissingPackets += missingCount;
+        transportFeedbackStats_.feedbackLossRate = lossRate;
+        transportFeedbackStats_.feedbackArrivalJitterMs = arrivalJitterMs;
+        transportFeedbackStats_.feedbackQueueDelayTrendMs = queueDelayTrendMs;
+        transportFeedbackStats_.lastFeedbackSequence =
+            feedback.feedbackSequence;
+    }
+
+    bandwidthEstimator_.OnTransportFeedback(bandwidthFeedbackPackets);
+}
+
 void NetworkManager::HandleRnvpControl(
     const net::RnvpHeaderV1& header,
     const uint8_t* payload,
@@ -914,6 +1071,11 @@ double NetworkManager::GetAverageRttMs() const {
     return averageRttMs_;
 }
 
+double NetworkManager::GetMaxRttMs() const {
+    std::lock_guard<std::mutex> lock(rttMutex_);
+    return maxRttMs_;
+}
+
 uint64_t NetworkManager::GetRttSampleCount() const {
     std::lock_guard<std::mutex> lock(rttMutex_);
     return rttSampleCount_;
@@ -977,6 +1139,35 @@ bool NetworkManager::ConsumeKeyFrameRequest() {
     );
 }
 
+void NetworkManager::SetPacingEnabled(bool enabled) {
+    packetPacer_.SetEnabled(enabled);
+}
+
+bool NetworkManager::IsPacingEnabled() const {
+    return packetPacer_.IsEnabled();
+}
+
+void NetworkManager::SetPacingTargetBitrateKbps(uint32_t bitrateKbps) {
+    const uint32_t bitrateBps =
+        (std::max)(uint32_t{ 1 }, bitrateKbps) * 1000u;
+    packetPacer_.SetTargetBitrateBps(bitrateBps);
+}
+
+net::PacketPacerStats NetworkManager::GetPacingStats() const {
+    return packetPacer_.GetStats();
+}
+
+NetworkManager::TransportFeedbackStats
+NetworkManager::GetTransportFeedbackStats() const {
+    std::lock_guard<std::mutex> lock(transportFeedbackMutex_);
+    return transportFeedbackStats_;
+}
+
+net::BandwidthEstimatorStats
+NetworkManager::GetBandwidthEstimatorStats() const {
+    return bandwidthEstimator_.GetStats();
+}
+
 // ============================================================
 // Network Condition Simulator
 // ============================================================
@@ -1000,6 +1191,7 @@ void NetworkManager::ResetStats() {
         std::lock_guard<std::mutex> lock(rttMutex_);
         lastRttMs_ = 0.0;
         averageRttMs_ = 0.0;
+        maxRttMs_ = 0.0;
         rttSampleCount_ = 0;
     }
 
@@ -1023,11 +1215,24 @@ void NetworkManager::ResetStats() {
         forceNextKeyFrame_.store(false, std::memory_order_relaxed);
     }
 
+    {
+        std::lock_guard<std::mutex> lock(sentPacketsMutex_);
+        sentPackets_.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(transportFeedbackMutex_);
+        transportFeedbackStats_ = TransportFeedbackStats{};
+    }
+
+    bandwidthEstimator_.Reset();
+
     ResetNetworkSimulationStats();
 }
 
 void NetworkManager::ResetNetworkSimulationStats() {
     networkSimulator_.Reset();
+    packetPacer_.ResetStats();
 }
 
 void NetworkManager::FlushNetworkSimulator() {
@@ -1096,10 +1301,33 @@ bool NetworkManager::SendPacketRaw(
     return true;
 }
 
+void NetworkManager::SendPacedPacketWithSimulation(
+    std::vector<uint8_t>&& packet,
+    const char* context,
+    net::PacketPacingPriority priority,
+    uint64_t deadlineUs
+) {
+    if (!packetPacer_.IsEnabled()) {
+        SendPacketWithSimulation(std::move(packet), context);
+        return;
+    }
+
+    if (!packetPacer_.EnqueuePacket(
+        std::move(packet),
+        context,
+        priority,
+        deadlineUs)) {
+        SendPacketWithSimulation(std::move(packet), context);
+    }
+}
+
 void NetworkManager::SendPacketWithSimulation(
     std::vector<uint8_t>&& packet,
     const char* context
 ) {
+    const uint64_t nowUs = NowMicroseconds();
+    TrackSentRnvpDataPacket(packet.data(), packet.size(), nowUs);
+
     if (!networkSimulator_.IsEnabled()) {
         SendPacketRaw(packet.data(), packet.size(), context);
         return;
@@ -1107,8 +1335,49 @@ void NetworkManager::SendPacketWithSimulation(
 
     networkSimulator_.SubmitPacket(
         std::move(packet),
-        NowMicroseconds()
+        nowUs
     );
 
     FlushNetworkSimulator();
+}
+
+void NetworkManager::TrackSentRnvpDataPacket(
+    const uint8_t* packetData,
+    size_t packetSize,
+    uint64_t sendTimeUs
+) {
+    if (!packetData || packetSize < net::kRnvpHeaderV1Size) {
+        return;
+    }
+
+    if (net::ReadU32BE(packetData) != net::kRnvpMagic) {
+        return;
+    }
+
+    net::RnvpHeaderV1 header{};
+    if (!net::DecodeRnvpHeaderV1(packetData, packetSize, header)) {
+        return;
+    }
+
+    if (static_cast<net::PacketType>(header.packetType) !=
+        net::PacketType::Data) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(sentPacketsMutex_);
+
+    SentPacketRecord record{};
+    record.sequence = header.sequence;
+    record.sendTimeUs = sendTimeUs;
+    record.packetBytes = static_cast<uint32_t>(
+        (std::min)(
+            packetSize,
+            static_cast<size_t>((std::numeric_limits<uint32_t>::max)())
+        )
+    );
+    sentPackets_.push_back(record);
+
+    while (sentPackets_.size() > kSentPacketHistoryLimit) {
+        sentPackets_.pop_front();
+    }
 }

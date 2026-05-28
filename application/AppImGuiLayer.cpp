@@ -211,6 +211,9 @@ namespace {
         if (cause == "DecodeLoad" || cause == "DisplayLoad") {
             return ImVec4(1.0f, 0.35f, 0.30f, 1.0f);
         }
+        if (cause == "Bandwidth") {
+            return ImVec4(0.75f, 0.86f, 1.0f, 1.0f);
+        }
         return ImVec4(1.0f, 0.78f, 0.25f, 1.0f);
     }
 
@@ -264,12 +267,71 @@ namespace {
         return 2;
     }
 
+    int CongestionModeIndexFromName(const std::string& mode) {
+        if (mode == "Loss Based") {
+            return 0;
+        }
+        if (mode == "Delay Based") {
+            return 1;
+        }
+        return 2;
+    }
+
+    int NetworkModeIndexFromMode(net::NetworkRuntimeMode mode) {
+        return static_cast<int>(mode);
+    }
+
     void DrawNetworkDemoDashboard(
+        AppRuntimeState& runtimeState,
         const net::NetworkStatsSnapshot& stats,
-        const std::function<void(int)>& onAdaptiveControlModeChanged) {
+        const std::function<void(int)>& onAdaptiveControlModeChanged,
+        const std::function<void(int)>& onCongestionControlModeChanged) {
         if (!ImGui::CollapsingHeader("Demo Dashboard", ImGuiTreeNodeFlags_DefaultOpen)) {
             return;
         }
+
+        const char* networkModes[] = {
+            "Loopback",
+            "Sender",
+            "Receiver",
+            "Monitor"
+        };
+        int networkModeIndex =
+            NetworkModeIndexFromMode(runtimeState.networkRuntimeMode);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo(
+            "Network Mode",
+            &networkModeIndex,
+            networkModes,
+            IM_ARRAYSIZE(networkModes))) {
+            networkModeIndex =
+                (std::max)(0, (std::min)(3, networkModeIndex));
+            runtimeState.networkRuntimeMode =
+                static_cast<net::NetworkRuntimeMode>(networkModeIndex);
+            const bool receiveVideo =
+                net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode);
+            runtimeState.showReceivedVideoInGame = receiveVideo;
+            runtimeState.showReceivedVideoPreviewWindow = receiveVideo;
+            if (!net::NetworkModeCanRunExperiment(
+                runtimeState.networkRuntimeMode)) {
+                runtimeState.networkExperimentMode = false;
+            }
+        }
+        DrawDashboardValue(
+            "Role",
+            stats.networkModeSendingEnabled &&
+                stats.networkModeReceivingEnabled
+                ? "Sender + Receiver"
+                : stats.networkModeSendingEnabled
+                ? "Sender"
+                : stats.networkModeReceivingEnabled
+                ? "Receiver"
+                : "Monitor",
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+        DrawDashboardValue(
+            "Endpoint",
+            "listen :50000 / remote 127.0.0.1:50000",
+            ImVec4(0.55f, 0.65f, 0.75f, 1.0f));
 
         const char* adaptiveModes[] = {
             "Fixed Quality",
@@ -286,6 +348,24 @@ namespace {
             IM_ARRAYSIZE(adaptiveModes))) {
             if (onAdaptiveControlModeChanged) {
                 onAdaptiveControlModeChanged(adaptiveModeIndex);
+            }
+        }
+
+        const char* congestionModes[] = {
+            "Loss Based",
+            "Delay Based",
+            "Hybrid"
+        };
+        int congestionModeIndex =
+            CongestionModeIndexFromName(stats.adaptiveCongestionControlMode);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo(
+            "Congestion Mode",
+            &congestionModeIndex,
+            congestionModes,
+            IM_ARRAYSIZE(congestionModes))) {
+            if (onCongestionControlModeChanged) {
+                onCongestionControlModeChanged(congestionModeIndex);
             }
         }
         if (stats.networkExperimentActive) {
@@ -331,10 +411,27 @@ namespace {
             " ms",
             MetricColor(stats.currentJitterMs, 20.0, 40.0));
         DrawDashboardDouble(
+            "Feedback Loss",
+            stats.transportFeedbackLossRate * 100.0,
+            "%",
+            MetricColor(stats.transportFeedbackLossRate, 0.03, 0.08));
+        DrawDashboardDouble(
             "Throughput",
             stats.throughputMbps,
             " Mbps",
             ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+        DrawDashboardDouble(
+            "Est. BW",
+            static_cast<double>(stats.estimatedBandwidthBps) /
+            1000.0 / 1000.0,
+            " Mbps",
+            ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
+        DrawDashboardUInt(
+            "Pacing Queue",
+            stats.pacingQueuedPackets,
+            stats.pacingQueuedPackets > 32
+            ? ImVec4(1.0f, 0.78f, 0.25f, 1.0f)
+            : ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
 
         ImGui::TableNextColumn();
         DrawDashboardSectionHeader("Frame Pipeline");
@@ -592,12 +689,18 @@ namespace {
         }
     }
 
-    void DrawNetworkMonitorContents(const net::NetworkStatsSnapshot& stats,
+    void DrawNetworkMonitorContents(AppRuntimeState& runtimeState,
+        const net::NetworkStatsSnapshot& stats,
         const std::function<void(uint32_t)>& onJitterBufferTargetDelayChanged,
         const std::function<void(bool)>& onJitterBufferAutoModeChanged,
         const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged,
-        const std::function<void(int)>& onAdaptiveControlModeChanged) {
-        DrawNetworkDemoDashboard(stats, onAdaptiveControlModeChanged);
+        const std::function<void(int)>& onAdaptiveControlModeChanged,
+        const std::function<void(int)>& onCongestionControlModeChanged) {
+        DrawNetworkDemoDashboard(
+            runtimeState,
+            stats,
+            onAdaptiveControlModeChanged,
+            onCongestionControlModeChanged);
 
         if (ImGui::CollapsingHeader("Network Condition Simulator", ImGuiTreeNodeFlags_DefaultOpen)) {
             net::NetworkCondition condition = stats.networkCondition;
@@ -797,18 +900,85 @@ namespace {
                 static_cast<unsigned long long>(stats.deadlineNackExpiredMissingChunks));
         }
 
+        if (ImGui::CollapsingHeader("Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Enabled: %s", stats.pacingEnabled ? "true" : "false");
+            ImGui::Text("Target Bitrate: %.2f Mbps",
+                static_cast<double>(stats.pacingTargetBitrateBps) /
+                1000.0 / 1000.0);
+            ImGui::Text("Queue: %u packets", stats.pacingQueuedPackets);
+            ImGui::Text("Queue high/normal: %u / %u",
+                stats.pacingHighPriorityQueuedPackets,
+                stats.pacingNormalQueuedPackets);
+            ImGui::Text("Queue Delay now/max: %.2f / %.2f ms",
+                stats.pacingCurrentQueueDelayMs,
+                stats.pacingMaxQueueDelayMs);
+            ImGui::Text("Enqueued/Sent: %llu / %llu",
+                static_cast<unsigned long long>(stats.pacingEnqueuedPackets),
+                static_cast<unsigned long long>(stats.pacingSentPackets));
+            ImGui::Text("Sent Bytes: %llu",
+                static_cast<unsigned long long>(stats.pacingSentBytes));
+            ImGui::Text("Dropped total/deadline/overflow: %llu / %llu / %llu",
+                static_cast<unsigned long long>(stats.pacingDroppedPackets),
+                static_cast<unsigned long long>(stats.pacingDeadlineDroppedPackets),
+                static_cast<unsigned long long>(stats.pacingOverflowDroppedPackets));
+        }
+
+        if (ImGui::CollapsingHeader("Transport Feedback", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Feedback Packets: %llu",
+                static_cast<unsigned long long>(stats.transportFeedbackPackets));
+            ImGui::Text("Packet Statuses: %llu",
+                static_cast<unsigned long long>(stats.transportFeedbackPacketStatuses));
+            ImGui::Text("Received/Missing: %llu / %llu",
+                static_cast<unsigned long long>(stats.transportFeedbackReceivedPackets),
+                static_cast<unsigned long long>(stats.transportFeedbackMissingPackets));
+            ImGui::Text("Feedback Loss: %.2f %%",
+                stats.transportFeedbackLossRate * 100.0);
+            ImGui::Text("Arrival Jitter: %.2f ms",
+                stats.transportFeedbackArrivalJitterMs);
+            ImGui::Text("Queue Delay Trend: %.2f ms",
+                stats.transportFeedbackQueueDelayTrendMs);
+            ImGui::Text("Last Feedback Seq: %u",
+                stats.transportFeedbackLastSequence);
+        }
+
+        if (ImGui::CollapsingHeader("Bandwidth Estimator", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Estimated Bandwidth: %.2f Mbps",
+                static_cast<double>(stats.estimatedBandwidthBps) /
+                1000.0 / 1000.0);
+            ImGui::Text("Delivery Rate: %.2f Mbps",
+                static_cast<double>(stats.deliveryRateBps) /
+                1000.0 / 1000.0);
+            ImGui::Text("Queue Delay Trend: %.2f ms",
+                stats.bandwidthQueueDelayMs);
+            ImGui::Text("RTT Trend: %.2f ms",
+                stats.bandwidthRttTrendMs);
+            ImGui::Text("Loss Trend: %.2f %%",
+                stats.bandwidthLossTrend * 100.0);
+            ImGui::Text("Jitter Trend: %.2f ms",
+                stats.bandwidthJitterTrendMs);
+            ImGui::Text("Feedback Samples: %llu",
+                static_cast<unsigned long long>(
+                    stats.bandwidthFeedbackSamples));
+        }
+
         if (ImGui::CollapsingHeader("Adaptive Streaming", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Enabled: %s", stats.adaptiveEnabled ? "true" : "false");
             ImGui::Text("Control Mode: %s",
                 stats.adaptiveControlMode.empty()
                 ? "QoE/Deadline Adaptive"
                 : stats.adaptiveControlMode.c_str());
+            ImGui::Text("Congestion Mode: %s",
+                stats.adaptiveCongestionControlMode.empty()
+                ? "Hybrid"
+                : stats.adaptiveCongestionControlMode.c_str());
 
             ImGui::Separator();
 
             ImGui::Text("Target JPEG Quality: %d", stats.adaptiveTargetJpegQuality);
             ImGui::Text("Target FPS: %d", stats.adaptiveTargetFps);
             ImGui::Text("Target Bitrate: %d kbps", stats.adaptiveTargetBitrateKbps);
+            ImGui::Text("Bandwidth Ceiling: %d kbps",
+                stats.adaptiveBandwidthCeilingKbps);
             ImGui::Text("Target Resolution: %dx%d",
                 stats.adaptiveTargetWidth,
                 stats.adaptiveTargetHeight);
@@ -932,6 +1102,12 @@ namespace {
         if (ImGui::CollapsingHeader("Bandwidth", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Bitrate: %.2f Mbps", stats.bitrateMbps);
             ImGui::Text("Throughput: %.2f Mbps", stats.throughputMbps);
+            ImGui::Text("Estimated Bandwidth: %.2f Mbps",
+                static_cast<double>(stats.estimatedBandwidthBps) /
+                1000.0 / 1000.0);
+            ImGui::Text("Delivery Rate: %.2f Mbps",
+                static_cast<double>(stats.deliveryRateBps) /
+                1000.0 / 1000.0);
         }
     }
 
@@ -1381,6 +1557,7 @@ void AppImGuiLayer::BuildUi(
     const std::function<void(bool)>& onJitterBufferAutoModeChanged,
     const std::function<void(const net::NetworkCondition&)>& onNetworkConditionChanged,
     const std::function<void(int)>& onAdaptiveControlModeChanged,
+    const std::function<void(int)>& onCongestionControlModeChanged,
     const std::function<void()>& onAddParticle) {
     if (!initialized_) {
         return;
@@ -1409,8 +1586,15 @@ void AppImGuiLayer::BuildUi(
         ImGui::Checkbox("UI (F1)", &runtimeState.showImGui);
         ImGui::Separator();
         bool networkExperimentMode = runtimeState.networkExperimentMode;
+        if (!net::NetworkModeCanRunExperiment(runtimeState.networkRuntimeMode)) {
+            networkExperimentMode = false;
+            runtimeState.networkExperimentMode = false;
+        }
         if (ImGui::Checkbox("Network Experiment", &networkExperimentMode)) {
             runtimeState.networkExperimentMode = networkExperimentMode;
+            if (!net::NetworkModeCanRunExperiment(runtimeState.networkRuntimeMode)) {
+                runtimeState.networkExperimentMode = false;
+            }
             ApplyNetworkExperimentPreset(runtimeState, effectRuntime);
         }
         ImGui::Separator();
@@ -1432,11 +1616,13 @@ void AppImGuiLayer::BuildUi(
         }
         if (networkStats) {
             DrawNetworkMonitorContents(
+                runtimeState,
                 *networkStats,
                 onJitterBufferTargetDelayChanged,
                 onJitterBufferAutoModeChanged,
                 onNetworkConditionChanged,
-                onAdaptiveControlModeChanged);
+                onAdaptiveControlModeChanged,
+                onCongestionControlModeChanged);
         } else {
             ImGui::TextDisabled("Network stats unavailable.");
         }
@@ -1567,8 +1753,15 @@ void AppImGuiLayer::BuildUi(
     ImGui::Begin("VFX Inspector", nullptr, panelFlags);
     if (ImGui::CollapsingHeader("Render Load Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool networkExperimentMode = runtimeState.networkExperimentMode;
+        if (!net::NetworkModeCanRunExperiment(runtimeState.networkRuntimeMode)) {
+            networkExperimentMode = false;
+            runtimeState.networkExperimentMode = false;
+        }
         if (ImGui::Checkbox("Network Experiment Mode", &networkExperimentMode)) {
             runtimeState.networkExperimentMode = networkExperimentMode;
+            if (!net::NetworkModeCanRunExperiment(runtimeState.networkRuntimeMode)) {
+                runtimeState.networkExperimentMode = false;
+            }
             if (runtimeState.networkExperimentMode) {
                 runtimeState.enableVfxRenderPasses = false;
                 runtimeState.enablePostProcessPasses = false;

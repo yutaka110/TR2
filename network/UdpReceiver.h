@@ -111,6 +111,14 @@ namespace net {
             const sockaddr_in& toAddr
         );
         void SendDeadlineNacks(uint64_t nowUs);
+        void TrackTransportFeedback(
+            const RnvpHeaderV1& dataHeader,
+            uint64_t receiveTimeUs
+        );
+        void SendTransportFeedback(
+            const sockaddr_in& toAddr,
+            bool force
+        );
 
         void SendRnvpControl(
             const RnvpHeaderV1& dataHeader,
@@ -144,6 +152,18 @@ namespace net {
         bool hasLastRnvpDataAddr_ = false;
         sockaddr_in lastRnvpDataAddr_{};
 
+        struct PendingTransportFeedback {
+            uint32_t sequence = 0;
+            bool received = false;
+            uint64_t receiveTimeUs = 0;
+        };
+
+        std::deque<PendingTransportFeedback> pendingTransportFeedback_;
+        bool hasLastTransportFeedbackSequence_ = false;
+        uint32_t lastTransportFeedbackSequence_ = 0;
+        uint16_t transportFeedbackSequence_ = 1;
+        uint64_t lastTransportFeedbackSendUs_ = 0;
+
         static constexpr int kReceiveBufferSize = 4096;
         static constexpr size_t kMaxQueuedFrames = 4;
         static constexpr uint64_t kMaxDisplayLatencyUs = 150000;
@@ -153,6 +173,8 @@ namespace net {
         static constexpr uint64_t kFrameNackMinRecoverySlackUs = 12000;
         static constexpr uint32_t kMaxDeadlineNacksPerFrame = 2;
         static constexpr uint64_t kKeyFrameRequestCooldownUs = 500000;
+        static constexpr uint64_t kTransportFeedbackIntervalUs = 50000;
+        static constexpr size_t kTransportFeedbackBatchSize = 32;
     };
 
 } // namespace net

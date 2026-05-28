@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace net {
@@ -126,6 +127,11 @@ namespace net {
         lastRnvpDataAddr_ = sockaddr_in{};
         consecutiveIncompleteFrames_ = 0;
         lastKeyFrameRequestUs_ = 0;
+        pendingTransportFeedback_.clear();
+        hasLastTransportFeedbackSequence_ = false;
+        lastTransportFeedbackSequence_ = 0;
+        transportFeedbackSequence_ = 1;
+        lastTransportFeedbackSendUs_ = 0;
 
         std::lock_guard<std::mutex> lock(frameQueueMutex_);
         while (!completedFrames_.empty()) {
@@ -430,6 +436,9 @@ namespace net {
                 const int error = WSAGetLastError();
                 if (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK) {
                     SendDeadlineNacks(NowMicroseconds());
+                    if (hasLastRnvpDataAddr_) {
+                        SendTransportFeedback(lastRnvpDataAddr_, false);
+                    }
                 }
                 continue;
             }
@@ -501,6 +510,7 @@ namespace net {
         case PacketType::Data: {
             lastRnvpDataAddr_ = fromAddr;
             hasLastRnvpDataAddr_ = true;
+            TrackTransportFeedback(header, receiveTimeUs);
 
             FrameAckInfo ackInfo{};
 
@@ -559,6 +569,8 @@ namespace net {
                     receiveTimeUs
                 );
             }
+
+            SendTransportFeedback(fromAddr, false);
 
             break;
         }
@@ -887,6 +899,179 @@ namespace net {
                 lastKeyFrameRequestUs_ = nowUs;
             }
         }
+    }
+
+    void UdpReceiver::TrackTransportFeedback(
+        const RnvpHeaderV1& dataHeader,
+        uint64_t receiveTimeUs
+    ) {
+        if (!hasLastTransportFeedbackSequence_) {
+            hasLastTransportFeedbackSequence_ = true;
+            lastTransportFeedbackSequence_ = dataHeader.sequence;
+        }
+        else {
+            const uint32_t expectedNext = lastTransportFeedbackSequence_ + 1;
+            if (dataHeader.sequence > expectedNext) {
+                for (uint32_t missingSequence = expectedNext;
+                    missingSequence < dataHeader.sequence;
+                    ++missingSequence) {
+                    if (pendingTransportFeedback_.size() >=
+                        kMaxTransportFeedbackEntries) {
+                        break;
+                    }
+
+                    PendingTransportFeedback missing{};
+                    missing.sequence = missingSequence;
+                    missing.received = false;
+                    pendingTransportFeedback_.push_back(missing);
+                }
+            }
+
+            if (dataHeader.sequence > lastTransportFeedbackSequence_) {
+                lastTransportFeedbackSequence_ = dataHeader.sequence;
+            }
+        }
+
+        PendingTransportFeedback received{};
+        received.sequence = dataHeader.sequence;
+        received.received = true;
+        received.receiveTimeUs = receiveTimeUs;
+        pendingTransportFeedback_.push_back(received);
+
+        while (pendingTransportFeedback_.size() >
+            kMaxTransportFeedbackEntries) {
+            pendingTransportFeedback_.pop_front();
+        }
+    }
+
+    void UdpReceiver::SendTransportFeedback(
+        const sockaddr_in& toAddr,
+        bool force
+    ) {
+        if (socket_ == INVALID_SOCKET ||
+            pendingTransportFeedback_.empty()) {
+            return;
+        }
+
+        const uint64_t nowUs = NowMicroseconds();
+        const bool intervalElapsed =
+            lastTransportFeedbackSendUs_ == 0 ||
+            nowUs > lastTransportFeedbackSendUs_ + kTransportFeedbackIntervalUs;
+        if (!force &&
+            pendingTransportFeedback_.size() < kTransportFeedbackBatchSize &&
+            !intervalElapsed) {
+            return;
+        }
+
+        const size_t entryCount = (std::min)(
+            pendingTransportFeedback_.size(),
+            kMaxTransportFeedbackEntries
+        );
+        if (entryCount == 0) {
+            return;
+        }
+
+        const uint32_t baseSequence =
+            pendingTransportFeedback_.front().sequence;
+
+        uint64_t referenceReceiveTimeUs = 0;
+        for (size_t i = 0; i < entryCount; ++i) {
+            const PendingTransportFeedback& pending =
+                pendingTransportFeedback_[i];
+            if (pending.received) {
+                referenceReceiveTimeUs = pending.receiveTimeUs;
+                break;
+            }
+        }
+        if (referenceReceiveTimeUs == 0) {
+            referenceReceiveTimeUs = nowUs;
+        }
+
+        TransportFeedbackPayload feedback{};
+        feedback.baseSequence = baseSequence;
+        feedback.feedbackSequence = transportFeedbackSequence_++;
+        feedback.referenceReceiveTimeUs = referenceReceiveTimeUs;
+        feedback.entries.reserve(entryCount);
+
+        for (size_t i = 0; i < entryCount; ++i) {
+            const PendingTransportFeedback& pending =
+                pendingTransportFeedback_.front();
+
+            TransportFeedbackEntry entry{};
+            const uint32_t sequenceDelta =
+                pending.sequence >= baseSequence
+                ? pending.sequence - baseSequence
+                : 0;
+            entry.sequenceDelta = static_cast<uint16_t>(
+                (std::min)(sequenceDelta, 0xFFFFu)
+            );
+
+            if (pending.received) {
+                entry.flags = TransportFeedbackFlag_Received;
+                entry.receiveDeltaUs = pending.receiveTimeUs >=
+                    referenceReceiveTimeUs
+                    ? static_cast<uint32_t>(
+                        (std::min)(
+                            pending.receiveTimeUs - referenceReceiveTimeUs,
+                            static_cast<uint64_t>(
+                                (std::numeric_limits<uint32_t>::max)())
+                        ))
+                    : 0;
+            }
+            else {
+                entry.flags = TransportFeedbackFlag_Missing;
+                entry.receiveDeltaUs = 0;
+            }
+
+            feedback.entries.push_back(entry);
+            pendingTransportFeedback_.pop_front();
+        }
+
+        feedback.packetStatusCount =
+            static_cast<uint16_t>(feedback.entries.size());
+
+        const size_t payloadSize =
+            CalculateTransportFeedbackPayloadSize(feedback);
+        std::vector<uint8_t> packet(kRnvpHeaderV1Size + payloadSize);
+
+        RnvpHeaderV1 header{};
+        header.magic = kRnvpMagic;
+        header.version = kRnvpVersion;
+        header.packetType =
+            static_cast<uint8_t>(PacketType::TransportFeedback);
+        header.headerSize = static_cast<uint16_t>(kRnvpHeaderV1Size);
+        header.sequence = NextRNVPSequence();
+        header.streamId = 1;
+        header.frameId = 0;
+        header.chunkIndex = 0;
+        header.chunkCount = 0;
+        header.sendTimeUs = nowUs;
+        header.payloadSize = static_cast<uint32_t>(payloadSize);
+        header.flags = PacketFlag_Control;
+        header.codecType = static_cast<uint8_t>(CodecType::Unknown);
+
+        EncodeRnvpHeaderV1(packet.data(), header);
+        EncodeTransportFeedbackPayload(
+            packet.data() + kRnvpHeaderV1Size,
+            feedback
+        );
+
+        const int sent = sendto(
+            socket_,
+            reinterpret_cast<const char*>(packet.data()),
+            static_cast<int>(packet.size()),
+            0,
+            reinterpret_cast<const sockaddr*>(&toAddr),
+            sizeof(toAddr)
+        );
+
+        if (sent == SOCKET_ERROR) {
+            std::cerr << "[UdpReceiver] SendTransportFeedback failed: "
+                << WSAGetLastError() << "\n";
+            return;
+        }
+
+        lastTransportFeedbackSendUs_ = nowUs;
     }
 
     void UdpReceiver::SendRnvpControl(

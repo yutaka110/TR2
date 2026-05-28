@@ -75,6 +75,7 @@ namespace net {
         Ping = 2, // RTT計測要求
         Pong = 3, // RTT計測応答
         Control = 4, // 品質/FPS/bitrate調整指示
+        TransportFeedback = 5,
     };
 
     enum class CodecType : uint8_t {
@@ -201,6 +202,31 @@ namespace net {
         uint16_t reserved1 = 0;
         uint32_t value = 0;
     };
+
+    enum TransportFeedbackFlags : uint8_t {
+        TransportFeedbackFlag_None = 0,
+        TransportFeedbackFlag_Received = 1 << 0,
+        TransportFeedbackFlag_Missing = 1 << 1,
+    };
+
+    struct TransportFeedbackEntry {
+        uint16_t sequenceDelta = 0;
+        uint8_t flags = TransportFeedbackFlag_None;
+        uint8_t reserved0 = 0;
+        uint32_t receiveDeltaUs = 0;
+    };
+
+    struct TransportFeedbackPayload {
+        uint32_t baseSequence = 0;
+        uint16_t packetStatusCount = 0;
+        uint16_t feedbackSequence = 0;
+        uint64_t referenceReceiveTimeUs = 0;
+        std::vector<TransportFeedbackEntry> entries;
+    };
+
+    static constexpr size_t kTransportFeedbackPayloadBaseSize = 16;
+    static constexpr size_t kTransportFeedbackEntrySize = 8;
+    static constexpr size_t kMaxTransportFeedbackEntries = 128;
 
     // ============================================================
     // Big Endian Utility
@@ -537,6 +563,77 @@ namespace net {
         return true;
     }
 
+    inline size_t CalculateTransportFeedbackPayloadSize(
+        const TransportFeedbackPayload& payload
+    ) {
+        return kTransportFeedbackPayloadBaseSize +
+            payload.entries.size() * kTransportFeedbackEntrySize;
+    }
+
+    inline void EncodeTransportFeedbackPayload(
+        uint8_t* dst,
+        const TransportFeedbackPayload& payload
+    ) {
+        WriteU32BE(dst + 0, payload.baseSequence);
+        WriteU16BE(dst + 4, payload.packetStatusCount);
+        WriteU16BE(dst + 6, payload.feedbackSequence);
+        WriteU64BE(dst + 8, payload.referenceReceiveTimeUs);
+
+        uint8_t* cursor = dst + kTransportFeedbackPayloadBaseSize;
+        for (const TransportFeedbackEntry& entry : payload.entries) {
+            WriteU16BE(cursor + 0, entry.sequenceDelta);
+            cursor[2] = entry.flags;
+            cursor[3] = entry.reserved0;
+            WriteU32BE(cursor + 4, entry.receiveDeltaUs);
+            cursor += kTransportFeedbackEntrySize;
+        }
+    }
+
+    inline bool DecodeTransportFeedbackPayload(
+        const uint8_t* src,
+        size_t size,
+        TransportFeedbackPayload& outPayload
+    ) {
+        if (!src || size < kTransportFeedbackPayloadBaseSize) {
+            return false;
+        }
+
+        outPayload.baseSequence = ReadU32BE(src + 0);
+        outPayload.packetStatusCount = ReadU16BE(src + 4);
+        outPayload.feedbackSequence = ReadU16BE(src + 6);
+        outPayload.referenceReceiveTimeUs = ReadU64BE(src + 8);
+        outPayload.entries.clear();
+
+        const size_t availableEntryBytes =
+            size - kTransportFeedbackPayloadBaseSize;
+        const size_t encodedEntryCount =
+            availableEntryBytes / kTransportFeedbackEntrySize;
+        const size_t entryCount = (std::min)(
+            encodedEntryCount,
+            (std::min)(
+                static_cast<size_t>(outPayload.packetStatusCount),
+                kMaxTransportFeedbackEntries
+            )
+        );
+
+        outPayload.entries.reserve(entryCount);
+        const uint8_t* cursor = src + kTransportFeedbackPayloadBaseSize;
+        for (size_t i = 0; i < entryCount; ++i) {
+            TransportFeedbackEntry entry{};
+            entry.sequenceDelta = ReadU16BE(cursor + 0);
+            entry.flags = cursor[2];
+            entry.reserved0 = cursor[3];
+            entry.receiveDeltaUs = ReadU32BE(cursor + 4);
+            outPayload.entries.push_back(entry);
+            cursor += kTransportFeedbackEntrySize;
+        }
+
+        outPayload.packetStatusCount =
+            static_cast<uint16_t>(outPayload.entries.size());
+
+        return true;
+    }
+
     // ============================================================
     // Utility
     // ============================================================
@@ -561,7 +658,8 @@ namespace net {
         return type == PacketType::Ack ||
             type == PacketType::Ping ||
             type == PacketType::Pong ||
-            type == PacketType::Control;
+            type == PacketType::Control ||
+            type == PacketType::TransportFeedback;
     }
 
 } // namespace net
