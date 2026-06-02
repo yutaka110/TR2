@@ -221,6 +221,17 @@ namespace {
 		return payload;
 	}
 
+	void UpdateTelemetryEwma(double& value, bool& hasValue, double sample) {
+		constexpr double kAlpha = 0.20;
+		if (!hasValue) {
+			value = sample;
+			hasValue = true;
+			return;
+		}
+
+		value = value * (1.0 - kAlpha) + sample * kAlpha;
+	}
+
 	std::vector<uint8_t> EncodeJpegFrame(
 		const std::vector<uint8_t>& rgba,
 		uint32_t width,
@@ -292,6 +303,76 @@ namespace {
 			bytes,
 			bytes + blob.GetBufferSize()
 		);
+	}
+
+	bool DecodeJpegFrameToRgba(
+		const std::vector<uint8_t>& jpeg,
+		std::vector<uint8_t>& outRgba,
+		uint32_t& outWidth,
+		uint32_t& outHeight) {
+		if (jpeg.empty()) {
+			return false;
+		}
+
+		DirectX::TexMetadata metadata{};
+		DirectX::ScratchImage decoded;
+		HRESULT hr = DirectX::LoadFromWICMemory(
+			jpeg.data(),
+			jpeg.size(),
+			DirectX::WIC_FLAGS_FORCE_RGB,
+			&metadata,
+			decoded
+		);
+
+		if (FAILED(hr)) {
+			static uint32_t decodeFailLogCount = 0;
+			if (decodeFailLogCount < 10) {
+				OutputDebugStringA("[NetworkVideoReceiver] JPEG decode failed.\n");
+				decodeFailLogCount++;
+			}
+			return false;
+		}
+
+		const DirectX::Image* image = decoded.GetImage(0, 0, 0);
+		if (image == nullptr || image->pixels == nullptr ||
+			image->width == 0 || image->height == 0) {
+			return false;
+		}
+
+		DirectX::ScratchImage converted;
+		if (image->format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+			hr = DirectX::Convert(
+				*image,
+				DXGI_FORMAT_R8G8B8A8_UNORM,
+				DirectX::TEX_FILTER_DEFAULT,
+				0.0f,
+				converted
+			);
+
+			if (FAILED(hr)) {
+				return false;
+			}
+
+			image = converted.GetImage(0, 0, 0);
+			if (image == nullptr || image->pixels == nullptr) {
+				return false;
+			}
+		}
+
+		outWidth = static_cast<uint32_t>(image->width);
+		outHeight = static_cast<uint32_t>(image->height);
+		const size_t rowBytes = static_cast<size_t>(outWidth) * 4u;
+		outRgba.resize(rowBytes * static_cast<size_t>(outHeight));
+
+		for (uint32_t y = 0; y < outHeight; ++y) {
+			std::memcpy(
+				outRgba.data() + static_cast<size_t>(y) * rowBytes,
+				image->pixels + static_cast<size_t>(y) * image->rowPitch,
+				rowBytes
+			);
+		}
+
+		return true;
 	}
 }
 
@@ -834,6 +915,16 @@ int AppMain::Run() {
 		bool hasLastSendFrameTime = false;
 	};
 	NetworkSendTelemetry sendTelemetry;
+	struct NetworkReceiveDecodeTelemetry {
+		std::mutex mutex;
+		net::CompletedFrame latestDecodedFrame;
+		bool hasLatestDecodedFrame = false;
+		double jpegDecodeMs = 0.0;
+		bool hasJpegDecodeMs = false;
+		uint64_t decodedWorkerFrames = 0;
+		uint64_t overwrittenDecodedFrames = 0;
+	};
+	NetworkReceiveDecodeTelemetry receiveDecodeTelemetry;
 
 	if (net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
 		if (udpReceiver->Start(kRnvpListenPort)) {
@@ -869,6 +960,7 @@ int AppMain::Run() {
 			experiment = &networkExperimentRunner,
 			runtimeState = &runtimeState,
 			sendTelemetry = &sendTelemetry,
+			receiveDecodeTelemetry = &receiveDecodeTelemetry,
 			runLoop = &runLoop
 		]() {
 		net::NetworkStatsSnapshot stats{};
@@ -1089,6 +1181,13 @@ int AppMain::Run() {
 			runLoop->PopulateNetworkRenderTimings(stats);
 		}
 
+		if (receiveDecodeTelemetry) {
+			std::lock_guard<std::mutex> receiveDecodeLock(
+				receiveDecodeTelemetry->mutex);
+			stats.receiveJpegDecodeMs =
+				receiveDecodeTelemetry->jpegDecodeMs;
+		}
+
 		return stats;
 		};
 
@@ -1184,19 +1283,25 @@ int AppMain::Run() {
 				);
 	runLoop.SetReceivedFrameProvider(
 		[
-			receiver = udpReceiver.get(),
+			receiveDecodeTelemetry = &receiveDecodeTelemetry,
 			runtimeState = &runtimeState
 		](net::CompletedFrame& outFrame) {
-			if (!receiver) {
-				return false;
-			}
 			if (!runtimeState ||
 				!net::NetworkModeCanReceiveVideo(
 					runtimeState->networkRuntimeMode)) {
 				return false;
 			}
 
-			return receiver->TryPopFrame(outFrame);
+			std::lock_guard<std::mutex> lock(
+				receiveDecodeTelemetry->mutex);
+			if (!receiveDecodeTelemetry->hasLatestDecodedFrame) {
+				return false;
+			}
+
+			outFrame = std::move(
+				receiveDecodeTelemetry->latestDecodedFrame);
+			receiveDecodeTelemetry->hasLatestDecodedFrame = false;
+			return true;
 		}
 				);
 
@@ -1228,6 +1333,113 @@ int AppMain::Run() {
 		texWidth,
 		texHeight
 	);
+
+	std::atomic<bool> videoReceiverDecodeRunning{ true };
+	std::thread videoReceiverDecodeThread(
+		[
+			&videoReceiverDecodeRunning,
+			receiver = udpReceiver.get(),
+			runtimeState = &runtimeState,
+			&receiveDecodeTelemetry
+		]() {
+		while (videoReceiverDecodeRunning.load()) {
+			if (!receiver ||
+				!runtimeState ||
+				!net::NetworkModeCanReceiveVideo(
+					runtimeState->networkRuntimeMode)) {
+				{
+					std::lock_guard<std::mutex> lock(
+						receiveDecodeTelemetry.mutex);
+					receiveDecodeTelemetry.hasLatestDecodedFrame = false;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				continue;
+			}
+
+			net::CompletedFrame frame{};
+			if (!receiver->TryPopFrame(frame)) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				continue;
+			}
+
+			if (frame.codecType == net::CodecType::MJPEG) {
+				std::vector<uint8_t> rgba;
+				uint32_t width = 0;
+				uint32_t height = 0;
+				const auto decodeStart =
+					std::chrono::steady_clock::now();
+				if (!DecodeJpegFrameToRgba(
+						frame.data,
+						rgba,
+						width,
+						height)) {
+					const double decodeMs =
+						std::chrono::duration<double, std::milli>(
+							std::chrono::steady_clock::now() -
+							decodeStart
+						).count();
+					std::lock_guard<std::mutex> lock(
+						receiveDecodeTelemetry.mutex);
+					UpdateTelemetryEwma(
+						receiveDecodeTelemetry.jpegDecodeMs,
+						receiveDecodeTelemetry.hasJpegDecodeMs,
+						decodeMs);
+					continue;
+				}
+
+				const double decodeMs =
+					std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() -
+						decodeStart
+					).count();
+
+				frame.codecType = net::CodecType::Raw;
+				frame.data = PackRawRgbaPayload(rgba, width, height);
+				if (frame.data.empty()) {
+					continue;
+				}
+
+				{
+					std::lock_guard<std::mutex> lock(
+						receiveDecodeTelemetry.mutex);
+					UpdateTelemetryEwma(
+						receiveDecodeTelemetry.jpegDecodeMs,
+						receiveDecodeTelemetry.hasJpegDecodeMs,
+						decodeMs);
+					if (receiveDecodeTelemetry.hasLatestDecodedFrame) {
+						receiveDecodeTelemetry.overwrittenDecodedFrames++;
+					}
+					receiveDecodeTelemetry.latestDecodedFrame =
+						std::move(frame);
+					receiveDecodeTelemetry.hasLatestDecodedFrame = true;
+					receiveDecodeTelemetry.decodedWorkerFrames++;
+				}
+
+				receiver->NotifyDecodeFrame();
+				continue;
+			}
+
+			if (frame.codecType == net::CodecType::Raw) {
+				{
+					std::lock_guard<std::mutex> lock(
+						receiveDecodeTelemetry.mutex);
+					UpdateTelemetryEwma(
+						receiveDecodeTelemetry.jpegDecodeMs,
+						receiveDecodeTelemetry.hasJpegDecodeMs,
+						0.0);
+					if (receiveDecodeTelemetry.hasLatestDecodedFrame) {
+						receiveDecodeTelemetry.overwrittenDecodedFrames++;
+					}
+					receiveDecodeTelemetry.latestDecodedFrame =
+						std::move(frame);
+					receiveDecodeTelemetry.hasLatestDecodedFrame = true;
+					receiveDecodeTelemetry.decodedWorkerFrames++;
+				}
+
+				receiver->NotifyDecodeFrame();
+			}
+		}
+	});
 
 	// Prefer a live camera frame; fallback frames keep the network path testable without a camera.
 	auto cameraCapture = std::make_unique<CameraCapture>();
@@ -1763,6 +1975,10 @@ int AppMain::Run() {
 	if (videoSenderThread.joinable()) {
 		videoSenderThread.join();
 	}
+	videoReceiverDecodeRunning.store(false);
+	if (videoReceiverDecodeThread.joinable()) {
+		videoReceiverDecodeThread.join();
+	}
 
 	runLoop.SetNetworkStatsProvider({});
 	networkExperimentReporter.Stop();
@@ -1800,6 +2016,7 @@ int AppMain::Run() {
 	imguiLayer.Shutdown();
 #endif
 
+	runLoop.Shutdown();
 	engineContext.Shutdown();
 
 
@@ -1822,7 +2039,6 @@ int AppMain::Run() {
 
 	audio.Finalize();
 
-	runLoop.Shutdown();
 	audio.Unload(&soundData1);
 
 

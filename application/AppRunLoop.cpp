@@ -298,6 +298,7 @@ AppRunLoop::AppRunLoop(
       commandQueue_(commandQueue),
       fence_(fence),
       fenceEvent_(fenceEvent) {
+    frameFenceValues_.assign(swapChain_.BufferCount(), 0);
     postProcessStack_.ResetToVfxDefaults();
 
     EffectAsset additiveParticle{};
@@ -336,6 +337,7 @@ void AppRunLoop::InitializeBeam(
 }
 
 void AppRunLoop::Shutdown() {
+    FlushGpu();
     beam_.Shutdown();
 }
 
@@ -396,6 +398,8 @@ void AppRunLoop::PopulateNetworkRenderTimings(
     stats.receiveJpegDecodeMs = receiveJpegDecodeMs_;
     stats.textureUploadMs = textureUploadMs_;
     stats.presentGpuWaitMs = presentGpuWaitMs_;
+    stats.frameResourceWaitMs = frameResourceWaitMs_;
+    stats.presentMs = presentMs_;
 }
 
 void AppRunLoop::UpdateFrame() {
@@ -492,14 +496,53 @@ void AppRunLoop::BeginFrameSystems() {
     renderGraph_.ClearResources();
 }
 
-void AppRunLoop::SignalAndWaitGpu() {
-    uint64_t fenceValue = engineContext_.GetFenceValue() + 1;
+void AppRunLoop::WaitForFrameResource(UINT frameIndex) {
+    if (frameIndex >= frameFenceValues_.size() ||
+        fence_ == nullptr ||
+        fenceEvent_ == nullptr) {
+        return;
+    }
+
+    const uint64_t fenceValue = frameFenceValues_[frameIndex];
+    if (fenceValue == 0 ||
+        fence_->GetCompletedValue() >= fenceValue) {
+        return;
+    }
+
+    fence_->SetEventOnCompletion(fenceValue, fenceEvent_);
+    WaitForSingleObject(fenceEvent_, INFINITE);
+}
+
+void AppRunLoop::SignalFrameResource(UINT frameIndex) {
+    if (frameIndex >= frameFenceValues_.size() ||
+        commandQueue_ == nullptr ||
+        fence_ == nullptr) {
+        return;
+    }
+
+    const uint64_t fenceValue = engineContext_.GetFenceValue() + 1;
     engineContext_.SetFenceValue(fenceValue);
     commandQueue_->Signal(fence_, fenceValue);
+    frameFenceValues_[frameIndex] = fenceValue;
+}
+
+void AppRunLoop::FlushGpu() {
+    if (commandQueue_ == nullptr ||
+        fence_ == nullptr ||
+        fenceEvent_ == nullptr) {
+        return;
+    }
+
+    const uint64_t fenceValue = engineContext_.GetFenceValue() + 1;
+    engineContext_.SetFenceValue(fenceValue);
+    commandQueue_->Signal(fence_, fenceValue);
+
     if (fence_->GetCompletedValue() < fenceValue) {
         fence_->SetEventOnCompletion(fenceValue, fenceEvent_);
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
+
+    std::fill(frameFenceValues_.begin(), frameFenceValues_.end(), fenceValue);
 }
 
 void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList) {
@@ -527,6 +570,7 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
     uint32_t srcWidth = receivedVideoWidth_;
     uint32_t srcHeight = receivedVideoHeight_;
     size_t srcPayloadBytes = frame.data.size();
+    bool decodedOnRenderThread = false;
 
     if (frame.codecType == net::CodecType::MJPEG) {
         const auto jpegDecodeStart = std::chrono::steady_clock::now();
@@ -548,9 +592,9 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
 
         src = decodedJpegRgba.data();
         srcPayloadBytes = decodedJpegRgba.size();
+        decodedOnRenderThread = true;
     }
     else {
-        UpdateTimingEwma(receiveJpegDecodeMs_, hasReceiveJpegDecodeMs_, 0.0);
         net::RawFramePayloadHeader rawHeader{};
         if (net::DecodeRawFramePayloadHeader(
                 frame.data.data(),
@@ -577,7 +621,7 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         return;
     }
 
-    if (networkFrameDecodeNotifier_) {
+    if (decodedOnRenderThread && networkFrameDecodeNotifier_) {
         networkFrameDecodeNotifier_();
     }
 
@@ -745,9 +789,21 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
 }
 
 void AppRunLoop::RenderFrame() {
+    UINT backBufferIndex = swapChain_.CurrentIndex();
+    if (frameFenceValues_.size() != swapChain_.BufferCount()) {
+        frameFenceValues_.assign(swapChain_.BufferCount(), 0);
+    }
+
+    const auto frameSyncStart = std::chrono::steady_clock::now();
+    WaitForFrameResource(backBufferIndex);
+    const double frameResourceWaitMs = ElapsedMs(frameSyncStart);
+    UpdateTimingEwma(
+        frameResourceWaitMs_,
+        hasFrameResourceWaitMs_,
+        frameResourceWaitMs);
+
     BeginFrameSystems();
 
-    UINT backBufferIndex = swapChain_.CurrentIndex();
     ComPtr<ID3D12GraphicsCommandList> commandList =
         clPool_.Begin(backBufferIndex, appPipelines_.GetMainPSO());
     gpuParticleSystem_.Initialize(
@@ -987,12 +1043,16 @@ void AppRunLoop::RenderFrame() {
     frameRenderer_.EndFrame(commandList.Get(), backBuffer);
 
     clPool_.EndAndExecute(dev_);
-    const auto presentGpuWaitStart = std::chrono::steady_clock::now();
+    const auto presentSignalStart = std::chrono::steady_clock::now();
+    SignalFrameResource(backBufferIndex);
     swapChain_.Present(dev_, 1);
-
-    SignalAndWaitGpu();
+    const double presentMs = ElapsedMs(presentSignalStart);
+    UpdateTimingEwma(
+        presentMs_,
+        hasPresentMs_,
+        presentMs);
     UpdateTimingEwma(
         presentGpuWaitMs_,
         hasPresentGpuWaitMs_,
-        ElapsedMs(presentGpuWaitStart));
+        frameResourceWaitMs + presentMs);
 }

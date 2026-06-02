@@ -96,7 +96,9 @@ public:
     void PopulateNetworkRenderTimings(net::NetworkStatsSnapshot& stats) const;
 private:
     void BeginFrameSystems();
-    void SignalAndWaitGpu();
+    void WaitForFrameResource(UINT frameIndex);
+    void SignalFrameResource(UINT frameIndex);
+    void FlushGpu();
     void UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList);
 
     DebugCamera& debugCamera_;
@@ -167,7 +169,12 @@ private:
     double receiveJpegDecodeMs_ = 0.0;
     double textureUploadMs_ = 0.0;
     double presentGpuWaitMs_ = 0.0;
+    double frameResourceWaitMs_ = 0.0;
+    double presentMs_ = 0.0;
     bool hasReceiveJpegDecodeMs_ = false;
     bool hasTextureUploadMs_ = false;
     bool hasPresentGpuWaitMs_ = false;
+    bool hasFrameResourceWaitMs_ = false;
+    bool hasPresentMs_ = false;
+    std::vector<uint64_t> frameFenceValues_;
 };
