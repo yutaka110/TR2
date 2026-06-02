@@ -15,6 +15,7 @@
 #include "../../externals/DirectXTex/DirectXTex.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <unordered_set>
@@ -26,6 +27,22 @@ using namespace DirectX;
 using namespace Microsoft::WRL;
 
 namespace {
+double ElapsedMs(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+}
+
+void UpdateTimingEwma(double& value, bool& hasValue, double sampleMs) {
+    constexpr double kAlpha = 0.20;
+    if (!hasValue) {
+        value = sampleMs;
+        hasValue = true;
+        return;
+    }
+
+    value = (value * (1.0 - kAlpha)) + (sampleMs * kAlpha);
+}
+
 bool DecodeJpegToRgba(
     const std::vector<uint8_t>& jpeg,
     std::vector<uint8_t>& outRgba,
@@ -374,6 +391,13 @@ void AppRunLoop::SetReceivedVideoTexture(
     receivedVideoHeight_ = height;
 }
 
+void AppRunLoop::PopulateNetworkRenderTimings(
+    net::NetworkStatsSnapshot& stats) const {
+    stats.receiveJpegDecodeMs = receiveJpegDecodeMs_;
+    stats.textureUploadMs = textureUploadMs_;
+    stats.presentGpuWaitMs = presentGpuWaitMs_;
+}
+
 void AppRunLoop::UpdateFrame() {
     appPipelines_.HotReloadIfNeeded(dev_.GetDevice());
     runtimeState_.viewport.Width = static_cast<float>(windowWidth_);
@@ -505,18 +529,28 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
     size_t srcPayloadBytes = frame.data.size();
 
     if (frame.codecType == net::CodecType::MJPEG) {
+        const auto jpegDecodeStart = std::chrono::steady_clock::now();
         if (!DecodeJpegToRgba(
                 frame.data,
                 decodedJpegRgba,
                 srcWidth,
                 srcHeight)) {
+            UpdateTimingEwma(
+                receiveJpegDecodeMs_,
+                hasReceiveJpegDecodeMs_,
+                ElapsedMs(jpegDecodeStart));
             return;
         }
+        UpdateTimingEwma(
+            receiveJpegDecodeMs_,
+            hasReceiveJpegDecodeMs_,
+            ElapsedMs(jpegDecodeStart));
 
         src = decodedJpegRgba.data();
         srcPayloadBytes = decodedJpegRgba.size();
     }
     else {
+        UpdateTimingEwma(receiveJpegDecodeMs_, hasReceiveJpegDecodeMs_, 0.0);
         net::RawFramePayloadHeader rawHeader{};
         if (net::DecodeRawFramePayloadHeader(
                 frame.data.data(),
@@ -547,6 +581,8 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         networkFrameDecodeNotifier_();
     }
 
+    const auto textureUploadStart = std::chrono::steady_clock::now();
+
     const D3D12_RESOURCE_DESC textureDesc =
         receivedVideoTexture_->GetDesc();
 
@@ -575,6 +611,10 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
 
     if (FAILED(mapHr) || mapped == nullptr) {
         OutputDebugStringA("[ReceivedVideo] UploadBuffer Map failed.\n");
+        UpdateTimingEwma(
+            textureUploadMs_,
+            hasTextureUploadMs_,
+            ElapsedMs(textureUploadStart));
         return;
     }
 
@@ -586,60 +626,71 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
     const size_t dstRowPitch =
         static_cast<size_t>(footprint.Footprint.RowPitch);
 
-    for (uint32_t y = 0; y < receivedVideoHeight_; ++y) {
-        const double srcYf =
-            receivedVideoHeight_ <= 1
-            ? 0.0
-            : (static_cast<double>(y) * static_cast<double>(srcHeight - 1u)) /
-                static_cast<double>(receivedVideoHeight_ - 1u);
-        const uint32_t y0 =
-            std::min<uint32_t>(srcHeight - 1u, static_cast<uint32_t>(srcYf));
-        const uint32_t y1 = std::min<uint32_t>(srcHeight - 1u, y0 + 1u);
-        const double wy = srcYf - static_cast<double>(y0);
-
-        for (uint32_t x = 0; x < receivedVideoWidth_; ++x) {
-            uint8_t* dstPixel =
-                dst +
-                static_cast<size_t>(y) * dstRowPitch +
-                static_cast<size_t>(x) * 4u;
-
-            const double srcXf =
-                receivedVideoWidth_ <= 1
+    if (srcWidth == receivedVideoWidth_ && srcHeight == receivedVideoHeight_) {
+        const size_t copyRowBytes = static_cast<size_t>(receivedVideoWidth_) * 4u;
+        for (uint32_t y = 0; y < receivedVideoHeight_; ++y) {
+            std::memcpy(
+                dst + static_cast<size_t>(y) * dstRowPitch,
+                src + static_cast<size_t>(y) * srcRowPitch,
+                copyRowBytes);
+        }
+    }
+    else {
+        for (uint32_t y = 0; y < receivedVideoHeight_; ++y) {
+            const double srcYf =
+                receivedVideoHeight_ <= 1
                 ? 0.0
-                : (static_cast<double>(x) * static_cast<double>(srcWidth - 1u)) /
-                    static_cast<double>(receivedVideoWidth_ - 1u);
-            const uint32_t x0 =
-                std::min<uint32_t>(srcWidth - 1u, static_cast<uint32_t>(srcXf));
-            const uint32_t x1 = std::min<uint32_t>(srcWidth - 1u, x0 + 1u);
-            const double wx = srcXf - static_cast<double>(x0);
+                : (static_cast<double>(y) * static_cast<double>(srcHeight - 1u)) /
+                    static_cast<double>(receivedVideoHeight_ - 1u);
+            const uint32_t y0 =
+                std::min<uint32_t>(srcHeight - 1u, static_cast<uint32_t>(srcYf));
+            const uint32_t y1 = std::min<uint32_t>(srcHeight - 1u, y0 + 1u);
+            const double wy = srcYf - static_cast<double>(y0);
 
-            const uint8_t* p00 =
-                src + static_cast<size_t>(y0) * srcRowPitch +
-                static_cast<size_t>(x0) * 4u;
-            const uint8_t* p10 =
-                src + static_cast<size_t>(y0) * srcRowPitch +
-                static_cast<size_t>(x1) * 4u;
-            const uint8_t* p01 =
-                src + static_cast<size_t>(y1) * srcRowPitch +
-                static_cast<size_t>(x0) * 4u;
-            const uint8_t* p11 =
-                src + static_cast<size_t>(y1) * srcRowPitch +
-                static_cast<size_t>(x1) * 4u;
+            for (uint32_t x = 0; x < receivedVideoWidth_; ++x) {
+                uint8_t* dstPixel =
+                    dst +
+                    static_cast<size_t>(y) * dstRowPitch +
+                    static_cast<size_t>(x) * 4u;
 
-            for (uint32_t c = 0; c < 4u; ++c) {
-                const double top =
-                    static_cast<double>(p00[c]) * (1.0 - wx) +
-                    static_cast<double>(p10[c]) * wx;
-                const double bottom =
-                    static_cast<double>(p01[c]) * (1.0 - wx) +
-                    static_cast<double>(p11[c]) * wx;
-                const double value = top * (1.0 - wy) + bottom * wy;
-                dstPixel[c] =
-                    static_cast<uint8_t>(std::clamp(
-                        static_cast<int>(std::lround(value)),
-                        0,
-                        255
-                    ));
+                const double srcXf =
+                    receivedVideoWidth_ <= 1
+                    ? 0.0
+                    : (static_cast<double>(x) * static_cast<double>(srcWidth - 1u)) /
+                        static_cast<double>(receivedVideoWidth_ - 1u);
+                const uint32_t x0 =
+                    std::min<uint32_t>(srcWidth - 1u, static_cast<uint32_t>(srcXf));
+                const uint32_t x1 = std::min<uint32_t>(srcWidth - 1u, x0 + 1u);
+                const double wx = srcXf - static_cast<double>(x0);
+
+                const uint8_t* p00 =
+                    src + static_cast<size_t>(y0) * srcRowPitch +
+                    static_cast<size_t>(x0) * 4u;
+                const uint8_t* p10 =
+                    src + static_cast<size_t>(y0) * srcRowPitch +
+                    static_cast<size_t>(x1) * 4u;
+                const uint8_t* p01 =
+                    src + static_cast<size_t>(y1) * srcRowPitch +
+                    static_cast<size_t>(x0) * 4u;
+                const uint8_t* p11 =
+                    src + static_cast<size_t>(y1) * srcRowPitch +
+                    static_cast<size_t>(x1) * 4u;
+
+                for (uint32_t c = 0; c < 4u; ++c) {
+                    const double top =
+                        static_cast<double>(p00[c]) * (1.0 - wx) +
+                        static_cast<double>(p10[c]) * wx;
+                    const double bottom =
+                        static_cast<double>(p01[c]) * (1.0 - wx) +
+                        static_cast<double>(p11[c]) * wx;
+                    const double value = top * (1.0 - wy) + bottom * wy;
+                    dstPixel[c] =
+                        static_cast<uint8_t>(std::clamp(
+                            static_cast<int>(std::lround(value)),
+                            0,
+                            255
+                        ));
+                }
             }
         }
     }
@@ -682,6 +733,11 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
     toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     toSrv.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     commandList->ResourceBarrier(1, &toSrv);
+
+    UpdateTimingEwma(
+        textureUploadMs_,
+        hasTextureUploadMs_,
+        ElapsedMs(textureUploadStart));
 
     if (networkFrameDisplayNotifier_) {
         networkFrameDisplayNotifier_();
@@ -931,7 +987,12 @@ void AppRunLoop::RenderFrame() {
     frameRenderer_.EndFrame(commandList.Get(), backBuffer);
 
     clPool_.EndAndExecute(dev_);
+    const auto presentGpuWaitStart = std::chrono::steady_clock::now();
     swapChain_.Present(dev_, 1);
 
     SignalAndWaitGpu();
+    UpdateTimingEwma(
+        presentGpuWaitMs_,
+        hasPresentGpuWaitMs_,
+        ElapsedMs(presentGpuWaitStart));
 }

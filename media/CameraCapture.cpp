@@ -9,9 +9,11 @@
 #include <mfreadwrite.h>
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 #pragma comment(lib, "strmiids.lib")
 
@@ -496,7 +498,97 @@ bool CameraCapture::TryGetRgbaFrame(std::vector<uint8_t>& outRgba) {
     return true;
 }
 
+void CameraCapture::StartAsyncCapture() {
+    if (!reader_ || asyncRunning_.load()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(latestFrameMutex_);
+        latestFrame_.clear();
+        latestFrameId_ = 0;
+        latestFrameReady_ = false;
+        asyncCaptureFps_ = 0.0;
+        asyncCapturedFrames_ = 0;
+        asyncCapturedFramesAtLastFpsUpdate_ = 0;
+        asyncLastFpsUpdate_ = std::chrono::steady_clock::now();
+    }
+
+    asyncRunning_.store(true);
+    asyncThread_ = std::thread(&CameraCapture::AsyncCaptureLoop, this);
+    Log("[CameraCapture] Async capture started.");
+}
+
+void CameraCapture::StopAsyncCapture() {
+    asyncRunning_.store(false);
+
+    if (asyncThread_.joinable()) {
+        asyncThread_.join();
+    }
+}
+
+bool CameraCapture::TryGetLatestRgbaFrame(std::vector<uint8_t>& outRgba) {
+    uint64_t ignoredFrameId = 0;
+    return TryGetLatestRgbaFrame(outRgba, ignoredFrameId);
+}
+
+bool CameraCapture::TryGetLatestRgbaFrame(
+    std::vector<uint8_t>& outRgba,
+    uint64_t& outFrameId
+) {
+    std::lock_guard<std::mutex> lock(latestFrameMutex_);
+
+    if (!latestFrameReady_ || latestFrame_.empty()) {
+        return false;
+    }
+
+    outRgba = latestFrame_;
+    outFrameId = latestFrameId_;
+    return true;
+}
+
+double CameraCapture::GetAsyncCaptureFps() const {
+    std::lock_guard<std::mutex> lock(latestFrameMutex_);
+    return asyncCaptureFps_;
+}
+
+void CameraCapture::AsyncCaptureLoop() {
+    while (asyncRunning_.load()) {
+        std::vector<uint8_t> frame;
+        const bool captured = TryGetRgbaFrame(frame);
+        const auto now = std::chrono::steady_clock::now();
+
+        if (captured && !frame.empty()) {
+            std::lock_guard<std::mutex> lock(latestFrameMutex_);
+            latestFrame_ = std::move(frame);
+            latestFrameId_++;
+            latestFrameReady_ = true;
+            asyncCapturedFrames_++;
+
+            const double elapsedSec =
+                std::chrono::duration<double>(
+                    now - asyncLastFpsUpdate_
+                ).count();
+            if (elapsedSec >= 0.5) {
+                const uint64_t capturedDelta =
+                    asyncCapturedFrames_ -
+                    asyncCapturedFramesAtLastFpsUpdate_;
+                asyncCaptureFps_ =
+                    static_cast<double>(capturedDelta) / elapsedSec;
+                asyncCapturedFramesAtLastFpsUpdate_ =
+                    asyncCapturedFrames_;
+                asyncLastFpsUpdate_ = now;
+            }
+        }
+        else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
+
 void CameraCapture::Shutdown() {
+    StopAsyncCapture();
+
     if (reader_) {
         reader_->Release();
         reader_ = nullptr;

@@ -93,6 +93,7 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle,
         uint32_t width,
         uint32_t height);
+    void PopulateNetworkRenderTimings(net::NetworkStatsSnapshot& stats) const;
 private:
     void BeginFrameSystems();
     void SignalAndWaitGpu();
@@ -163,4 +164,10 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoSrvGpuHandle_{};
     uint32_t receivedVideoWidth_ = 0;
     uint32_t receivedVideoHeight_ = 0;
+    double receiveJpegDecodeMs_ = 0.0;
+    double textureUploadMs_ = 0.0;
+    double presentGpuWaitMs_ = 0.0;
+    bool hasReceiveJpegDecodeMs_ = false;
+    bool hasTextureUploadMs_ = false;
+    bool hasPresentGpuWaitMs_ = false;
 };

@@ -32,6 +32,7 @@
 #include <sstream>
 #include <string>
 #include <strsafe.h>
+#include <thread>
 #include <unordered_map>
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
@@ -817,7 +818,22 @@ int AppMain::Run() {
 
 	auto adaptiveController = std::make_unique<net::AdaptiveStreamingController>();
 	adaptiveController->SetControlMode(net::AdaptiveControlMode::FixedQuality);
+	std::mutex adaptiveControllerMutex;
 	net::NetworkExperimentRunner networkExperimentRunner;
+	struct NetworkSendTelemetry {
+		std::mutex mutex;
+		double captureFps = 0.0;
+		double encodeMs = 0.0;
+		double sendFrameIntervalMs = 0.0;
+		bool cameraFrameReady = false;
+		uint64_t cameraReadyFrames = 0;
+		uint64_t cameraReadyFramesAtLastFpsUpdate = 0;
+		std::chrono::steady_clock::time_point lastCaptureFpsUpdate =
+			std::chrono::steady_clock::now();
+		std::chrono::steady_clock::time_point lastSendFrameTime{};
+		bool hasLastSendFrameTime = false;
+	};
+	NetworkSendTelemetry sendTelemetry;
 
 	if (net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
 		if (udpReceiver->Start(kRnvpListenPort)) {
@@ -849,8 +865,11 @@ int AppMain::Run() {
 			receiver = udpReceiver.get(),
 			sender = networkManager.get(),
 			adaptive = adaptiveController.get(),
+			adaptiveMutex = &adaptiveControllerMutex,
 			experiment = &networkExperimentRunner,
-			runtimeState = &runtimeState
+			runtimeState = &runtimeState,
+			sendTelemetry = &sendTelemetry,
+			runLoop = &runLoop
 		]() {
 		net::NetworkStatsSnapshot stats{};
 
@@ -939,6 +958,7 @@ int AppMain::Run() {
 		}
 
 		if (adaptive) {
+			std::lock_guard<std::mutex> adaptiveLock(*adaptiveMutex);
 			const net::AdaptiveStreamingState adaptiveState =
 				adaptive->GetState();
 
@@ -974,6 +994,17 @@ int AppMain::Run() {
 
 			stats.adaptiveCompressionRatio =
 				adaptiveState.lastCompressionRatio;
+
+			if (sendTelemetry) {
+				std::lock_guard<std::mutex> sendLock(
+					sendTelemetry->mutex);
+				stats.captureFps = sendTelemetry->captureFps;
+				stats.encodeMs = sendTelemetry->encodeMs;
+				stats.sendFrameIntervalMs =
+					sendTelemetry->sendFrameIntervalMs;
+				stats.cameraFrameReady =
+					sendTelemetry->cameraFrameReady;
+			}
 
 			stats.adaptiveQualityChanged =
 				adaptiveState.qualityChanged;
@@ -1054,6 +1085,10 @@ int AppMain::Run() {
 				net::NetworkModeCanReceiveVideo(runtimeState->networkRuntimeMode);
 		}
 
+		if (runLoop) {
+			runLoop->PopulateNetworkRenderTimings(stats);
+		}
+
 		return stats;
 		};
 
@@ -1117,7 +1152,8 @@ int AppMain::Run() {
 
 	runLoop.SetAdaptiveControlModeSetter(
 		[
-			adaptive = adaptiveController.get()
+			adaptive = adaptiveController.get(),
+			adaptiveMutex = &adaptiveControllerMutex
 		](int modeIndex) {
 		if (!adaptive) {
 			return;
@@ -1125,13 +1161,15 @@ int AppMain::Run() {
 
 		const int clampedMode =
 			std::clamp(modeIndex, 0, 2);
+		std::lock_guard<std::mutex> lock(*adaptiveMutex);
 		adaptive->SetControlMode(
 			static_cast<net::AdaptiveControlMode>(clampedMode));
 	}
 				);
 	runLoop.SetCongestionControlModeSetter(
 		[
-			adaptive = adaptiveController.get()
+			adaptive = adaptiveController.get(),
+			adaptiveMutex = &adaptiveControllerMutex
 		](int modeIndex) {
 		if (!adaptive) {
 			return;
@@ -1139,6 +1177,7 @@ int AppMain::Run() {
 
 		const int clampedMode =
 			std::clamp(modeIndex, 0, 2);
+		std::lock_guard<std::mutex> lock(*adaptiveMutex);
 		adaptive->SetCongestionControlMode(
 			static_cast<net::CongestionControlMode>(clampedMode));
 	}
@@ -1195,10 +1234,277 @@ int AppMain::Run() {
 	bool cameraCaptureEnabled = cameraCapture->Initialize(texWidth, texHeight);
 	if (cameraCaptureEnabled) {
 		OutputDebugStringA("[AppMain] Camera capture enabled for RNVP raw video.\n");
+		cameraCapture->StartAsyncCapture();
 	}
 	else {
 		OutputDebugStringA("[AppMain] Camera capture unavailable; RNVP falls back to generated test video.\n");
 	}
+
+	std::atomic<bool> videoSenderRunning{ true };
+	std::thread videoSenderThread(
+		[
+			&videoSenderRunning,
+			networkManager = networkManager.get(),
+			adaptiveController = adaptiveController.get(),
+			adaptiveMutex = &adaptiveControllerMutex,
+			cameraCapture = cameraCapture.get(),
+			cameraCaptureEnabled,
+			&sendTelemetry,
+			&runtimeState,
+			texWidth,
+			texHeight
+		]() {
+		auto nextSendTime = std::chrono::steady_clock::now();
+		uint32_t frameId = 1;
+		uint64_t lastCameraFrameId = 0;
+
+		while (videoSenderRunning.load()) {
+			const auto now = std::chrono::steady_clock::now();
+			if (now < nextSendTime) {
+				std::this_thread::sleep_until(nextSendTime);
+				continue;
+			}
+
+			if (!networkManager ||
+				!adaptiveController ||
+				!net::NetworkModeCanSendVideo(
+					runtimeState.networkRuntimeMode)) {
+				nextSendTime =
+					std::chrono::steady_clock::now() +
+					std::chrono::milliseconds(10);
+				continue;
+			}
+
+			net::AdaptiveStreamingState adaptiveState{};
+			{
+				std::lock_guard<std::mutex> lock(*adaptiveMutex);
+				adaptiveState = adaptiveController->GetState();
+			}
+
+			int targetFps = adaptiveState.targetFps;
+			targetFps = std::clamp(targetFps, 1, 30);
+
+			uint32_t pacingTargetBitrateKbps =
+				static_cast<uint32_t>(
+					(std::max)(1, adaptiveState.targetBitrateKbps)
+				);
+			const bool stableBaselineMode =
+				runtimeState.networkRuntimeMode ==
+				net::NetworkRuntimeMode::Loopback &&
+				net::NetworkModeCanReceiveVideo(
+					runtimeState.networkRuntimeMode) &&
+				!runtimeState.networkExperimentMode &&
+				!networkManager->GetNetworkCondition().enabled;
+			if (stableBaselineMode) {
+				pacingTargetBitrateKbps =
+					(std::max)(
+						pacingTargetBitrateKbps,
+						uint32_t{ 50000 }
+					);
+			}
+			networkManager->SetPacingTargetBitrateKbps(
+				pacingTargetBitrateKbps
+			);
+
+			const uint32_t targetWidth =
+				static_cast<uint32_t>(
+					std::clamp(
+						adaptiveState.targetWidth,
+						160,
+						static_cast<int>(texWidth)
+					)
+				);
+			const uint32_t targetHeight =
+				static_cast<uint32_t>(
+					std::clamp(
+						adaptiveState.targetHeight,
+						90,
+						static_cast<int>(texHeight)
+					)
+				);
+
+			const auto sendFrameStartTime =
+				std::chrono::steady_clock::now();
+			{
+				std::lock_guard<std::mutex> lock(sendTelemetry.mutex);
+				if (sendTelemetry.hasLastSendFrameTime) {
+					sendTelemetry.sendFrameIntervalMs =
+						std::chrono::duration<double, std::milli>(
+							sendFrameStartTime -
+							sendTelemetry.lastSendFrameTime
+						).count();
+				}
+				sendTelemetry.lastSendFrameTime = sendFrameStartTime;
+				sendTelemetry.hasLastSendFrameTime = true;
+			}
+
+			std::vector<uint8_t> videoFrame;
+			uint64_t cameraFrameId = 0;
+			const bool hasCameraFrame =
+				cameraCaptureEnabled &&
+				cameraCapture &&
+				cameraCapture->TryGetLatestRgbaFrame(
+					videoFrame,
+					cameraFrameId
+				);
+			const bool freshCameraFrame =
+				hasCameraFrame &&
+				cameraFrameId != lastCameraFrameId;
+			if (hasCameraFrame) {
+				lastCameraFrameId = cameraFrameId;
+			}
+
+			{
+				std::lock_guard<std::mutex> lock(sendTelemetry.mutex);
+				sendTelemetry.cameraFrameReady = freshCameraFrame;
+				sendTelemetry.captureFps =
+					cameraCaptureEnabled && cameraCapture
+					? cameraCapture->GetAsyncCaptureFps()
+					: 0.0;
+			}
+
+			if (!hasCameraFrame) {
+				videoFrame.resize(
+					static_cast<size_t>(texWidth) *
+					static_cast<size_t>(texHeight) *
+					4u
+				);
+
+				for (UINT y = 0; y < texHeight; ++y) {
+					for (UINT x = 0; x < texWidth; ++x) {
+						const size_t index =
+							(static_cast<size_t>(y) *
+								static_cast<size_t>(texWidth) +
+								static_cast<size_t>(x)) * 4u;
+
+						const uint8_t r =
+							static_cast<uint8_t>((x + frameId * 3u) & 0xFF);
+						const uint8_t g =
+							static_cast<uint8_t>((y + frameId * 2u) & 0xFF);
+						const uint8_t b =
+							static_cast<uint8_t>(
+								((x / 16u) ^ (y / 16u) ^ frameId) & 0xFF);
+
+						videoFrame[index + 0] = r;
+						videoFrame[index + 1] = g;
+						videoFrame[index + 2] = b;
+						videoFrame[index + 3] = 255;
+					}
+				}
+			}
+
+			std::vector<uint8_t> adaptiveVideoFrame =
+				ResizeRgbaBilinear(
+					videoFrame,
+					texWidth,
+					texHeight,
+					targetWidth,
+					targetHeight
+				);
+
+			const auto encodeStartTime =
+				std::chrono::steady_clock::now();
+			std::vector<uint8_t> encodedPayload =
+				EncodeJpegFrame(
+					adaptiveVideoFrame,
+					targetWidth,
+					targetHeight,
+					adaptiveState.targetJpegQuality
+				);
+			const double encodeMs =
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() -
+					encodeStartTime
+				).count();
+
+			{
+				std::lock_guard<std::mutex> lock(sendTelemetry.mutex);
+				sendTelemetry.encodeMs = encodeMs;
+			}
+
+			net::CodecType sendCodec = net::CodecType::MJPEG;
+			if (encodedPayload.empty()) {
+				encodedPayload =
+					PackRawRgbaPayload(videoFrame, texWidth, texHeight);
+				sendCodec = net::CodecType::Raw;
+			}
+
+			const bool requestedKeyFrame =
+				networkManager->ConsumeKeyFrameRequest();
+			const bool sendAsKeyFrame =
+				requestedKeyFrame ||
+				sendCodec == net::CodecType::MJPEG;
+
+			{
+				std::lock_guard<std::mutex> lock(*adaptiveMutex);
+				adaptiveController->ReportEncodedFrame(
+					adaptiveVideoFrame.size(),
+					encodedPayload.size()
+				);
+			}
+
+			networkManager->SendRNVPFragmented(
+				encodedPayload,
+				frameId,
+				sendCodec,
+				1,
+				sendAsKeyFrame
+			);
+
+			frameId++;
+
+			if ((frameId % 60) == 0) {
+				std::ostringstream oss;
+				oss << "[AppMain] RNVP video frame sent. frameId="
+					<< frameId
+					<< " targetFps="
+					<< targetFps
+					<< " targetBitrateKbps="
+					<< adaptiveState.targetBitrateKbps
+					<< " targetQuality="
+					<< adaptiveState.targetJpegQuality
+					<< " targetResolution="
+					<< targetWidth
+					<< "x"
+					<< targetHeight
+					<< " codec="
+					<< (sendCodec == net::CodecType::MJPEG ? "mjpeg" : "raw")
+					<< " source="
+					<< (hasCameraFrame
+						? (freshCameraFrame ? "camera" : "camera-cache")
+						: "fallback")
+					<< " size="
+					<< encodedPayload.size()
+					<< " rawSize="
+					<< adaptiveVideoFrame.size()
+					<< " keyFrame="
+					<< (sendAsKeyFrame ? "true" : "false")
+					<< " requestedKeyFrame="
+					<< (requestedKeyFrame ? "true" : "false");
+
+				OutputDebugStringA(oss.str().c_str());
+				OutputDebugStringA("\n");
+			}
+
+			const auto sendInterval =
+				std::chrono::duration<double>(
+					1.0 / static_cast<double>(targetFps)
+				);
+			nextSendTime +=
+				std::chrono::duration_cast<
+					std::chrono::steady_clock::duration
+				>(sendInterval);
+
+			const auto scheduleNow = std::chrono::steady_clock::now();
+			if (nextSendTime < scheduleNow - std::chrono::milliseconds(100)) {
+				nextSendTime =
+					scheduleNow +
+					std::chrono::duration_cast<
+						std::chrono::steady_clock::duration
+					>(sendInterval);
+			}
+		}
+	});
 
 	bool receiverRuntimeActive =
 		udpReceiver &&
@@ -1222,14 +1528,6 @@ int AppMain::Run() {
 				runtimeState.networkExperimentMode &&
 				net::NetworkModeCanRunExperiment(networkRuntimeMode);
 			const bool receiverShouldRun = networkReceiveEnabled;
-			const bool stableBaselineMode =
-				networkRuntimeMode == net::NetworkRuntimeMode::Loopback &&
-				networkSendEnabled &&
-				networkReceiveEnabled &&
-				!networkExperimentEnabled &&
-				!networkExperimentRunner.IsActive() &&
-				networkManager &&
-				!networkManager->GetNetworkCondition().enabled;
 
 			if (udpReceiver &&
 				receiverShouldRun != receiverRuntimeActive) {
@@ -1272,6 +1570,8 @@ int AppMain::Run() {
 						networkExperimentRunner.CurrentCondition());
 				}
 				if (adaptiveController) {
+					std::lock_guard<std::mutex> lock(
+						adaptiveControllerMutex);
 					adaptiveController->SetControlMode(
 						networkExperimentRunner.CurrentAdaptiveControlMode());
 					adaptiveController->SetCongestionControlMode(
@@ -1290,6 +1590,8 @@ int AppMain::Run() {
 				}
 				if (experimentScenarioChanged &&
 					adaptiveController) {
+					std::lock_guard<std::mutex> lock(
+						adaptiveControllerMutex);
 					adaptiveController->SetControlMode(
 						net::AdaptiveControlMode::FixedQuality);
 					adaptiveController->SetCongestionControlMode(
@@ -1301,6 +1603,8 @@ int AppMain::Run() {
 			if (experimentScenarioChanged) {
 				if (networkExperimentRunner.IsActive()) {
 					if (adaptiveController) {
+						std::lock_guard<std::mutex> lock(
+							adaptiveControllerMutex);
 						adaptiveController->Reset();
 					}
 					if (networkManager) {
@@ -1344,185 +1648,8 @@ int AppMain::Run() {
 				lastPingTime = now;
 			}
 
-			// Capture, adapt, encode, and send one MJPEG/RGBA video frame at the target FPS.
-			static auto nextDummyFrameTime = std::chrono::steady_clock::now();
-			static uint32_t dummyFrameId = 1;
-
-			if (networkSendEnabled && networkManager && adaptiveController) {
-				const net::AdaptiveStreamingState adaptiveState =
-					adaptiveController->GetState();
-
-				int targetFps = adaptiveState.targetFps;
-
-				if (targetFps < 1) {
-					targetFps = 1;
-				}
-				if (targetFps > 30) {
-					targetFps = 30;
-				}
-
-				if (networkManager) {
-					uint32_t pacingTargetBitrateKbps =
-						static_cast<uint32_t>(
-							(std::max)(1, adaptiveState.targetBitrateKbps)
-						);
-					if (stableBaselineMode) {
-						pacingTargetBitrateKbps =
-							(std::max)(
-								pacingTargetBitrateKbps,
-								uint32_t{ 50000 }
-							);
-					}
-					networkManager->SetPacingTargetBitrateKbps(
-						pacingTargetBitrateKbps
-					);
-				}
-
-				const uint32_t targetWidth =
-					static_cast<uint32_t>(
-						std::clamp(
-							adaptiveState.targetWidth,
-							160,
-							static_cast<int>(texWidth)
-						)
-					);
-
-				const uint32_t targetHeight =
-					static_cast<uint32_t>(
-						std::clamp(
-							adaptiveState.targetHeight,
-							90,
-							static_cast<int>(texHeight)
-						)
-					);
-
-				const auto sendInterval =
-					std::chrono::duration<double>(1.0 / static_cast<double>(targetFps));
-
-				if (now >= nextDummyFrameTime) {
-					std::vector<uint8_t> videoFrame;
-					const bool cameraFrameReady =
-						cameraCaptureEnabled &&
-						cameraCapture &&
-						cameraCapture->TryGetRgbaFrame(videoFrame);
-
-					if (!cameraFrameReady) {
-						videoFrame.resize(
-							static_cast<size_t>(texWidth) *
-							static_cast<size_t>(texHeight) *
-							4u
-						);
-
-						for (UINT y = 0; y < texHeight; ++y) {
-							for (UINT x = 0; x < texWidth; ++x) {
-								const size_t index =
-									(static_cast<size_t>(y) *
-										static_cast<size_t>(texWidth) +
-										static_cast<size_t>(x)) * 4u;
-
-								const uint8_t r =
-									static_cast<uint8_t>((x + dummyFrameId * 3u) & 0xFF);
-								const uint8_t g =
-									static_cast<uint8_t>((y + dummyFrameId * 2u) & 0xFF);
-								const uint8_t b =
-									static_cast<uint8_t>(((x / 16u) ^ (y / 16u) ^ dummyFrameId) & 0xFF);
-
-								videoFrame[index + 0] = r;
-								videoFrame[index + 1] = g;
-								videoFrame[index + 2] = b;
-								videoFrame[index + 3] = 255;
-							}
-						}
-					}
-
-					std::vector<uint8_t> adaptiveVideoFrame =
-						ResizeRgbaBilinear(
-							videoFrame,
-							texWidth,
-							texHeight,
-							targetWidth,
-							targetHeight
-						);
-
-					std::vector<uint8_t> encodedPayload =
-						EncodeJpegFrame(
-							adaptiveVideoFrame,
-							targetWidth,
-							targetHeight,
-							adaptiveState.targetJpegQuality
-						);
-
-					net::CodecType sendCodec = net::CodecType::MJPEG;
-					if (encodedPayload.empty()) {
-						encodedPayload =
-							PackRawRgbaPayload(videoFrame, texWidth, texHeight);
-						sendCodec = net::CodecType::Raw;
-					}
-
-					const bool requestedKeyFrame =
-						networkManager->ConsumeKeyFrameRequest();
-
-					const bool sendAsKeyFrame =
-						requestedKeyFrame ||
-						sendCodec == net::CodecType::MJPEG;
-
-					if (adaptiveController) {
-						adaptiveController->ReportEncodedFrame(
-							adaptiveVideoFrame.size(),
-							encodedPayload.size()
-						);
-					}
-
-					networkManager->SendRNVPFragmented(
-						encodedPayload,
-						dummyFrameId,
-						sendCodec,
-						1,
-						sendAsKeyFrame
-					);
-
-					dummyFrameId++;
-
-					if ((dummyFrameId % 60) == 0) {
-						std::ostringstream oss;
-						oss << "[AppMain] RNVP video frame sent. frameId="
-							<< dummyFrameId
-							<< " targetFps="
-							<< targetFps
-							<< " targetBitrateKbps="
-							<< adaptiveState.targetBitrateKbps
-							<< " targetQuality="
-							<< adaptiveState.targetJpegQuality
-							<< " targetResolution="
-							<< targetWidth
-							<< "x"
-							<< targetHeight
-							<< " codec="
-							<< (sendCodec == net::CodecType::MJPEG ? "mjpeg" : "raw")
-							<< " source="
-							<< (cameraFrameReady ? "camera" : "fallback")
-							<< " size="
-							<< encodedPayload.size()
-							<< " rawSize="
-							<< adaptiveVideoFrame.size()
-							<< " keyFrame="
-							<< (sendAsKeyFrame ? "true" : "false")
-							<< " requestedKeyFrame="
-							<< (requestedKeyFrame ? "true" : "false");
-
-						OutputDebugStringA(oss.str().c_str());
-						OutputDebugStringA("\n");
-					}
-
-					nextDummyFrameTime +=
-						std::chrono::duration_cast<std::chrono::steady_clock::duration>(sendInterval);
-
-					if (nextDummyFrameTime < now - std::chrono::milliseconds(100)) {
-						nextDummyFrameTime =
-							now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(sendInterval);
-					}
-				}
-			}
+			// The network video sender runs on its own worker thread so camera
+			// capture and JPEG encode cannot stall the render loop.
 
 			// AIMD target bitrate updates consume ACK loss, packet loss, RTT, and latency.
 			static auto lastAdaptiveUpdateTime = std::chrono::steady_clock::now();
@@ -1590,7 +1717,11 @@ int AppMain::Run() {
 				adaptiveInput.bandwidthFeedbackSamples =
 					bandwidthStats.feedbackSamples;
 
-				adaptiveController->Update(adaptiveInput, deltaTimeSec);
+				{
+					std::lock_guard<std::mutex> lock(
+						adaptiveControllerMutex);
+					adaptiveController->Update(adaptiveInput, deltaTimeSec);
+				}
 			}
 
 			if ((networkCsvLogger.IsRunning() ||
@@ -1628,6 +1759,11 @@ int AppMain::Run() {
 	}
 
 	// Stop network components before releasing providers that may reference them.
+	videoSenderRunning.store(false);
+	if (videoSenderThread.joinable()) {
+		videoSenderThread.join();
+	}
+
 	runLoop.SetNetworkStatsProvider({});
 	networkExperimentReporter.Stop();
 	networkCsvLogger.Stop();
