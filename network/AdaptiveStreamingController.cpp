@@ -19,6 +19,8 @@ namespace net {
             return "DecodeLoad";
         case AdaptiveDegradationCause::DisplayLoad:
             return "DisplayLoad";
+        case AdaptiveDegradationCause::PacingQueue:
+            return "PacingQueue";
         case AdaptiveDegradationCause::None:
         default:
             return "None";
@@ -75,6 +77,8 @@ namespace net {
         hasNackCounters_ = false;
         lastDeadlineNackSentFrames_ = 0;
         lastDeadlineNackMissingChunks_ = 0;
+        hasPacingCounters_ = false;
+        lastPacingDeadlineDroppedPackets_ = 0;
         activeBandwidthCeilingKbps_ = kMaxBitrateKbps;
         state_.bandwidthCeilingKbps = activeBandwidthCeilingKbps_;
     }
@@ -125,8 +129,15 @@ namespace net {
         state_.bitrateChanged = false;
         state_.resolutionChanged = false;
 
-        state_.lastAckMissingRate = input.ackMissingRate;
-        state_.lastPacketLossRate = input.packetLossRate;
+        const bool suppressPacingDropForQuality =
+            ShouldSuppressPacingDropForQuality(input);
+        const double effectiveAckMissingRate =
+            EffectiveAckMissingRate(input);
+        const double effectivePacketLossRate =
+            EffectivePacketLossRate(input);
+
+        state_.lastAckMissingRate = effectiveAckMissingRate;
+        state_.lastPacketLossRate = effectivePacketLossRate;
         state_.lastRttMs = input.rttMs;
         state_.lastLatencyMs = input.latencyMs;
         state_.lastJitterMs = input.jitterMs;
@@ -156,6 +167,7 @@ namespace net {
         uint64_t outputQueueDropDelta = 0;
         uint64_t deadlineNackDelta = 0;
         uint64_t deadlineNackMissingChunkDelta = 0;
+        uint64_t pacingDeadlineDropDelta = 0;
 
         if (hasDropCounters_) {
             if (input.deadlineDroppedFrames >= lastDeadlineDroppedFrames_) {
@@ -187,16 +199,43 @@ namespace net {
         lastDeadlineNackSentFrames_ = input.deadlineNackSentFrames;
         lastDeadlineNackMissingChunks_ = input.deadlineNackMissingChunks;
 
+        if (hasPacingCounters_ &&
+            input.pacingDeadlineDroppedPackets >=
+            lastPacingDeadlineDroppedPackets_) {
+            pacingDeadlineDropDelta =
+                input.pacingDeadlineDroppedPackets -
+                lastPacingDeadlineDroppedPackets_;
+        }
+
+        hasPacingCounters_ = true;
+        lastPacingDeadlineDroppedPackets_ =
+            input.pacingDeadlineDroppedPackets;
+
+        const uint64_t qualityDeadlineDropDelta =
+            suppressPacingDropForQuality ? 0 : deadlineDropDelta;
+        const uint64_t qualityDeadlineNackDelta =
+            suppressPacingDropForQuality ? 0 : deadlineNackDelta;
+        const uint64_t qualityDeadlineNackMissingChunkDelta =
+            suppressPacingDropForQuality ? 0 : deadlineNackMissingChunkDelta;
+
         const double qoeScore =
-            CalculateQoeScore(input, deadlineDropDelta, outputQueueDropDelta);
+            CalculateQoeScore(
+                input,
+                qualityDeadlineDropDelta,
+                outputQueueDropDelta);
         state_.lastQoeScore = qoeScore;
-        state_.lastDegradationCause =
+        const AdaptiveDegradationCause qualityDegradationCause =
             DetermineDegradationCause(
                 input,
-                deadlineDropDelta,
+                qualityDeadlineDropDelta,
                 outputQueueDropDelta,
-                deadlineNackDelta,
-                deadlineNackMissingChunkDelta);
+                qualityDeadlineNackDelta,
+                qualityDeadlineNackMissingChunkDelta);
+        state_.lastDegradationCause =
+            qualityDegradationCause == AdaptiveDegradationCause::None &&
+            HasPacingDropPressure(input, pacingDeadlineDropDelta)
+            ? AdaptiveDegradationCause::PacingQueue
+            : qualityDegradationCause;
 
         if (!enabled_ ||
             controlMode_ == AdaptiveControlMode::FixedQuality) {
@@ -210,8 +249,8 @@ namespace net {
             UpdateLossReactive(
                 input,
                 deltaTimeSec,
-                deadlineNackDelta,
-                deadlineNackMissingChunkDelta);
+                qualityDeadlineNackDelta,
+                qualityDeadlineNackMissingChunkDelta);
             return;
         }
 
@@ -225,8 +264,8 @@ namespace net {
         const bool congestionPressure =
             HasCongestionPressure(
                 input,
-                deadlineNackDelta,
-                deadlineNackMissingChunkDelta);
+                qualityDeadlineNackDelta,
+                qualityDeadlineNackMissingChunkDelta);
         const bool bandwidthPressure = HasBandwidthPressure(input);
         const bool lossOnlyPressure =
             !moderateQoeProblem &&
@@ -240,15 +279,15 @@ namespace net {
 
         const bool stableNetwork =
             qoeScore <= 0.25 &&
-            input.ackMissingRate <= 0.02 &&
-            input.packetLossRate <= 0.02 &&
+            effectiveAckMissingRate <= 0.02 &&
+            effectivePacketLossRate <= 0.02 &&
             input.rttMs <= 100.0 &&
             input.latencyMs <= 100.0 &&
             displayHealthy &&
             IsCongestionRecoveryAllowed(
                 input,
-                deadlineNackDelta,
-                deadlineNackMissingChunkDelta);
+                qualityDeadlineNackDelta,
+                qualityDeadlineNackMissingChunkDelta);
 
         if (moderateQoeProblem) {
             badTimeSec_ += deltaTimeSec;
@@ -332,8 +371,8 @@ namespace net {
             state_.targetJpegQuality = 85;
             state_.targetFps = 30;
             state_.targetBitrateKbps = 9500;
-            state_.targetWidth = 320;
-            state_.targetHeight = 180;
+            state_.targetWidth = 640;
+            state_.targetHeight = 360;
             return;
         }
 
@@ -356,16 +395,18 @@ namespace net {
             HasLossPressure(input, deadlineNackDelta, deadlineNackMissingChunkDelta);
 
         const double lossRate = (std::max)(
-            (std::max)(input.ackMissingRate, input.packetLossRate),
-            input.bandwidthLossTrend
+            (std::max)(
+                EffectiveAckMissingRate(input),
+                EffectivePacketLossRate(input)),
+            EffectiveBandwidthLossTrend(input)
         );
         const bool hardLossPressure =
             lossRate >= 0.10 ||
             deadlineNackMissingChunkDelta >= 3;
 
         const bool stableLoss =
-            input.ackMissingRate <= 0.02 &&
-            input.packetLossRate <= 0.02 &&
+            EffectiveAckMissingRate(input) <= 0.02 &&
+            EffectivePacketLossRate(input) <= 0.02 &&
             deadlineNackDelta == 0 &&
             deadlineNackMissingChunkDelta == 0 &&
             IsCongestionRecoveryAllowed(
@@ -443,6 +484,10 @@ namespace net {
         AdaptiveDegradationCause cause,
         bool hardProblem
     ) {
+        if (cause == AdaptiveDegradationCause::PacingQueue) {
+            return;
+        }
+
         const double factor =
             CalculateAimdDecreaseFactor(input, cause, hardProblem);
 
@@ -465,8 +510,15 @@ namespace net {
         const int oldWidth = state_.targetWidth;
         const int oldHeight = state_.targetHeight;
 
-        state_.targetBitrateKbps =
+        int nextBitrate =
             ClampBitrate(state_.targetBitrateKbps + bitrateKbps);
+        if (activeBandwidthCeilingKbps_ < kMaxBitrateKbps) {
+            nextBitrate = (std::min)(
+                nextBitrate,
+                (std::max)(state_.targetBitrateKbps, activeBandwidthCeilingKbps_)
+            );
+        }
+        state_.targetBitrateKbps = nextBitrate;
         DeriveTargetsFromBitrate();
 
         state_.qualityChanged = oldQuality != state_.targetJpegQuality;
@@ -487,44 +539,44 @@ namespace net {
             state_.targetJpegQuality = 40;
         }
         else if (bitrate <= 1400) {
-            state_.targetWidth = 160;
-            state_.targetHeight = 90;
+            state_.targetWidth = 240;
+            state_.targetHeight = 135;
             state_.targetFps = 10;
             state_.targetJpegQuality = 45;
         }
         else if (bitrate <= 2200) {
-            state_.targetWidth = 214;
-            state_.targetHeight = 120;
+            state_.targetWidth = 320;
+            state_.targetHeight = 180;
             state_.targetFps = 12;
             state_.targetJpegQuality = 55;
         }
         else if (bitrate <= 3500) {
-            state_.targetWidth = 256;
-            state_.targetHeight = 144;
+            state_.targetWidth = 426;
+            state_.targetHeight = 240;
             state_.targetFps = 15;
             state_.targetJpegQuality = 65;
         }
         else if (bitrate <= 5000) {
-            state_.targetWidth = 320;
-            state_.targetHeight = 180;
+            state_.targetWidth = 480;
+            state_.targetHeight = 270;
             state_.targetFps = 15;
             state_.targetJpegQuality = 70;
         }
         else if (bitrate <= 7500) {
-            state_.targetWidth = 320;
-            state_.targetHeight = 180;
+            state_.targetWidth = 640;
+            state_.targetHeight = 360;
             state_.targetFps = 20;
             state_.targetJpegQuality = 78;
         }
         else if (bitrate <= 9500) {
-            state_.targetWidth = 320;
-            state_.targetHeight = 180;
+            state_.targetWidth = 640;
+            state_.targetHeight = 360;
             state_.targetFps = 24;
             state_.targetJpegQuality = 85;
         }
         else {
-            state_.targetWidth = 320;
-            state_.targetHeight = 180;
+            state_.targetWidth = 640;
+            state_.targetHeight = 360;
             state_.targetFps = 30;
             state_.targetJpegQuality = 90;
         }
@@ -550,13 +602,58 @@ namespace net {
         uint64_t deadlineNackMissingChunkDelta
     ) const {
         const double lossRate = (std::max)(
-            (std::max)(input.ackMissingRate, input.packetLossRate),
-            input.bandwidthLossTrend
+            (std::max)(
+                EffectiveAckMissingRate(input),
+                EffectivePacketLossRate(input)),
+            EffectiveBandwidthLossTrend(input)
         );
 
         return lossRate >= 0.03 ||
             deadlineNackDelta > 0 ||
             deadlineNackMissingChunkDelta > 0;
+    }
+
+    double AdaptiveStreamingController::EffectiveAckMissingRate(
+        const AdaptiveStreamingInput& input
+    ) const {
+        return ShouldSuppressPacingDropForQuality(input)
+            ? 0.0
+            : input.ackMissingRate;
+    }
+
+    double AdaptiveStreamingController::EffectivePacketLossRate(
+        const AdaptiveStreamingInput& input
+    ) const {
+        return ShouldSuppressPacingDropForQuality(input)
+            ? 0.0
+            : input.packetLossRate;
+    }
+
+    double AdaptiveStreamingController::EffectiveBandwidthLossTrend(
+        const AdaptiveStreamingInput& input
+    ) const {
+        return ShouldSuppressPacingDropForQuality(input)
+            ? 0.0
+            : input.bandwidthLossTrend;
+    }
+
+    bool AdaptiveStreamingController::ShouldSuppressPacingDropForQuality(
+        const AdaptiveStreamingInput& input
+    ) const {
+        return input.pacingEnabled &&
+            input.pacingDeadlineDroppedPackets > 0 &&
+            !input.networkConditionEnabled &&
+            !input.networkExperimentActive;
+    }
+
+    bool AdaptiveStreamingController::HasPacingDropPressure(
+        const AdaptiveStreamingInput& input,
+        uint64_t pacingDeadlineDropDelta
+    ) const {
+        return ShouldSuppressPacingDropForQuality(input) &&
+            (pacingDeadlineDropDelta > 0 ||
+                input.pacingCurrentQueueDelayMs >= 30.0 ||
+                input.pacingMaxQueueDelayMs >= 100.0);
     }
 
     bool AdaptiveStreamingController::HasDelayPressure(
@@ -599,9 +696,9 @@ namespace net {
         uint64_t deadlineNackMissingChunkDelta
     ) const {
         const bool lossStable =
-            input.ackMissingRate <= 0.02 &&
-            input.packetLossRate <= 0.02 &&
-            input.bandwidthLossTrend <= 0.015 &&
+            EffectiveAckMissingRate(input) <= 0.02 &&
+            EffectivePacketLossRate(input) <= 0.02 &&
+            EffectiveBandwidthLossTrend(input) <= 0.015 &&
             deadlineNackDelta == 0 &&
             deadlineNackMissingChunkDelta == 0;
         const bool delayStable =
@@ -629,8 +726,10 @@ namespace net {
         bool hardProblem
     ) const {
         const double lossRate = (std::max)(
-            (std::max)(input.ackMissingRate, input.packetLossRate),
-            input.bandwidthLossTrend
+            (std::max)(
+                EffectiveAckMissingRate(input),
+                EffectivePacketLossRate(input)),
+            EffectiveBandwidthLossTrend(input)
         );
         const double queueDelayMs = input.bandwidthQueueDelayMs;
 
@@ -662,6 +761,8 @@ namespace net {
         case AdaptiveDegradationCause::DecodeLoad:
         case AdaptiveDegradationCause::DisplayLoad:
             return hardProblem ? 0.78 : 0.86;
+        case AdaptiveDegradationCause::PacingQueue:
+            return 1.0;
         case AdaptiveDegradationCause::None:
         default:
             return hardProblem ? 0.82 : 0.90;
@@ -681,7 +782,8 @@ namespace net {
         const AdaptiveStreamingInput& input
     ) const {
         if (controlMode_ == AdaptiveControlMode::FixedQuality ||
-            !HasBandwidthEstimate(input)) {
+            !HasBandwidthEstimate(input) ||
+            !HasBandwidthCongestionEvidence(input)) {
             return kMaxBitrateKbps;
         }
 
@@ -689,7 +791,7 @@ namespace net {
             static_cast<double>(input.estimatedBandwidthBps) / 1000.0;
         const double safetyMargin =
             input.bandwidthQueueDelayMs >= 8.0 ||
-            input.bandwidthLossTrend >= 0.04 ||
+            EffectiveBandwidthLossTrend(input) >= 0.04 ||
             input.bandwidthRttTrendMs >= 10.0
             ? 0.80
             : 0.90;
@@ -708,7 +810,8 @@ namespace net {
         const AdaptiveStreamingInput& input
     ) const {
         if (controlMode_ == AdaptiveControlMode::FixedQuality ||
-            !HasBandwidthEstimate(input)) {
+            !HasBandwidthEstimate(input) ||
+            !HasBandwidthCongestionEvidence(input)) {
             return false;
         }
 
@@ -725,10 +828,19 @@ namespace net {
             static_cast<double>(state_.targetBitrateKbps) * 0.75;
 
         return deliveryBelowTarget ||
-            input.bandwidthQueueDelayMs >= 3.0 ||
-            input.bandwidthLossTrend >= 0.02 ||
-            input.bandwidthRttTrendMs >= 6.0 ||
-            input.bandwidthJitterTrendMs >= 6.0;
+            input.bandwidthQueueDelayMs >= 30.0 ||
+            EffectiveBandwidthLossTrend(input) >= 0.05 ||
+            input.bandwidthRttTrendMs >= 10.0 ||
+            input.bandwidthJitterTrendMs >= 20.0;
+    }
+
+    bool AdaptiveStreamingController::HasBandwidthCongestionEvidence(
+        const AdaptiveStreamingInput& input
+    ) const {
+        return input.bandwidthQueueDelayMs >= 10.0 ||
+            EffectiveBandwidthLossTrend(input) >= 0.03 ||
+            input.bandwidthRttTrendMs >= 8.0 ||
+            input.bandwidthJitterTrendMs >= 10.0;
     }
 
     bool AdaptiveStreamingController::IsBandwidthRecoveryAllowed(
@@ -739,12 +851,16 @@ namespace net {
             return true;
         }
 
+        if (!HasBandwidthCongestionEvidence(input)) {
+            return true;
+        }
+
         const int ceilingKbps = CalculateBandwidthCeilingKbps(input);
         const bool hasHeadroom =
             ceilingKbps >= state_.targetBitrateKbps + 300;
         const bool estimatorStable =
             input.bandwidthQueueDelayMs <= 2.0 &&
-            input.bandwidthLossTrend <= 0.015 &&
+            EffectiveBandwidthLossTrend(input) <= 0.015 &&
             input.bandwidthRttTrendMs <= 4.0 &&
             input.bandwidthJitterTrendMs <= 5.0;
 
@@ -826,7 +942,8 @@ namespace net {
 
         if (deadlineNackDelta >= 3 ||
             deadlineNackMissingChunkDelta >= 3 ||
-            ((input.ackMissingRate >= 0.03 || input.packetLossRate >= 0.08) &&
+            ((EffectiveAckMissingRate(input) >= 0.03 ||
+                EffectivePacketLossRate(input) >= 0.08) &&
                 input.jitterMs < 35.0)) {
             return AdaptiveDegradationCause::PacketLoss;
         }
@@ -837,8 +954,8 @@ namespace net {
             return AdaptiveDegradationCause::Jitter;
         }
 
-        if (input.ackMissingRate >= 0.03 ||
-            input.packetLossRate >= 0.03 ||
+        if (EffectiveAckMissingRate(input) >= 0.03 ||
+            EffectivePacketLossRate(input) >= 0.03 ||
             deadlineNackDelta > 0 ||
             deadlineNackMissingChunkDelta > 0 ||
             deadlineDropDelta > 0) {
@@ -926,10 +1043,12 @@ namespace net {
             score = (std::max)(score, 1.0);
         }
 
-        if (input.ackMissingRate >= 0.08 || input.packetLossRate >= 0.08) {
+        if (EffectiveAckMissingRate(input) >= 0.08 ||
+            EffectivePacketLossRate(input) >= 0.08) {
             score = (std::max)(score, 0.75);
         }
-        else if (input.ackMissingRate >= 0.03 || input.packetLossRate >= 0.03) {
+        else if (EffectiveAckMissingRate(input) >= 0.03 ||
+            EffectivePacketLossRate(input) >= 0.03) {
             score = (std::max)(score, 0.5);
         }
 
@@ -945,19 +1064,15 @@ namespace net {
     }
 
     int AdaptiveStreamingController::ClampBitrate(int value) const {
-        const int ceiling = (std::max)(
-            kMinBitrateKbps,
-            (std::min)(kMaxBitrateKbps, activeBandwidthCeilingKbps_)
-        );
-        return (std::max)(kMinBitrateKbps, (std::min)(ceiling, value));
+        return (std::max)(kMinBitrateKbps, (std::min)(kMaxBitrateKbps, value));
     }
 
     int AdaptiveStreamingController::ClampWidth(int value) const {
-        return (std::max)(160, (std::min)(320, value));
+        return (std::max)(160, (std::min)(640, value));
     }
 
     int AdaptiveStreamingController::ClampHeight(int value) const {
-        return (std::max)(90, (std::min)(180, value));
+        return (std::max)(90, (std::min)(360, value));
     }
 
 } // namespace net

@@ -193,6 +193,9 @@ namespace {
         if (cause == "DisplayLoad") {
             return 6;
         }
+        if (cause == "PacingQueue") {
+            return 7;
+        }
         return 0;
     }
 
@@ -210,6 +213,8 @@ namespace {
             return "DecodeLoad";
         case 6:
             return "DisplayLoad";
+        case 7:
+            return "PacingQueue";
         case 0:
         default:
             return "None";
@@ -796,9 +801,16 @@ namespace {
 
             const auto modeName =
                 [](const ScenarioSummary& summary) -> std::string {
-                return summary.adaptiveControlMode.empty()
+                const std::string adaptiveMode =
+                    summary.adaptiveControlMode.empty()
                     ? std::string("unknown")
                     : summary.adaptiveControlMode;
+                if (adaptiveMode == "QoE/Deadline Adaptive" &&
+                    !summary.adaptiveCongestionControlMode.empty()) {
+                    return adaptiveMode + " / " +
+                        summary.adaptiveCongestionControlMode;
+                }
+                return adaptiveMode;
             };
 
             const auto isFixedQuality =
@@ -996,6 +1008,101 @@ namespace {
             }
 
             file << "\n";
+            file << "### Congestion Control A/B Comparison\n\n";
+            file << "This table compares `Loss Based`, `Delay Based`, and `Hybrid` under the same network scenario using only `QoE/Deadline Adaptive` runs.\n\n";
+            file
+                << "| Network Scenario | Congestion Mode | Frame Drop | Avg Latency ms | P95 Latency ms | Display FPS | Avg QoE | Score |\n"
+                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n";
+
+            for (const std::string& networkScenario : networkScenarioOrder) {
+                const auto it =
+                    summariesByNetworkScenario.find(networkScenario);
+                if (it == summariesByNetworkScenario.end()) {
+                    continue;
+                }
+
+                for (const ScenarioSummary* summary : it->second) {
+                    if (summary->adaptiveControlMode !=
+                        "QoE/Deadline Adaptive") {
+                        continue;
+                    }
+
+                    file << "| "
+                        << EscapeMarkdownTable(networkScenario) << " | "
+                        << EscapeMarkdownTable(
+                            summary->adaptiveCongestionControlMode.empty()
+                            ? "unknown"
+                            : summary->adaptiveCongestionControlMode) << " | "
+                        << FormatPercent(frameDropRate(*summary)) << " | "
+                        << FormatDouble(summary->avgLatencyMs) << " | "
+                        << FormatDouble(summary->p95LatencyMs) << " | "
+                        << FormatDouble(summary->avgDisplayFps) << " | "
+                        << FormatDouble(averageQoeScore(*summary)) << " | "
+                        << FormatDouble(scoreController(*summary)) << " |\n";
+                }
+            }
+
+            file << "\n";
+            file << "### Best Congestion Mode By Scenario\n\n";
+            file
+                << "| Network Scenario | Best Congestion Mode | Why It Wins | Evidence |\n"
+                << "| --- | --- | --- | --- |\n";
+
+            for (const std::string& networkScenario : networkScenarioOrder) {
+                const auto it =
+                    summariesByNetworkScenario.find(networkScenario);
+                if (it == summariesByNetworkScenario.end()) {
+                    continue;
+                }
+
+                const ScenarioSummary* winner = nullptr;
+                double winnerScore = 0.0;
+                for (const ScenarioSummary* candidate : it->second) {
+                    if (candidate->adaptiveControlMode !=
+                        "QoE/Deadline Adaptive") {
+                        continue;
+                    }
+
+                    const double candidateScore =
+                        scoreController(*candidate);
+                    if (winner == nullptr || candidateScore < winnerScore) {
+                        winner = candidate;
+                        winnerScore = candidateScore;
+                    }
+                }
+
+                if (winner == nullptr) {
+                    continue;
+                }
+
+                std::string why = "best latency/drop/FPS/QoE balance";
+                if (winner->adaptiveCongestionControlMode == "Loss Based") {
+                    why = "loss-driven AIMD gave the best score";
+                }
+                else if (winner->adaptiveCongestionControlMode == "Delay Based") {
+                    why = "delay-driven AIMD avoided queue growth best";
+                }
+                else if (winner->adaptiveCongestionControlMode == "Hybrid") {
+                    why = "hybrid transport and QoE signals gave the best score";
+                }
+
+                const std::string evidence =
+                    "drop " + FormatPercent(frameDropRate(*winner)) +
+                    ", p95 " + FormatDouble(winner->p95LatencyMs) +
+                    " ms, fps " + FormatDouble(winner->avgDisplayFps) +
+                    ", score " + FormatDouble(winnerScore);
+
+                file << "| "
+                    << EscapeMarkdownTable(networkScenario) << " | "
+                    << EscapeMarkdownTable(
+                        winner->adaptiveCongestionControlMode.empty()
+                        ? "unknown"
+                        : winner->adaptiveCongestionControlMode) << " | "
+                    << EscapeMarkdownTable(why) << " | "
+                    << EscapeMarkdownTable(evidence) << " |\n";
+            }
+
+            file << "\n";
             file << "This section is the controller A/B evidence path: Fixed Quality is the uncontrolled baseline, Loss Reactive is packet-loss-only adaptation, and QoE/Deadline Adaptive is evaluated against the same network condition using drop rate, latency, display FPS, QoE, and recovery events.\n\n";
         }
 
@@ -1011,9 +1118,10 @@ namespace {
                 return
                     summary.name == "Baseline / Fixed Quality" ||
                     summary.name == "10% loss / Fixed Quality" ||
-                    summary.name == "10% loss / QoE/Deadline Adaptive" ||
-                    summary.name == "50ms jitter / QoE/Deadline Adaptive" ||
-                    summary.name == "Burst loss / QoE/Deadline Adaptive";
+                    summary.name == "10% loss / QoE/Deadline Adaptive / Hybrid" ||
+                    summary.name == "50ms jitter / QoE/Deadline Adaptive / Delay Based" ||
+                    summary.name == "Burst loss / QoE/Deadline Adaptive / Loss Based" ||
+                    summary.name == "Burst loss / QoE/Deadline Adaptive / Hybrid";
             };
 
             std::vector<const ScenarioSummary*> chartSummaries;
@@ -1197,7 +1305,7 @@ namespace {
                 }
 
                 file << "### " << summary->name << "\n\n";
-                file << "Adaptive cause score legend: None=0, Loss=20, Jitter=40, RTT=60, Bandwidth=80, DecodeLoad=100, DisplayLoad=120. Target bitrate and bandwidth ceiling are drawn as `kbps / 120` to share the same axis as quality and FPS.\n\n";
+                file << "Adaptive cause score legend: None=0, Loss=20, Jitter=40, RTT=60, Bandwidth=80, DecodeLoad=100, DisplayLoad=120, PacingQueue=140. Target bitrate and bandwidth ceiling are drawn as `kbps / 120` to share the same axis as quality and FPS.\n\n";
 
                 writeChart(
                     summary->name + " - FPS and Latency",
@@ -1369,9 +1477,16 @@ namespace {
 
             const auto modeName =
                 [](const ScenarioSummary& summary) -> std::string {
-                return summary.adaptiveControlMode.empty()
+                const std::string adaptiveMode =
+                    summary.adaptiveControlMode.empty()
                     ? std::string("unknown")
                     : summary.adaptiveControlMode;
+                if (adaptiveMode == "QoE/Deadline Adaptive" &&
+                    !summary.adaptiveCongestionControlMode.empty()) {
+                    return adaptiveMode + " / " +
+                        summary.adaptiveCongestionControlMode;
+                }
+                return adaptiveMode;
             };
 
             const auto isFixedQuality =
