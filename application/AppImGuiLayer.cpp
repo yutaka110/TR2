@@ -214,6 +214,9 @@ namespace {
         if (cause == "Bandwidth") {
             return ImVec4(0.75f, 0.86f, 1.0f, 1.0f);
         }
+        if (cause == "PacingQueue") {
+            return ImVec4(0.65f, 0.85f, 1.0f, 1.0f);
+        }
         return ImVec4(1.0f, 0.78f, 0.25f, 1.0f);
     }
 
@@ -264,7 +267,10 @@ namespace {
         if (mode == "Loss Reactive") {
             return 1;
         }
-        return 2;
+        if (mode == "QoE/Deadline Adaptive") {
+            return 2;
+        }
+        return 0;
     }
 
     int CongestionModeIndexFromName(const std::string& mode) {
@@ -473,7 +479,7 @@ namespace {
         DrawDashboardValue(
             "Mode",
             stats.adaptiveControlMode.empty()
-            ? "QoE/Deadline Adaptive"
+            ? "Fixed Quality"
             : stats.adaptiveControlMode.c_str(),
             ImVec4(0.75f, 0.86f, 1.0f, 1.0f));
         DrawDashboardValue(
@@ -965,7 +971,7 @@ namespace {
             ImGui::Text("Enabled: %s", stats.adaptiveEnabled ? "true" : "false");
             ImGui::Text("Control Mode: %s",
                 stats.adaptiveControlMode.empty()
-                ? "QoE/Deadline Adaptive"
+                ? "Fixed Quality"
                 : stats.adaptiveControlMode.c_str());
             ImGui::Text("Congestion Mode: %s",
                 stats.adaptiveCongestionControlMode.empty()

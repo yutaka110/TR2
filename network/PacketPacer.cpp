@@ -1,7 +1,10 @@
 #include "PacketPacer.h"
 
+#include "PacketProtocol.h"
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace net {
 
@@ -19,6 +22,11 @@ namespace net {
             sendCallback_ = std::move(callback);
             running_ = true;
             nextSendTimeUs_ = NowMicroseconds();
+            lastCreditUpdateUs_ = nextSendTimeUs_;
+            pacingCreditBytes_ =
+                static_cast<double>(
+                    targetBitrateBps_.load(std::memory_order_relaxed)) *
+                kInitialBurstWindowSec / 8.0;
         }
 
         workerThread_ = std::thread(&PacketPacer::SendLoop, this);
@@ -105,6 +113,7 @@ namespace net {
         queued.context = context != nullptr ? context : "PacketPacer";
         queued.enqueueTimeUs = NowMicroseconds();
         queued.deadlineUs = deadlineUs;
+        FillRnvpDataSequence(queued);
 
         if (priority == PacketPacingPriority::High) {
             highPriorityQueue_.push_back(std::move(queued));
@@ -143,19 +152,20 @@ namespace net {
 
     void PacketPacer::ResetStats() {
         std::lock_guard<std::mutex> lock(mutex_);
-        const uint32_t queuedPackets = QueueSizeLocked();
-        const uint32_t highPriorityQueuedPackets =
-            static_cast<uint32_t>(highPriorityQueue_.size());
-        const uint32_t normalQueuedPackets =
-            static_cast<uint32_t>(normalQueue_.size());
+
+        highPriorityQueue_.clear();
+        normalQueue_.clear();
+        nextSendTimeUs_ = NowMicroseconds();
+        lastCreditUpdateUs_ = nextSendTimeUs_;
+        pacingCreditBytes_ =
+            static_cast<double>(
+                targetBitrateBps_.load(std::memory_order_relaxed)) *
+            kInitialBurstWindowSec / 8.0;
 
         stats_ = PacketPacerStats{};
         stats_.enabled = enabled_.load(std::memory_order_relaxed);
         stats_.targetBitrateBps =
             targetBitrateBps_.load(std::memory_order_relaxed);
-        stats_.queuedPackets = queuedPackets;
-        stats_.highPriorityQueuedPackets = highPriorityQueuedPackets;
-        stats_.normalQueuedPackets = normalQueuedPackets;
     }
 
     void PacketPacer::SendLoop() {
@@ -177,56 +187,94 @@ namespace net {
                     continue;
                 }
 
-                const uint64_t nowUs = NowMicroseconds();
-                if (nextSendTimeUs_ > nowUs) {
-                    cv_.wait_for(
-                        lock,
-                        std::chrono::microseconds(nextSendTimeUs_ - nowUs)
-                    );
-                    continue;
-                }
+                while (true) {
+                    const bool useHighPriority =
+                        ShouldSendHighPriorityFirstLocked();
 
-                if (!highPriorityQueue_.empty()) {
-                    packet = std::move(highPriorityQueue_.front());
-                    highPriorityQueue_.pop_front();
-                }
-                else if (!normalQueue_.empty()) {
-                    packet = std::move(normalQueue_.front());
-                    normalQueue_.pop_front();
-                }
-                else {
-                    continue;
-                }
+                    if (!useHighPriority && normalQueue_.empty()) {
+                        break;
+                    }
 
-                stats_.queuedPackets = QueueSizeLocked();
-                stats_.highPriorityQueuedPackets =
-                    static_cast<uint32_t>(highPriorityQueue_.size());
-                stats_.normalQueuedPackets =
-                    static_cast<uint32_t>(normalQueue_.size());
+                    QueuedPacket& candidate =
+                        useHighPriority
+                        ? highPriorityQueue_.front()
+                        : normalQueue_.front();
 
-                const uint64_t dequeueTimeUs = NowMicroseconds();
-                if (packet.deadlineUs != 0 && dequeueTimeUs > packet.deadlineUs) {
-                    stats_.droppedPackets++;
-                    stats_.deadlineDroppedPackets++;
+                    const uint64_t nowUs = NowMicroseconds();
+                    RefillPacingCreditLocked(nowUs);
+
+                    if (candidate.deadlineUs != 0 &&
+                        nowUs > candidate.deadlineUs) {
+                        stats_.droppedPackets++;
+                        stats_.deadlineDroppedPackets++;
+                        stats_.currentQueueDelayMs =
+                            static_cast<double>(
+                                nowUs - candidate.enqueueTimeUs) / 1000.0;
+                        stats_.maxQueueDelayMs =
+                            (std::max)(
+                                stats_.maxQueueDelayMs,
+                                stats_.currentQueueDelayMs
+                            );
+
+                        if (useHighPriority) {
+                            highPriorityQueue_.pop_front();
+                        }
+                        else {
+                            normalQueue_.pop_front();
+                        }
+
+                        stats_.queuedPackets = QueueSizeLocked();
+                        stats_.highPriorityQueuedPackets =
+                            static_cast<uint32_t>(highPriorityQueue_.size());
+                        stats_.normalQueuedPackets =
+                            static_cast<uint32_t>(normalQueue_.size());
+
+                        continue;
+                    }
+
+                    const size_t packetBytes = candidate.data.size();
+                    if (pacingCreditBytes_ <
+                        static_cast<double>(packetBytes)) {
+                        const uint64_t waitUs =
+                            CalculateCreditWaitUsLocked(packetBytes);
+                        cv_.wait_for(
+                            lock,
+                            std::chrono::microseconds(waitUs)
+                        );
+                        break;
+                    }
+
+                    pacingCreditBytes_ -= static_cast<double>(packetBytes);
+
+                    packet = std::move(candidate);
+                    if (useHighPriority) {
+                        highPriorityQueue_.pop_front();
+                    }
+                    else {
+                        normalQueue_.pop_front();
+                    }
+
+                    stats_.queuedPackets = QueueSizeLocked();
+                    stats_.highPriorityQueuedPackets =
+                        static_cast<uint32_t>(highPriorityQueue_.size());
+                    stats_.normalQueuedPackets =
+                        static_cast<uint32_t>(normalQueue_.size());
+
                     stats_.currentQueueDelayMs =
                         static_cast<double>(
-                            dequeueTimeUs - packet.enqueueTimeUs) / 1000.0;
+                            nowUs - packet.enqueueTimeUs) / 1000.0;
                     stats_.maxQueueDelayMs =
                         (std::max)(
                             stats_.maxQueueDelayMs,
                             stats_.currentQueueDelayMs
                         );
-                    continue;
+
+                    break;
                 }
 
-                stats_.currentQueueDelayMs =
-                    static_cast<double>(
-                        dequeueTimeUs - packet.enqueueTimeUs) / 1000.0;
-                stats_.maxQueueDelayMs =
-                    (std::max)(
-                        stats_.maxQueueDelayMs,
-                        stats_.currentQueueDelayMs
-                    );
+                if (packet.data.empty()) {
+                    continue;
+                }
             }
 
             const size_t packetBytes = packet.data.size();
@@ -238,11 +286,6 @@ namespace net {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.sentPackets++;
                 stats_.sentBytes += packetBytes;
-
-                const uint64_t nowUs = NowMicroseconds();
-                const uint64_t intervalUs = CalculateIntervalUs(packetBytes);
-                nextSendTimeUs_ =
-                    (std::max)(nextSendTimeUs_, nowUs) + intervalUs;
             }
         }
     }
@@ -270,6 +313,102 @@ namespace net {
             uint64_t{ 100 },
             static_cast<uint64_t>(intervalUs)
         );
+    }
+
+    void PacketPacer::RefillPacingCreditLocked(uint64_t nowUs) {
+        if (lastCreditUpdateUs_ == 0 || nowUs < lastCreditUpdateUs_) {
+            lastCreditUpdateUs_ = nowUs;
+            return;
+        }
+
+        const uint64_t elapsedUs = nowUs - lastCreditUpdateUs_;
+        if (elapsedUs == 0) {
+            return;
+        }
+
+        const uint32_t bitrateBps =
+            (std::max)(
+                targetBitrateBps_.load(std::memory_order_relaxed),
+                kMinBitrateBps
+            );
+
+        pacingCreditBytes_ +=
+            static_cast<double>(elapsedUs) *
+            static_cast<double>(bitrateBps) / 8000000.0;
+
+        const double maxCreditBytes =
+            (std::max)(
+                16.0 * 1024.0,
+                static_cast<double>(bitrateBps) *
+                kMaxBurstWindowSec / 8.0
+            );
+
+        pacingCreditBytes_ =
+            (std::min)(pacingCreditBytes_, maxCreditBytes);
+        lastCreditUpdateUs_ = nowUs;
+    }
+
+    uint64_t PacketPacer::CalculateCreditWaitUsLocked(
+        size_t packetBytes
+    ) const {
+        const uint32_t bitrateBps =
+            (std::max)(
+                targetBitrateBps_.load(std::memory_order_relaxed),
+                kMinBitrateBps
+            );
+
+        const double neededBytes =
+            (std::max)(
+                0.0,
+                static_cast<double>(packetBytes) - pacingCreditBytes_
+            );
+        const double waitUs =
+            neededBytes * 8000000.0 / static_cast<double>(bitrateBps);
+
+        return (std::max)(
+            uint64_t{ 100 },
+            static_cast<uint64_t>(std::ceil(waitUs))
+        );
+    }
+
+    void PacketPacer::FillRnvpDataSequence(QueuedPacket& packet) const {
+        if (packet.data.size() < kRnvpHeaderV1Size ||
+            ReadU32BE(packet.data.data()) != kRnvpMagic) {
+            return;
+        }
+
+        RnvpHeaderV1 header{};
+        if (!DecodeRnvpHeaderV1(packet.data.data(), packet.data.size(), header)) {
+            return;
+        }
+
+        if (static_cast<PacketType>(header.packetType) != PacketType::Data) {
+            return;
+        }
+
+        packet.hasRnvpDataSequence = true;
+        packet.rnvpDataSequence = header.sequence;
+    }
+
+    bool PacketPacer::ShouldSendHighPriorityFirstLocked() const {
+        if (highPriorityQueue_.empty()) {
+            return false;
+        }
+
+        if (normalQueue_.empty()) {
+            return true;
+        }
+
+        const QueuedPacket& high = highPriorityQueue_.front();
+        const QueuedPacket& normal = normalQueue_.front();
+
+        if (high.hasRnvpDataSequence &&
+            normal.hasRnvpDataSequence &&
+            normal.rnvpDataSequence < high.rnvpDataSequence) {
+            return false;
+        }
+
+        return true;
     }
 
     uint32_t PacketPacer::QueueSizeLocked() const {

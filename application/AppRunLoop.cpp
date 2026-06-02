@@ -587,34 +587,60 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         static_cast<size_t>(footprint.Footprint.RowPitch);
 
     for (uint32_t y = 0; y < receivedVideoHeight_; ++y) {
-        const uint32_t sampleY =
-            std::min<uint32_t>(
-                srcHeight - 1u,
-                static_cast<uint32_t>(
-                    (static_cast<uint64_t>(y) * srcHeight) / receivedVideoHeight_
-                )
-            );
+        const double srcYf =
+            receivedVideoHeight_ <= 1
+            ? 0.0
+            : (static_cast<double>(y) * static_cast<double>(srcHeight - 1u)) /
+                static_cast<double>(receivedVideoHeight_ - 1u);
+        const uint32_t y0 =
+            std::min<uint32_t>(srcHeight - 1u, static_cast<uint32_t>(srcYf));
+        const uint32_t y1 = std::min<uint32_t>(srcHeight - 1u, y0 + 1u);
+        const double wy = srcYf - static_cast<double>(y0);
 
         for (uint32_t x = 0; x < receivedVideoWidth_; ++x) {
-            const uint32_t sampleX =
-                std::min<uint32_t>(
-                    srcWidth - 1u,
-                    static_cast<uint32_t>(
-                        (static_cast<uint64_t>(x) * srcWidth) / receivedVideoWidth_
-                    )
-                );
-
-            const uint8_t* srcPixel =
-                src +
-                static_cast<size_t>(sampleY) * srcRowPitch +
-                static_cast<size_t>(sampleX) * 4u;
-
             uint8_t* dstPixel =
                 dst +
                 static_cast<size_t>(y) * dstRowPitch +
                 static_cast<size_t>(x) * 4u;
 
-            std::memcpy(dstPixel, srcPixel, 4u);
+            const double srcXf =
+                receivedVideoWidth_ <= 1
+                ? 0.0
+                : (static_cast<double>(x) * static_cast<double>(srcWidth - 1u)) /
+                    static_cast<double>(receivedVideoWidth_ - 1u);
+            const uint32_t x0 =
+                std::min<uint32_t>(srcWidth - 1u, static_cast<uint32_t>(srcXf));
+            const uint32_t x1 = std::min<uint32_t>(srcWidth - 1u, x0 + 1u);
+            const double wx = srcXf - static_cast<double>(x0);
+
+            const uint8_t* p00 =
+                src + static_cast<size_t>(y0) * srcRowPitch +
+                static_cast<size_t>(x0) * 4u;
+            const uint8_t* p10 =
+                src + static_cast<size_t>(y0) * srcRowPitch +
+                static_cast<size_t>(x1) * 4u;
+            const uint8_t* p01 =
+                src + static_cast<size_t>(y1) * srcRowPitch +
+                static_cast<size_t>(x0) * 4u;
+            const uint8_t* p11 =
+                src + static_cast<size_t>(y1) * srcRowPitch +
+                static_cast<size_t>(x1) * 4u;
+
+            for (uint32_t c = 0; c < 4u; ++c) {
+                const double top =
+                    static_cast<double>(p00[c]) * (1.0 - wx) +
+                    static_cast<double>(p10[c]) * wx;
+                const double bottom =
+                    static_cast<double>(p01[c]) * (1.0 - wx) +
+                    static_cast<double>(p11[c]) * wx;
+                const double value = top * (1.0 - wy) + bottom * wy;
+                dstPixel[c] =
+                    static_cast<uint8_t>(std::clamp(
+                        static_cast<int>(std::lround(value)),
+                        0,
+                        255
+                    ));
+            }
         }
     }
 

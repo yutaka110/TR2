@@ -28,16 +28,41 @@ namespace {
         const char* networkName,
         const NetworkCondition& condition,
         AdaptiveControlMode mode,
+        CongestionControlMode congestionMode,
         double durationSec
     ) {
         NetworkExperimentScenario scenario{};
         scenario.networkScenarioName = networkName;
         scenario.condition = condition;
         scenario.adaptiveControlMode = mode;
+        scenario.congestionControlMode = congestionMode;
         scenario.durationSec = durationSec;
         scenario.name =
             scenario.networkScenarioName + " / " + ToString(mode);
+        if (mode == AdaptiveControlMode::QoeDeadlineAdaptive) {
+            scenario.name += " / ";
+            scenario.name += ToString(congestionMode);
+        }
         return scenario;
+    }
+
+    NetworkExperimentScenario MakeScenario(
+        const char* networkName,
+        const NetworkCondition& condition,
+        AdaptiveControlMode mode,
+        double durationSec
+    ) {
+        const CongestionControlMode congestionMode =
+            mode == AdaptiveControlMode::LossReactive
+            ? CongestionControlMode::LossBased
+            : CongestionControlMode::Hybrid;
+        return MakeScenario(
+            networkName,
+            condition,
+            mode,
+            congestionMode,
+            durationSec
+        );
     }
 
 } // namespace
@@ -103,6 +128,10 @@ namespace {
         return CurrentScenario().adaptiveControlMode;
     }
 
+    CongestionControlMode NetworkExperimentRunner::CurrentCongestionControlMode() const {
+        return CurrentScenario().congestionControlMode;
+    }
+
     const std::string& NetworkExperimentRunner::CurrentScenarioName() const {
         return CurrentScenario().name;
     }
@@ -141,28 +170,50 @@ namespace {
             MakeScenario("Baseline", baseline,
                 AdaptiveControlMode::FixedQuality, durationSec),
             MakeScenario("Baseline", baseline,
-                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec),
 
             MakeScenario("10% loss", loss10,
                 AdaptiveControlMode::FixedQuality, durationSec),
             MakeScenario("10% loss", loss10,
                 AdaptiveControlMode::LossReactive, durationSec),
             MakeScenario("10% loss", loss10,
-                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::LossBased, durationSec),
+            MakeScenario("10% loss", loss10,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::DelayBased, durationSec),
+            MakeScenario("10% loss", loss10,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec),
 
             MakeScenario("50ms jitter", jitter50,
                 AdaptiveControlMode::FixedQuality, durationSec),
             MakeScenario("50ms jitter", jitter50,
                 AdaptiveControlMode::LossReactive, durationSec),
             MakeScenario("50ms jitter", jitter50,
-                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::LossBased, durationSec),
+            MakeScenario("50ms jitter", jitter50,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::DelayBased, durationSec),
+            MakeScenario("50ms jitter", jitter50,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec),
 
             MakeScenario("Burst loss", burstLoss,
                 AdaptiveControlMode::FixedQuality, durationSec),
             MakeScenario("Burst loss", burstLoss,
                 AdaptiveControlMode::LossReactive, durationSec),
             MakeScenario("Burst loss", burstLoss,
-                AdaptiveControlMode::QoeDeadlineAdaptive, durationSec),
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::LossBased, durationSec),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::DelayBased, durationSec),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec),
         };
     }
 

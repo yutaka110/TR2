@@ -78,6 +78,7 @@
 #include "../network/NetworkRuntimeMode.h"
 #include "../network/PacketProtocol.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <iostream>
@@ -104,7 +105,7 @@ namespace {
 	constexpr const char* kRnvpRemoteIp = "127.0.0.1";
 	constexpr uint16_t kRnvpRemotePort = kRnvpListenPort;
 
-	std::vector<uint8_t> ResizeRgbaNearest(
+	std::vector<uint8_t> ResizeRgbaBilinear(
 		const std::vector<uint8_t>& src,
 		uint32_t srcWidth,
 		uint32_t srcHeight,
@@ -134,30 +135,54 @@ namespace {
 		);
 
 		for (uint32_t y = 0; y < dstHeight; ++y) {
-			const uint32_t srcY =
-				std::min<uint32_t>(
-					srcHeight - 1u,
-					static_cast<uint32_t>(
-						(static_cast<uint64_t>(y) * srcHeight) / dstHeight
-					)
-				);
+			const double srcYf =
+				dstHeight <= 1
+				? 0.0
+				: (static_cast<double>(y) * static_cast<double>(srcHeight - 1u)) /
+					static_cast<double>(dstHeight - 1u);
+			const uint32_t y0 =
+				(std::min<uint32_t>)(srcHeight - 1u, static_cast<uint32_t>(srcYf));
+			const uint32_t y1 = (std::min<uint32_t>)(srcHeight - 1u, y0 + 1u);
+			const double wy = srcYf - static_cast<double>(y0);
 
 			for (uint32_t x = 0; x < dstWidth; ++x) {
-				const uint32_t srcX =
-					std::min<uint32_t>(
-						srcWidth - 1u,
-						static_cast<uint32_t>(
-							(static_cast<uint64_t>(x) * srcWidth) / dstWidth
-						)
-					);
-
-				const size_t srcIndex =
-					(static_cast<size_t>(srcY) * srcWidth + srcX) * 4u;
-
 				const size_t dstIndex =
 					(static_cast<size_t>(y) * dstWidth + x) * 4u;
 
-				std::memcpy(dst.data() + dstIndex, src.data() + srcIndex, 4u);
+				const double srcXf =
+					dstWidth <= 1
+					? 0.0
+					: (static_cast<double>(x) * static_cast<double>(srcWidth - 1u)) /
+						static_cast<double>(dstWidth - 1u);
+				const uint32_t x0 =
+					(std::min<uint32_t>)(srcWidth - 1u, static_cast<uint32_t>(srcXf));
+				const uint32_t x1 = (std::min<uint32_t>)(srcWidth - 1u, x0 + 1u);
+				const double wx = srcXf - static_cast<double>(x0);
+
+				const size_t i00 =
+					(static_cast<size_t>(y0) * srcWidth + x0) * 4u;
+				const size_t i10 =
+					(static_cast<size_t>(y0) * srcWidth + x1) * 4u;
+				const size_t i01 =
+					(static_cast<size_t>(y1) * srcWidth + x0) * 4u;
+				const size_t i11 =
+					(static_cast<size_t>(y1) * srcWidth + x1) * 4u;
+
+				for (uint32_t c = 0; c < 4u; ++c) {
+					const double top =
+						static_cast<double>(src[i00 + c]) * (1.0 - wx) +
+						static_cast<double>(src[i10 + c]) * wx;
+					const double bottom =
+						static_cast<double>(src[i01 + c]) * (1.0 - wx) +
+						static_cast<double>(src[i11 + c]) * wx;
+					const double value = top * (1.0 - wy) + bottom * wy;
+					dst[dstIndex + c] =
+						static_cast<uint8_t>(std::clamp(
+							static_cast<int>(std::lround(value)),
+							0,
+							255
+						));
+				}
 			}
 		}
 
@@ -667,8 +692,8 @@ int AppMain::Run() {
 		instancingResource.Get(),
 		instancingSrvCPU,
 		instancingSrvGPU);
-	const UINT texWidth = 320;
-	const UINT texHeight = 180;
+	const UINT texWidth = 640;
+	const UINT texHeight = 360;
 	DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	ComPtr<ID3D12Resource> texture =
 		CreateTextureResourceResolution(device, texWidth, texHeight, format);
@@ -741,7 +766,7 @@ int AppMain::Run() {
 
 	::audio::SoundData soundData1 = audio.LoadWave("Resources/Alarm01.wav");
 
-	audio.PlayWave(soundData1);
+	//audio.PlayWave(soundData1);
 	DebugCamera debugCamera;
 	debugCamera.Initialize();
 
@@ -791,6 +816,7 @@ int AppMain::Run() {
 	);
 
 	auto adaptiveController = std::make_unique<net::AdaptiveStreamingController>();
+	adaptiveController->SetControlMode(net::AdaptiveControlMode::FixedQuality);
 	net::NetworkExperimentRunner networkExperimentRunner;
 
 	if (net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
@@ -1000,7 +1026,10 @@ int AppMain::Run() {
 				: "";
 			stats.networkExperimentAdaptiveMode =
 				experiment->IsActive()
-				? net::ToString(experiment->CurrentAdaptiveControlMode())
+				? std::string(net::ToString(
+					experiment->CurrentAdaptiveControlMode())) +
+					" / " +
+					net::ToString(experiment->CurrentCongestionControlMode())
 				: "";
 			stats.networkExperimentRemainingSec =
 				experiment->IsActive()
@@ -1193,6 +1222,14 @@ int AppMain::Run() {
 				runtimeState.networkExperimentMode &&
 				net::NetworkModeCanRunExperiment(networkRuntimeMode);
 			const bool receiverShouldRun = networkReceiveEnabled;
+			const bool stableBaselineMode =
+				networkRuntimeMode == net::NetworkRuntimeMode::Loopback &&
+				networkSendEnabled &&
+				networkReceiveEnabled &&
+				!networkExperimentEnabled &&
+				!networkExperimentRunner.IsActive() &&
+				networkManager &&
+				!networkManager->GetNetworkCondition().enabled;
 
 			if (udpReceiver &&
 				receiverShouldRun != receiverRuntimeActive) {
@@ -1237,6 +1274,8 @@ int AppMain::Run() {
 				if (adaptiveController) {
 					adaptiveController->SetControlMode(
 						networkExperimentRunner.CurrentAdaptiveControlMode());
+					adaptiveController->SetCongestionControlMode(
+						networkExperimentRunner.CurrentCongestionControlMode());
 				}
 
 				networkCsvLogger.SetScenarioName(
@@ -1247,8 +1286,15 @@ int AppMain::Run() {
 				if (experimentScenarioChanged &&
 					networkManager &&
 					networkSendEnabled) {
-					networkManager->SetNetworkCondition(
-						networkExperimentRunner.CurrentCondition());
+					networkManager->SetNetworkCondition(net::NetworkCondition{});
+				}
+				if (experimentScenarioChanged &&
+					adaptiveController) {
+					adaptiveController->SetControlMode(
+						net::AdaptiveControlMode::FixedQuality);
+					adaptiveController->SetCongestionControlMode(
+						net::CongestionControlMode::Hybrid);
+					adaptiveController->Reset();
 				}
 			}
 
@@ -1276,6 +1322,9 @@ int AppMain::Run() {
 						<< " mode="
 						<< net::ToString(
 							networkExperimentRunner.CurrentAdaptiveControlMode())
+						<< " congestionMode="
+						<< net::ToString(
+							networkExperimentRunner.CurrentCongestionControlMode())
 						<< " remainingSec="
 						<< networkExperimentRunner.RemainingSec();
 				}
@@ -1313,10 +1362,19 @@ int AppMain::Run() {
 				}
 
 				if (networkManager) {
-					networkManager->SetPacingTargetBitrateKbps(
+					uint32_t pacingTargetBitrateKbps =
 						static_cast<uint32_t>(
 							(std::max)(1, adaptiveState.targetBitrateKbps)
-						)
+						);
+					if (stableBaselineMode) {
+						pacingTargetBitrateKbps =
+							(std::max)(
+								pacingTargetBitrateKbps,
+								uint32_t{ 50000 }
+							);
+					}
+					networkManager->SetPacingTargetBitrateKbps(
+						pacingTargetBitrateKbps
 					);
 				}
 
@@ -1378,7 +1436,7 @@ int AppMain::Run() {
 					}
 
 					std::vector<uint8_t> adaptiveVideoFrame =
-						ResizeRgbaNearest(
+						ResizeRgbaBilinear(
 							videoFrame,
 							texWidth,
 							texHeight,
@@ -1502,6 +1560,19 @@ int AppMain::Run() {
 					receiverStats.deadlineNackMissingChunks;
 				adaptiveInput.lastOutputQueueDropReason =
 					receiverStats.lastOutputQueueDropReason;
+				const net::PacketPacerStats pacingStats =
+					networkManager->GetPacingStats();
+				adaptiveInput.pacingEnabled = pacingStats.enabled;
+				adaptiveInput.pacingDeadlineDroppedPackets =
+					pacingStats.deadlineDroppedPackets;
+				adaptiveInput.pacingCurrentQueueDelayMs =
+					pacingStats.currentQueueDelayMs;
+				adaptiveInput.pacingMaxQueueDelayMs =
+					pacingStats.maxQueueDelayMs;
+				adaptiveInput.networkConditionEnabled =
+					networkManager->GetNetworkCondition().enabled;
+				adaptiveInput.networkExperimentActive =
+					networkExperimentRunner.IsActive();
 				const net::BandwidthEstimatorStats bandwidthStats =
 					networkManager->GetBandwidthEstimatorStats();
 				adaptiveInput.estimatedBandwidthBps =

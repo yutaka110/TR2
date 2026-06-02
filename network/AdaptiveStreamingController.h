@@ -13,7 +13,8 @@ namespace net {
         Rtt,
         Bandwidth,
         DecodeLoad,
-        DisplayLoad
+        DisplayLoad,
+        PacingQueue
     };
 
     const char* ToString(AdaptiveDegradationCause cause);
@@ -49,6 +50,12 @@ namespace net {
         uint64_t deadlineNackSentFrames = 0;
         uint64_t deadlineNackMissingChunks = 0;
         std::string lastOutputQueueDropReason;
+        bool pacingEnabled = false;
+        uint64_t pacingDeadlineDroppedPackets = 0;
+        double pacingCurrentQueueDelayMs = 0.0;
+        double pacingMaxQueueDelayMs = 0.0;
+        bool networkConditionEnabled = false;
+        bool networkExperimentActive = false;
         uint32_t estimatedBandwidthBps = 0;
         uint32_t deliveryRateBps = 0;
         double bandwidthQueueDelayMs = 0.0;
@@ -62,8 +69,8 @@ namespace net {
         int targetJpegQuality = 85;
         int targetFps = 30;
         int targetBitrateKbps = 6000;
-        int targetWidth = 320;
-        int targetHeight = 180;
+        int targetWidth = 640;
+        int targetHeight = 360;
         int bandwidthCeilingKbps = 12000;
 
         bool qualityChanged = false;
@@ -143,6 +150,22 @@ namespace net {
             uint64_t deadlineNackDelta,
             uint64_t deadlineNackMissingChunkDelta
         ) const;
+        double EffectiveAckMissingRate(
+            const AdaptiveStreamingInput& input
+        ) const;
+        double EffectivePacketLossRate(
+            const AdaptiveStreamingInput& input
+        ) const;
+        double EffectiveBandwidthLossTrend(
+            const AdaptiveStreamingInput& input
+        ) const;
+        bool ShouldSuppressPacingDropForQuality(
+            const AdaptiveStreamingInput& input
+        ) const;
+        bool HasPacingDropPressure(
+            const AdaptiveStreamingInput& input,
+            uint64_t pacingDeadlineDropDelta
+        ) const;
         bool HasDelayPressure(const AdaptiveStreamingInput& input) const;
         bool HasCongestionPressure(
             const AdaptiveStreamingInput& input,
@@ -164,6 +187,9 @@ namespace net {
             const AdaptiveStreamingInput& input
         ) const;
         bool HasBandwidthPressure(
+            const AdaptiveStreamingInput& input
+        ) const;
+        bool HasBandwidthCongestionEvidence(
             const AdaptiveStreamingInput& input
         ) const;
         bool IsBandwidthRecoveryAllowed(
@@ -209,6 +235,8 @@ namespace net {
         bool hasNackCounters_ = false;
         uint64_t lastDeadlineNackSentFrames_ = 0;
         uint64_t lastDeadlineNackMissingChunks_ = 0;
+        bool hasPacingCounters_ = false;
+        uint64_t lastPacingDeadlineDroppedPackets_ = 0;
         int activeBandwidthCeilingKbps_ = 12000;
 
         static constexpr int kMinQuality = 35;

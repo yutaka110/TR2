@@ -66,11 +66,17 @@ namespace net {
             std::string context;
             uint64_t enqueueTimeUs = 0;
             uint64_t deadlineUs = 0;
+            bool hasRnvpDataSequence = false;
+            uint32_t rnvpDataSequence = 0;
         };
 
         void SendLoop();
         uint64_t NowMicroseconds() const;
         uint64_t CalculateIntervalUs(size_t packetBytes) const;
+        void RefillPacingCreditLocked(uint64_t nowUs);
+        uint64_t CalculateCreditWaitUsLocked(size_t packetBytes) const;
+        void FillRnvpDataSequence(QueuedPacket& packet) const;
+        bool ShouldSendHighPriorityFirstLocked() const;
         uint32_t QueueSizeLocked() const;
         void DropOneForOverflowLocked(PacketPacingPriority incomingPriority);
 
@@ -91,9 +97,13 @@ namespace net {
         PacketPacerStats stats_{};
 
         uint64_t nextSendTimeUs_ = 0;
+        uint64_t lastCreditUpdateUs_ = 0;
+        double pacingCreditBytes_ = 0.0;
 
         static constexpr uint32_t kMinBitrateBps = 100000;
         static constexpr uint32_t kMaxQueuedPackets = 512;
+        static constexpr double kMaxBurstWindowSec = 0.020;
+        static constexpr double kInitialBurstWindowSec = 0.005;
     };
 
 } // namespace net

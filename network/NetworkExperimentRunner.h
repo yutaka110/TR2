@@ -15,6 +15,8 @@ namespace net {
         NetworkCondition condition{};
         AdaptiveControlMode adaptiveControlMode =
             AdaptiveControlMode::QoeDeadlineAdaptive;
+        CongestionControlMode congestionControlMode =
+            CongestionControlMode::Hybrid;
         double durationSec = 30.0;
     };
 
@@ -29,6 +31,7 @@ namespace net {
         const NetworkExperimentScenario& CurrentScenario() const;
         const NetworkCondition& CurrentCondition() const;
         AdaptiveControlMode CurrentAdaptiveControlMode() const;
+        CongestionControlMode CurrentCongestionControlMode() const;
         const std::string& CurrentScenarioName() const;
         const std::string& CurrentNetworkScenarioName() const;
         double RemainingSec() const;
