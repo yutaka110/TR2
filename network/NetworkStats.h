@@ -129,6 +129,13 @@ namespace net {
 		uint64_t adaptiveRawFrameBytes = 0;
 		uint64_t adaptiveEncodedFrameBytes = 0;
 		double adaptiveCompressionRatio = 0.0;
+		double captureFps = 0.0;
+		double encodeMs = 0.0;
+		double sendFrameIntervalMs = 0.0;
+		bool cameraFrameReady = false;
+		double receiveJpegDecodeMs = 0.0;
+		double textureUploadMs = 0.0;
+		double presentGpuWaitMs = 0.0;
 
 		bool adaptiveQualityChanged = false;
 		bool adaptiveFpsChanged = false;

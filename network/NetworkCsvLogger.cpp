@@ -219,6 +219,13 @@ namespace {
             << stats.adaptiveRawFrameBytes << ','
             << stats.adaptiveEncodedFrameBytes << ','
             << stats.adaptiveCompressionRatio << ','
+            << stats.captureFps << ','
+            << stats.encodeMs << ','
+            << stats.sendFrameIntervalMs << ','
+            << (stats.cameraFrameReady ? 1 : 0) << ','
+            << stats.receiveJpegDecodeMs << ','
+            << stats.textureUploadMs << ','
+            << stats.presentGpuWaitMs << ','
             << stats.adaptiveLastPacketLossRate << ','
             << stats.adaptiveLastReceiveFps << ','
             << stats.adaptiveLastDecodeFps << ','
@@ -346,6 +353,13 @@ namespace {
             << "rawFrameBytes,"
             << "encodedFrameBytes,"
             << "compressionRatio,"
+            << "captureFps,"
+            << "encodeMs,"
+            << "sendFrameIntervalMs,"
+            << "cameraFrameReady,"
+            << "receiveJpegDecodeMs,"
+            << "textureUploadMs,"
+            << "presentGpuWaitMs,"
             << "adaptiveInputPacketLossRate,"
             << "adaptiveInputReceiveFps,"
             << "adaptiveInputDecodeFps,"
