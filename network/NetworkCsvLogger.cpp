@@ -226,6 +226,8 @@ namespace {
             << stats.receiveJpegDecodeMs << ','
             << stats.textureUploadMs << ','
             << stats.presentGpuWaitMs << ','
+            << stats.frameResourceWaitMs << ','
+            << stats.presentMs << ','
             << stats.adaptiveLastPacketLossRate << ','
             << stats.adaptiveLastReceiveFps << ','
             << stats.adaptiveLastDecodeFps << ','
@@ -360,6 +362,8 @@ namespace {
             << "receiveJpegDecodeMs,"
             << "textureUploadMs,"
             << "presentGpuWaitMs,"
+            << "frameResourceWaitMs,"
+            << "presentMs,"
             << "adaptiveInputPacketLossRate,"
             << "adaptiveInputReceiveFps,"
             << "adaptiveInputDecodeFps,"

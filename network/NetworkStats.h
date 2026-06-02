@@ -136,6 +136,8 @@ namespace net {
 		double receiveJpegDecodeMs = 0.0;
 		double textureUploadMs = 0.0;
 		double presentGpuWaitMs = 0.0;
+		double frameResourceWaitMs = 0.0;
+		double presentMs = 0.0;
 
 		bool adaptiveQualityChanged = false;
 		bool adaptiveFpsChanged = false;
