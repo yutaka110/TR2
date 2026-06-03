@@ -14,6 +14,8 @@ namespace net {
         Bandwidth,
         DecodeLoad,
         DisplayLoad,
+        FrameFreshness,
+        RecoveryDeadline,
         PacingQueue
     };
 
@@ -49,6 +51,14 @@ namespace net {
         uint64_t outputQueueDroppedFrames = 0;
         uint64_t deadlineNackSentFrames = 0;
         uint64_t deadlineNackMissingChunks = 0;
+        uint64_t deadlineNackExpiredDroppedFrames = 0;
+        uint64_t deadlineNackExpiredAfterNackFrames = 0;
+        uint64_t ackStaleDroppedFrames = 0;
+        uint64_t ackKeyFrameRequests = 0;
+        uint64_t receiveFreshnessDroppedFrames = 0;
+        double receiveDecodeInputFrameAgeMs = 0.0;
+        double receiveLatestDecodedFrameAgeMs = 0.0;
+        double receiveFreshnessDropThresholdMs = 0.0;
         std::string lastOutputQueueDropReason;
         bool pacingEnabled = false;
         uint64_t pacingDeadlineDroppedPackets = 0;
@@ -97,6 +107,14 @@ namespace net {
         double lastBandwidthRttTrendMs = 0.0;
         double lastBandwidthLossTrend = 0.0;
         double lastBandwidthJitterTrendMs = 0.0;
+        uint64_t lastDeadlineNackExpiredDroppedFrames = 0;
+        uint64_t lastDeadlineNackExpiredAfterNackFrames = 0;
+        uint64_t lastAckStaleDroppedFrames = 0;
+        uint64_t lastAckKeyFrameRequests = 0;
+        uint64_t lastReceiveFreshnessDroppedFrames = 0;
+        double lastReceiveDecodeInputFrameAgeMs = 0.0;
+        double lastReceiveLatestDecodedFrameAgeMs = 0.0;
+        double lastReceiveFreshnessDropThresholdMs = 0.0;
         AdaptiveDegradationCause lastDegradationCause =
             AdaptiveDegradationCause::None;
         AdaptiveControlMode controlMode =
@@ -200,12 +218,18 @@ namespace net {
             uint64_t deadlineDropDelta,
             uint64_t outputQueueDropDelta,
             uint64_t deadlineNackDelta,
-            uint64_t deadlineNackMissingChunkDelta
+            uint64_t deadlineNackMissingChunkDelta,
+            uint64_t recoveryDeadlineDropDelta,
+            uint64_t retransmitStaleDropDelta,
+            uint64_t freshnessDropDelta
         ) const;
         double CalculateQoeScore(
             const AdaptiveStreamingInput& input,
             uint64_t deadlineDropDelta,
-            uint64_t outputQueueDropDelta
+            uint64_t outputQueueDropDelta,
+            uint64_t recoveryDeadlineDropDelta,
+            uint64_t retransmitStaleDropDelta,
+            uint64_t freshnessDropDelta
         ) const;
 
         int ClampQuality(int value) const;
@@ -228,6 +252,11 @@ namespace net {
         double lossOnlyBadTimeSec_ = 0.0;
         double cooldownSec_ = 0.0;
         double observedTimeSec_ = 0.0;
+        double degradationCauseHoldSec_ = 0.0;
+        double qoeHoldSec_ = 0.0;
+        double heldQoeScore_ = 0.0;
+        AdaptiveDegradationCause heldDegradationCause_ =
+            AdaptiveDegradationCause::None;
 
         bool hasDropCounters_ = false;
         uint64_t lastDeadlineDroppedFrames_ = 0;
@@ -235,6 +264,12 @@ namespace net {
         bool hasNackCounters_ = false;
         uint64_t lastDeadlineNackSentFrames_ = 0;
         uint64_t lastDeadlineNackMissingChunks_ = 0;
+        uint64_t lastDeadlineNackExpiredDroppedFrames_ = 0;
+        uint64_t lastDeadlineNackExpiredAfterNackFrames_ = 0;
+        uint64_t lastAckStaleDroppedFrames_ = 0;
+        uint64_t lastAckKeyFrameRequests_ = 0;
+        bool hasFreshnessCounters_ = false;
+        uint64_t lastReceiveFreshnessDroppedFrames_ = 0;
         bool hasPacingCounters_ = false;
         uint64_t lastPacingDeadlineDroppedPackets_ = 0;
         int activeBandwidthCeilingKbps_ = 12000;

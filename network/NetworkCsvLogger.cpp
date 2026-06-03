@@ -173,6 +173,10 @@ namespace {
             << stats.ackCount << ','
             << stats.lastAckMissingRate << ','
             << stats.ackRetransmittedFrames << ','
+            << stats.ackRetransmittedChunks << ','
+            << stats.ackStaleDroppedFrames << ','
+            << stats.ackKeyFrameRequests << ','
+            << (stats.ackKeyFramePending ? 1 : 0) << ','
             << (stats.pacingEnabled ? 1 : 0) << ','
             << stats.pacingTargetBitrateBps << ','
             << stats.pacingQueuedPackets << ','
@@ -224,10 +228,28 @@ namespace {
             << stats.sendFrameIntervalMs << ','
             << (stats.cameraFrameReady ? 1 : 0) << ','
             << stats.receiveJpegDecodeMs << ','
+            << stats.receiveDecodeWorkerFps << ','
+            << stats.receiveDecodeWorkerFrames << ','
+            << stats.receiveDecodeOverwrittenFrames << ','
+            << stats.receiveDecodeQueueDroppedFrames << ','
+            << stats.receiveDecodeRenderOverwriteFrames << ','
+            << stats.receiveDecodeFailures << ','
+            << stats.receiveFreshnessDroppedFrames << ','
+            << stats.receiveDecodeInputFrameAgeMs << ','
+            << stats.receiveLatestDecodedFrameAgeMs << ','
+            << stats.receiveFreshnessDropThresholdMs << ','
+            << EscapeCsv(stats.receiveDecodeLastDropReason) << ','
+            << stats.receiveUploadBufferWaitMs << ','
             << stats.textureUploadMs << ','
             << stats.presentGpuWaitMs << ','
-            << stats.frameResourceWaitMs << ','
+            << stats.renderFramePacingWaitMs << ','
+            << stats.waitableSwapChainWaitMs << ','
             << stats.presentMs << ','
+            << stats.presentSyncInterval << ','
+            << (stats.lowLatencyPresentMode ? 1 : 0) << ','
+            << (stats.waitableSwapChainPacingEnabled ? 1 : 0) << ','
+            << (stats.waitableSwapChainAvailable ? 1 : 0) << ','
+            << stats.swapChainBufferCount << ','
             << stats.adaptiveLastPacketLossRate << ','
             << stats.adaptiveLastReceiveFps << ','
             << stats.adaptiveLastDecodeFps << ','
@@ -309,6 +331,10 @@ namespace {
             << "ackCount,"
             << "lastAckMissingRate,"
             << "ackRetransmittedFrames,"
+            << "ackRetransmittedChunks,"
+            << "ackStaleDroppedFrames,"
+            << "ackKeyFrameRequests,"
+            << "ackKeyFramePending,"
             << "pacingEnabled,"
             << "pacingTargetBitrateBps,"
             << "pacingQueuedPackets,"
@@ -360,10 +386,28 @@ namespace {
             << "sendFrameIntervalMs,"
             << "cameraFrameReady,"
             << "receiveJpegDecodeMs,"
+            << "receiveDecodeWorkerFps,"
+            << "receiveDecodeWorkerFrames,"
+            << "receiveDecodeOverwrittenFrames,"
+            << "receiveDecodeQueueDroppedFrames,"
+            << "receiveDecodeRenderOverwriteFrames,"
+            << "receiveDecodeFailures,"
+            << "receiveFreshnessDroppedFrames,"
+            << "receiveDecodeInputFrameAgeMs,"
+            << "receiveLatestDecodedFrameAgeMs,"
+            << "receiveFreshnessDropThresholdMs,"
+            << "receiveDecodeLastDropReason,"
+            << "receiveUploadBufferWaitMs,"
             << "textureUploadMs,"
             << "presentGpuWaitMs,"
-            << "frameResourceWaitMs,"
+            << "renderFramePacingWaitMs,"
+            << "waitableSwapChainWaitMs,"
             << "presentMs,"
+            << "presentSyncInterval,"
+            << "lowLatencyPresentMode,"
+            << "waitableSwapChainPacingEnabled,"
+            << "waitableSwapChainAvailable,"
+            << "swapChainBufferCount,"
             << "adaptiveInputPacketLossRate,"
             << "adaptiveInputReceiveFps,"
             << "adaptiveInputDecodeFps,"

@@ -15,6 +15,11 @@ namespace graphics {
         bool Create(core::Device& dev, HWND hwnd, UINT width, UINT height, UINT bufferCount = 2);
         void Resize(core::Device& dev, UINT width, UINT height);
         void Present(core::Device& dev, UINT syncInterval = 1);
+        bool SetMaximumFrameLatency(UINT maxLatency);
+        HANDLE FrameLatencyWaitableObject() const { return frameLatencyWaitableObject_; }
+        bool HasFrameLatencyWaitableObject() const {
+            return frameLatencyWaitableObject_ != nullptr;
+        }
 
         UINT CurrentIndex() const { return swapChain_->GetCurrentBackBufferIndex(); }
         UINT BufferCount()  const { return static_cast<UINT>(backBuffers_.size()); }
@@ -32,6 +37,7 @@ namespace graphics {
         Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>     rtvHeap_;
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> backBuffers_;
         std::vector<D3D12_CPU_DESCRIPTOR_HANDLE>         rtvHandles_;
+        HANDLE frameLatencyWaitableObject_ = nullptr;
         DXGI_FORMAT format_ = DXGI_FORMAT_R8G8B8A8_UNORM;
         UINT bufferCount_ = 2;
         bool allowTearing_ = false;

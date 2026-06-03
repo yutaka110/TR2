@@ -87,8 +87,7 @@ namespace net {
             frame.firstReceiveTimeUs = receiveTimeUs;
             frame.sendTimeUs = parsed.sendTimeUs;
             frame.lastUpdateTimeUs = receiveTimeUs;
-            frame.recoveryExpireTimeUs =
-                receiveTimeUs + kDefaultRecoveryExpireUs;
+            frame.recoveryExpireTimeUs = 0;
             frame.recoveryState = FrameRecoveryState::Waiting;
 
             frame.chunks.resize(parsed.chunkCount);
@@ -200,8 +199,13 @@ namespace net {
             }
 
             if (frame.recoveryExpireTimeUs == 0) {
+                uint64_t recoveryBaseTimeUs = frame.sendTimeUs;
+                if (recoveryBaseTimeUs == 0 ||
+                    frame.firstReceiveTimeUs < recoveryBaseTimeUs) {
+                    recoveryBaseTimeUs = frame.firstReceiveTimeUs;
+                }
                 frame.recoveryExpireTimeUs =
-                    frame.firstReceiveTimeUs + recoveryExpireUs;
+                    recoveryBaseTimeUs + recoveryExpireUs;
             }
 
             const bool expiredByLifetime =

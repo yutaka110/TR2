@@ -48,7 +48,7 @@ bool EngineContext::Initialize(HWND hwnd, UINT width, UINT height, bool enableDe
     assert(device != nullptr);
 
     // SwapChain
-    if (!swapChain_.Create(dev_, hwnd, width, height, /*buffers*/ 2)) {
+    if (!swapChain_.Create(dev_, hwnd, width, height, /*buffers*/ 3)) {
         return false;
     }
 

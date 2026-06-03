@@ -3,11 +3,61 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <vector>
 
 namespace net {
+namespace {
+
+    constexpr uint64_t kDefaultFreshnessDropThresholdUs = 120000;
+    constexpr uint64_t kRecoveryFreshnessSlackUs = 25000;
+    constexpr uint64_t kMinimumRecoveryExpireUs = 40000;
+
+    uint64_t FreshnessDropThresholdUs() {
+        static const uint64_t thresholdUs = []() {
+            char text[64]{};
+            const DWORD length = GetEnvironmentVariableA(
+                "RNVP_FRESHNESS_DROP_THRESHOLD_MS",
+                text,
+                static_cast<DWORD>(sizeof(text)));
+            if (length == 0 || length >= sizeof(text)) {
+                return kDefaultFreshnessDropThresholdUs;
+            }
+
+            char* end = nullptr;
+            const double valueMs = strtod(text, &end);
+            if (end == text || valueMs <= 0.0) {
+                return kDefaultFreshnessDropThresholdUs;
+            }
+
+            return static_cast<uint64_t>(valueMs * 1000.0);
+        }();
+        return thresholdUs;
+    }
+
+    uint64_t NackRecoveryExpireUs() {
+        const uint64_t thresholdUs = FreshnessDropThresholdUs();
+        if (thresholdUs <= kRecoveryFreshnessSlackUs + kMinimumRecoveryExpireUs) {
+            return (std::max)(kMinimumRecoveryExpireUs, thresholdUs / 2);
+        }
+
+        return thresholdUs - kRecoveryFreshnessSlackUs;
+    }
+
+    uint64_t NackInitialDeadlineUs(uint64_t defaultDeadlineUs) {
+        const uint64_t recoveryExpireUs = NackRecoveryExpireUs();
+        if (recoveryExpireUs <= kRecoveryFreshnessSlackUs) {
+            return recoveryExpireUs / 2;
+        }
+
+        return (std::min)(
+            defaultDeadlineUs,
+            recoveryExpireUs - kRecoveryFreshnessSlackUs);
+    }
+
+} // namespace
 
     UdpReceiver::UdpReceiver()
         : reassembler_(&stats_)
@@ -96,7 +146,9 @@ namespace net {
 
         uint32_t droppedByDeadline = 0;
         while (!completedFrames_.empty() &&
-            IsFramePastDisplayDeadline(completedFrames_.front(), NowMicroseconds())) {
+            IsFramePastReceiverSafetyDeadline(
+                completedFrames_.front(),
+                NowMicroseconds())) {
             completedFrames_.pop_front();
             droppedByDeadline++;
         }
@@ -206,7 +258,7 @@ namespace net {
         );
 
         const uint32_t deadlineDrops =
-            jitterBuffer_.DropExpiredFrames(nowUs, kMaxDisplayLatencyUs);
+            jitterBuffer_.DropExpiredFrames(nowUs, kReceiverSafetyExpireUs);
 
         if (deadlineDrops > 0) {
             stats_.OnDeadlineDroppedFrames(deadlineDrops);
@@ -220,7 +272,7 @@ namespace net {
         uint32_t releasedFramesThisDrain = 0;
 
         const uint32_t deadlineDrops =
-            jitterBuffer_.DropExpiredFrames(nowUs, kMaxDisplayLatencyUs);
+            jitterBuffer_.DropExpiredFrames(nowUs, kReceiverSafetyExpireUs);
 
         if (deadlineDrops > 0) {
             stats_.OnDeadlineDroppedFrames(deadlineDrops);
@@ -229,7 +281,7 @@ namespace net {
         while (jitterBuffer_.TryPopReadyFrame(nowUs, readyFrame)) {
             stats_.OnJitterBufferReleased();
 
-            if (IsFramePastDisplayDeadline(readyFrame, nowUs)) {
+            if (IsFramePastReceiverSafetyDeadline(readyFrame, nowUs)) {
                 stats_.OnDeadlineDroppedFrames(1);
                 readyFrame = CompletedFrame{};
                 continue;
@@ -295,7 +347,7 @@ namespace net {
         }
     }
 
-    bool UdpReceiver::IsFramePastDisplayDeadline(
+    bool UdpReceiver::IsFramePastReceiverSafetyDeadline(
         const CompletedFrame& frame,
         uint64_t nowUs
     ) const {
@@ -306,7 +358,7 @@ namespace net {
         }
 
         return nowUs > baseTimeUs &&
-            nowUs - baseTimeUs > kMaxDisplayLatencyUs;
+            nowUs - baseTimeUs > kReceiverSafetyExpireUs;
     }
 
     double UdpReceiver::CalculateFrameAgeMs(
@@ -822,12 +874,16 @@ namespace net {
             return;
         }
 
+        const uint64_t recoveryExpireUs = NackRecoveryExpireUs();
+        const uint64_t nackDeadlineUs =
+            NackInitialDeadlineUs(kFrameNackDeadlineUs);
+
         FrameRecoveryActions recoveryActions =
             reassembler_.CollectRecoveryActions(
                 nowUs,
-                kFrameNackDeadlineUs,
+                nackDeadlineUs,
                 kFrameNackIntervalUs,
-                kFrameNackRecoveryExpireUs,
+                recoveryExpireUs,
                 kFrameNackMinRecoverySlackUs,
                 kMaxDeadlineNacksPerFrame
             );

@@ -45,6 +45,8 @@ struct AppRuntimeState {
     // RNVPで受信した映像テクスチャをゲーム画面内のSpriteに表示する
     bool showReceivedVideoInGame = true;
     bool showReceivedVideoPreviewWindow = true;
+    bool lowLatencyPresentMode = false;
+    bool waitableSwapChainPacingEnabled = false;
     bool showImGui = true;
     bool networkExperimentMode = false;
     net::NetworkRuntimeMode networkRuntimeMode =

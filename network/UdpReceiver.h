@@ -52,7 +52,7 @@ namespace net {
         void DrainReadyJitterBuffer(uint64_t nowUs);
 
         void UpdateJitterBufferAutoMode(uint64_t nowUs);
-        bool IsFramePastDisplayDeadline(
+        bool IsFramePastReceiverSafetyDeadline(
             const CompletedFrame& frame,
             uint64_t nowUs
         ) const;
@@ -166,7 +166,9 @@ namespace net {
 
         static constexpr int kReceiveBufferSize = 4096;
         static constexpr size_t kMaxQueuedFrames = 4;
-        static constexpr uint64_t kMaxDisplayLatencyUs = 150000;
+        // Transport/reassembly safety valve only. Video freshness is owned by
+        // NetworkVideoReceiver so low-latency policy is measured separately.
+        static constexpr uint64_t kReceiverSafetyExpireUs = 1000000;
         static constexpr uint64_t kFrameNackDeadlineUs = 80000;
         static constexpr uint64_t kFrameNackIntervalUs = 40000;
         static constexpr uint64_t kFrameNackRecoveryExpireUs = 140000;
