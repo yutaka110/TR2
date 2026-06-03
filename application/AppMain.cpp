@@ -18,6 +18,8 @@
 #include <codecvt>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 #include <d3d12.h>
 #include <dbghelp.h>
 #include <dxcapi.h>
@@ -77,6 +79,7 @@
 #include "../network/NetworkExperimentReporter.h"
 #include "../network/NetworkExperimentRunner.h"
 #include "../network/NetworkRuntimeMode.h"
+#include "../network/NetworkVideoReceiver.h"
 #include "../network/PacketProtocol.h"
 #include <algorithm>
 #include <cmath>
@@ -105,6 +108,71 @@ namespace {
 	constexpr uint16_t kRnvpListenPort = 50000;
 	constexpr const char* kRnvpRemoteIp = "127.0.0.1";
 	constexpr uint16_t kRnvpRemotePort = kRnvpListenPort;
+	constexpr uint32_t kReceivedVideoUploadBufferCount = 3;
+
+	std::string ToLowerAscii(std::string value) {
+		std::transform(
+			value.begin(),
+			value.end(),
+			value.begin(),
+			[](unsigned char c) {
+				return static_cast<char>(std::tolower(c));
+			});
+		return value;
+	}
+
+	bool TryReadEnvString(const char* name, std::string& outValue) {
+		char buffer[64]{};
+		const DWORD length = GetEnvironmentVariableA(
+			name,
+			buffer,
+			static_cast<DWORD>(sizeof(buffer)));
+		if (length == 0 || length >= sizeof(buffer)) {
+			return false;
+		}
+
+		outValue.assign(buffer, length);
+		return true;
+	}
+
+	net::AdaptiveControlMode ParseAdaptiveControlModeEnv(
+		const std::string& value,
+		net::AdaptiveControlMode fallback
+	) {
+		const std::string mode = ToLowerAscii(value);
+		if (mode == "0" || mode == "fixed" || mode == "fixedquality" ||
+			mode == "fixed-quality") {
+			return net::AdaptiveControlMode::FixedQuality;
+		}
+		if (mode == "1" || mode == "loss" || mode == "lossreactive" ||
+			mode == "loss-reactive") {
+			return net::AdaptiveControlMode::LossReactive;
+		}
+		if (mode == "2" || mode == "qoe" || mode == "deadline" ||
+			mode == "qoe-deadline" || mode == "qoedeadlineadaptive") {
+			return net::AdaptiveControlMode::QoeDeadlineAdaptive;
+		}
+		return fallback;
+	}
+
+	net::CongestionControlMode ParseCongestionControlModeEnv(
+		const std::string& value,
+		net::CongestionControlMode fallback
+	) {
+		const std::string mode = ToLowerAscii(value);
+		if (mode == "0" || mode == "loss" || mode == "lossbased" ||
+			mode == "loss-based") {
+			return net::CongestionControlMode::LossBased;
+		}
+		if (mode == "1" || mode == "delay" || mode == "delaybased" ||
+			mode == "delay-based") {
+			return net::CongestionControlMode::DelayBased;
+		}
+		if (mode == "2" || mode == "hybrid") {
+			return net::CongestionControlMode::Hybrid;
+		}
+		return fallback;
+	}
 
 	std::vector<uint8_t> ResizeRgbaBilinear(
 		const std::vector<uint8_t>& src,
@@ -221,17 +289,6 @@ namespace {
 		return payload;
 	}
 
-	void UpdateTelemetryEwma(double& value, bool& hasValue, double sample) {
-		constexpr double kAlpha = 0.20;
-		if (!hasValue) {
-			value = sample;
-			hasValue = true;
-			return;
-		}
-
-		value = value * (1.0 - kAlpha) + sample * kAlpha;
-	}
-
 	std::vector<uint8_t> EncodeJpegFrame(
 		const std::vector<uint8_t>& rgba,
 		uint32_t width,
@@ -303,76 +360,6 @@ namespace {
 			bytes,
 			bytes + blob.GetBufferSize()
 		);
-	}
-
-	bool DecodeJpegFrameToRgba(
-		const std::vector<uint8_t>& jpeg,
-		std::vector<uint8_t>& outRgba,
-		uint32_t& outWidth,
-		uint32_t& outHeight) {
-		if (jpeg.empty()) {
-			return false;
-		}
-
-		DirectX::TexMetadata metadata{};
-		DirectX::ScratchImage decoded;
-		HRESULT hr = DirectX::LoadFromWICMemory(
-			jpeg.data(),
-			jpeg.size(),
-			DirectX::WIC_FLAGS_FORCE_RGB,
-			&metadata,
-			decoded
-		);
-
-		if (FAILED(hr)) {
-			static uint32_t decodeFailLogCount = 0;
-			if (decodeFailLogCount < 10) {
-				OutputDebugStringA("[NetworkVideoReceiver] JPEG decode failed.\n");
-				decodeFailLogCount++;
-			}
-			return false;
-		}
-
-		const DirectX::Image* image = decoded.GetImage(0, 0, 0);
-		if (image == nullptr || image->pixels == nullptr ||
-			image->width == 0 || image->height == 0) {
-			return false;
-		}
-
-		DirectX::ScratchImage converted;
-		if (image->format != DXGI_FORMAT_R8G8B8A8_UNORM) {
-			hr = DirectX::Convert(
-				*image,
-				DXGI_FORMAT_R8G8B8A8_UNORM,
-				DirectX::TEX_FILTER_DEFAULT,
-				0.0f,
-				converted
-			);
-
-			if (FAILED(hr)) {
-				return false;
-			}
-
-			image = converted.GetImage(0, 0, 0);
-			if (image == nullptr || image->pixels == nullptr) {
-				return false;
-			}
-		}
-
-		outWidth = static_cast<uint32_t>(image->width);
-		outHeight = static_cast<uint32_t>(image->height);
-		const size_t rowBytes = static_cast<size_t>(outWidth) * 4u;
-		outRgba.resize(rowBytes * static_cast<size_t>(outHeight));
-
-		for (uint32_t y = 0; y < outHeight; ++y) {
-			std::memcpy(
-				outRgba.data() + static_cast<size_t>(y) * rowBytes,
-				image->pixels + static_cast<size_t>(y) * image->rowPitch,
-				rowBytes
-			);
-		}
-
-		return true;
 	}
 }
 
@@ -701,6 +688,20 @@ int AppMain::Run() {
 	if (GetEnvironmentVariableA("TR2_NETWORK_EXPERIMENT_AUTO", nullptr, 0) > 0) {
 		runtimeState.networkExperimentMode = true;
 	}
+	if (char presentSyncBuffer[16]{};
+		GetEnvironmentVariableA(
+			"RNVP_PRESENT_SYNC_INTERVAL",
+			presentSyncBuffer,
+			static_cast<DWORD>(sizeof(presentSyncBuffer))) > 0) {
+		runtimeState.lowLatencyPresentMode =
+			std::atoi(presentSyncBuffer) == 0;
+	}
+	if (GetEnvironmentVariableA("RNVP_LOW_LATENCY_PRESENT", nullptr, 0) > 0) {
+		runtimeState.lowLatencyPresentMode = true;
+	}
+	if (GetEnvironmentVariableA("RNVP_WAITABLE_SWAPCHAIN", nullptr, 0) > 0) {
+		runtimeState.waitableSwapChainPacingEnabled = true;
+	}
 	if (!net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
 		runtimeState.showReceivedVideoInGame = false;
 		runtimeState.showReceivedVideoPreviewWindow = false;
@@ -810,7 +811,8 @@ int AppMain::Run() {
 		);
 	}
 
-	ComPtr<ID3D12Resource> receivedUploadBuffer;
+	std::vector<ComPtr<ID3D12Resource>> receivedUploadBuffers;
+	receivedUploadBuffers.reserve(kReceivedVideoUploadBufferCount);
 	{
 		D3D12_HEAP_PROPERTIES heapProps{};
 		heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -828,17 +830,22 @@ int AppMain::Run() {
 		bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 		bufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-		HRESULT hr = device->CreateCommittedResource(
-			&heapProps,
-			D3D12_HEAP_FLAG_NONE,
-			&bufferDesc,
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&receivedUploadBuffer)
-		);
+		for (uint32_t i = 0; i < kReceivedVideoUploadBufferCount; ++i) {
+			ComPtr<ID3D12Resource> uploadBuffer;
+			HRESULT hr = device->CreateCommittedResource(
+				&heapProps,
+				D3D12_HEAP_FLAG_NONE,
+				&bufferDesc,
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&uploadBuffer)
+			);
 
-		if (FAILED(hr)) {
-			OutputDebugStringA("[AppMain] Failed to create receivedUploadBuffer.\n");
+			if (FAILED(hr)) {
+				OutputDebugStringA("[AppMain] Failed to create receivedUploadBuffer.\n");
+				continue;
+			}
+			receivedUploadBuffers.push_back(std::move(uploadBuffer));
 		}
 	}
 
@@ -896,9 +903,74 @@ int AppMain::Run() {
 		kRnvpRemoteIp,
 		kRnvpRemotePort
 	);
+	{
+		auto readEnvDouble = [](const char* name, double fallback) {
+			char buffer[64]{};
+			const DWORD length = GetEnvironmentVariableA(
+				name,
+				buffer,
+				static_cast<DWORD>(sizeof(buffer)));
+			if (length == 0 || length >= sizeof(buffer)) {
+				return fallback;
+			}
+			char* end = nullptr;
+			const double value = std::strtod(buffer, &end);
+			return end != buffer ? value : fallback;
+			};
+		auto readEnvUint = [](const char* name, uint32_t fallback) {
+			char buffer[64]{};
+			const DWORD length = GetEnvironmentVariableA(
+				name,
+				buffer,
+				static_cast<DWORD>(sizeof(buffer)));
+			if (length == 0 || length >= sizeof(buffer)) {
+				return fallback;
+			}
+			char* end = nullptr;
+			const unsigned long value = std::strtoul(buffer, &end, 10);
+			return end != buffer ? static_cast<uint32_t>(value) : fallback;
+			};
+		const bool simEnvEnabled =
+			GetEnvironmentVariableA("RNVP_SIM_ENABLED", nullptr, 0) > 0;
+		if (simEnvEnabled && networkManager) {
+			net::NetworkCondition condition{};
+			condition.enabled = true;
+			condition.lossRate =
+				readEnvDouble("RNVP_SIM_LOSS_PERCENT", 0.0) / 100.0;
+			condition.duplicateRate =
+				readEnvDouble("RNVP_SIM_DUPLICATE_PERCENT", 0.0) / 100.0;
+			condition.reorderRate =
+				readEnvDouble("RNVP_SIM_REORDER_PERCENT", 0.0) / 100.0;
+			condition.minDelayMs =
+				readEnvUint("RNVP_SIM_MIN_DELAY_MS", 0);
+			condition.maxDelayMs =
+				readEnvUint("RNVP_SIM_MAX_DELAY_MS", condition.minDelayMs);
+			condition.burstLossLength =
+				readEnvUint("RNVP_SIM_BURST_LOSS_LENGTH", 0);
+			networkManager->SetNetworkCondition(condition);
+			OutputDebugStringA("[AppMain] RNVP network simulation enabled from environment.\n");
+		}
+	}
 
 	auto adaptiveController = std::make_unique<net::AdaptiveStreamingController>();
 	adaptiveController->SetControlMode(net::AdaptiveControlMode::FixedQuality);
+	{
+		std::string adaptiveModeEnv;
+		if (TryReadEnvString("RNVP_ADAPTIVE_CONTROL_MODE", adaptiveModeEnv)) {
+			adaptiveController->SetControlMode(
+				ParseAdaptiveControlModeEnv(
+					adaptiveModeEnv,
+					net::AdaptiveControlMode::FixedQuality));
+		}
+
+		std::string congestionModeEnv;
+		if (TryReadEnvString("RNVP_CONGESTION_CONTROL_MODE", congestionModeEnv)) {
+			adaptiveController->SetCongestionControlMode(
+				ParseCongestionControlModeEnv(
+					congestionModeEnv,
+					net::CongestionControlMode::Hybrid));
+		}
+	}
 	std::mutex adaptiveControllerMutex;
 	net::NetworkExperimentRunner networkExperimentRunner;
 	struct NetworkSendTelemetry {
@@ -915,16 +987,7 @@ int AppMain::Run() {
 		bool hasLastSendFrameTime = false;
 	};
 	NetworkSendTelemetry sendTelemetry;
-	struct NetworkReceiveDecodeTelemetry {
-		std::mutex mutex;
-		net::CompletedFrame latestDecodedFrame;
-		bool hasLatestDecodedFrame = false;
-		double jpegDecodeMs = 0.0;
-		bool hasJpegDecodeMs = false;
-		uint64_t decodedWorkerFrames = 0;
-		uint64_t overwrittenDecodedFrames = 0;
-	};
-	NetworkReceiveDecodeTelemetry receiveDecodeTelemetry;
+	net::NetworkVideoReceiver networkVideoReceiver;
 
 	if (net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
 		if (udpReceiver->Start(kRnvpListenPort)) {
@@ -960,7 +1023,7 @@ int AppMain::Run() {
 			experiment = &networkExperimentRunner,
 			runtimeState = &runtimeState,
 			sendTelemetry = &sendTelemetry,
-			receiveDecodeTelemetry = &receiveDecodeTelemetry,
+			videoReceiver = &networkVideoReceiver,
 			runLoop = &runLoop
 		]() {
 		net::NetworkStatsSnapshot stats{};
@@ -1181,11 +1244,33 @@ int AppMain::Run() {
 			runLoop->PopulateNetworkRenderTimings(stats);
 		}
 
-		if (receiveDecodeTelemetry) {
-			std::lock_guard<std::mutex> receiveDecodeLock(
-				receiveDecodeTelemetry->mutex);
+		if (videoReceiver) {
+			const net::NetworkVideoReceiverStats videoReceiverStats =
+				videoReceiver->GetStats();
 			stats.receiveJpegDecodeMs =
-				receiveDecodeTelemetry->jpegDecodeMs;
+				videoReceiverStats.jpegDecodeMs;
+			stats.receiveDecodeWorkerFps =
+				videoReceiverStats.decodeWorkerFps;
+			stats.receiveDecodeWorkerFrames =
+				videoReceiverStats.decodedFrames;
+			stats.receiveDecodeOverwrittenFrames =
+				videoReceiverStats.overwrittenFrames;
+			stats.receiveDecodeQueueDroppedFrames =
+				videoReceiverStats.decodeQueueDroppedFrames;
+			stats.receiveDecodeRenderOverwriteFrames =
+				videoReceiverStats.decodeRenderOverwriteFrames;
+			stats.receiveDecodeFailures =
+				videoReceiverStats.decodeFailures;
+			stats.receiveFreshnessDroppedFrames =
+				videoReceiverStats.freshnessDroppedFrames;
+			stats.receiveDecodeInputFrameAgeMs =
+				videoReceiverStats.decodeInputFrameAgeMs;
+			stats.receiveLatestDecodedFrameAgeMs =
+				videoReceiverStats.latestDecodedFrameAgeMs;
+			stats.receiveFreshnessDropThresholdMs =
+				videoReceiverStats.freshnessDropThresholdMs;
+			stats.receiveDecodeLastDropReason =
+				videoReceiverStats.lastDropReason;
 		}
 
 		return stats;
@@ -1283,36 +1368,20 @@ int AppMain::Run() {
 				);
 	runLoop.SetReceivedFrameProvider(
 		[
-			receiveDecodeTelemetry = &receiveDecodeTelemetry,
+			videoReceiver = &networkVideoReceiver,
 			runtimeState = &runtimeState
-		](net::CompletedFrame& outFrame) {
+		](net::DecodedVideoFrame& outFrame) {
 			if (!runtimeState ||
 				!net::NetworkModeCanReceiveVideo(
 					runtimeState->networkRuntimeMode)) {
 				return false;
 			}
 
-			std::lock_guard<std::mutex> lock(
-				receiveDecodeTelemetry->mutex);
-			if (!receiveDecodeTelemetry->hasLatestDecodedFrame) {
+			if (!videoReceiver) {
 				return false;
 			}
 
-			outFrame = std::move(
-				receiveDecodeTelemetry->latestDecodedFrame);
-			receiveDecodeTelemetry->hasLatestDecodedFrame = false;
-			return true;
-		}
-				);
-
-	// Report decode/display milestones back to the receiver-side network stats.
-	runLoop.SetNetworkFrameDecodeNotifier(
-		[
-			receiver = udpReceiver.get()
-		]() {
-			if (receiver) {
-				receiver->NotifyDecodeFrame();
-			}
+			return videoReceiver->TryGetLatestFrame(outFrame);
 		}
 				);
 
@@ -1328,125 +1397,31 @@ int AppMain::Run() {
 
 	runLoop.SetReceivedVideoTexture(
 		texture,
-		receivedUploadBuffer,
+		std::move(receivedUploadBuffers),
 		receivedSrvHandleGPU,
 		texWidth,
 		texHeight
 	);
 
-	std::atomic<bool> videoReceiverDecodeRunning{ true };
-	std::thread videoReceiverDecodeThread(
-		[
-			&videoReceiverDecodeRunning,
-			receiver = udpReceiver.get(),
-			runtimeState = &runtimeState,
-			&receiveDecodeTelemetry
-		]() {
-		while (videoReceiverDecodeRunning.load()) {
-			if (!receiver ||
-				!runtimeState ||
-				!net::NetworkModeCanReceiveVideo(
-					runtimeState->networkRuntimeMode)) {
-				{
-					std::lock_guard<std::mutex> lock(
-						receiveDecodeTelemetry.mutex);
-					receiveDecodeTelemetry.hasLatestDecodedFrame = false;
-				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				continue;
-			}
-
-			net::CompletedFrame frame{};
-			if (!receiver->TryPopFrame(frame)) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				continue;
-			}
-
-			if (frame.codecType == net::CodecType::MJPEG) {
-				std::vector<uint8_t> rgba;
-				uint32_t width = 0;
-				uint32_t height = 0;
-				const auto decodeStart =
-					std::chrono::steady_clock::now();
-				if (!DecodeJpegFrameToRgba(
-						frame.data,
-						rgba,
-						width,
-						height)) {
-					const double decodeMs =
-						std::chrono::duration<double, std::milli>(
-							std::chrono::steady_clock::now() -
-							decodeStart
-						).count();
-					std::lock_guard<std::mutex> lock(
-						receiveDecodeTelemetry.mutex);
-					UpdateTelemetryEwma(
-						receiveDecodeTelemetry.jpegDecodeMs,
-						receiveDecodeTelemetry.hasJpegDecodeMs,
-						decodeMs);
-					continue;
-				}
-
-				const double decodeMs =
-					std::chrono::duration<double, std::milli>(
-						std::chrono::steady_clock::now() -
-						decodeStart
-					).count();
-
-				frame.codecType = net::CodecType::Raw;
-				frame.data = PackRawRgbaPayload(rgba, width, height);
-				if (frame.data.empty()) {
-					continue;
-				}
-
-				{
-					std::lock_guard<std::mutex> lock(
-						receiveDecodeTelemetry.mutex);
-					UpdateTelemetryEwma(
-						receiveDecodeTelemetry.jpegDecodeMs,
-						receiveDecodeTelemetry.hasJpegDecodeMs,
-						decodeMs);
-					if (receiveDecodeTelemetry.hasLatestDecodedFrame) {
-						receiveDecodeTelemetry.overwrittenDecodedFrames++;
-					}
-					receiveDecodeTelemetry.latestDecodedFrame =
-						std::move(frame);
-					receiveDecodeTelemetry.hasLatestDecodedFrame = true;
-					receiveDecodeTelemetry.decodedWorkerFrames++;
-				}
-
-				receiver->NotifyDecodeFrame();
-				continue;
-			}
-
-			if (frame.codecType == net::CodecType::Raw) {
-				{
-					std::lock_guard<std::mutex> lock(
-						receiveDecodeTelemetry.mutex);
-					UpdateTelemetryEwma(
-						receiveDecodeTelemetry.jpegDecodeMs,
-						receiveDecodeTelemetry.hasJpegDecodeMs,
-						0.0);
-					if (receiveDecodeTelemetry.hasLatestDecodedFrame) {
-						receiveDecodeTelemetry.overwrittenDecodedFrames++;
-					}
-					receiveDecodeTelemetry.latestDecodedFrame =
-						std::move(frame);
-					receiveDecodeTelemetry.hasLatestDecodedFrame = true;
-					receiveDecodeTelemetry.decodedWorkerFrames++;
-				}
-
-				receiver->NotifyDecodeFrame();
-			}
-		}
-	});
+	networkVideoReceiver.Start(
+		udpReceiver.get(),
+		[&runtimeState]() {
+			return net::NetworkModeCanReceiveVideo(
+				runtimeState.networkRuntimeMode);
+		});
 
 	// Prefer a live camera frame; fallback frames keep the network path testable without a camera.
 	auto cameraCapture = std::make_unique<CameraCapture>();
-	bool cameraCaptureEnabled = cameraCapture->Initialize(texWidth, texHeight);
+	const bool forceDisableCamera =
+		GetEnvironmentVariableA("RNVP_DISABLE_CAMERA", nullptr, 0) > 0;
+	bool cameraCaptureEnabled =
+		!forceDisableCamera && cameraCapture->Initialize(texWidth, texHeight);
 	if (cameraCaptureEnabled) {
 		OutputDebugStringA("[AppMain] Camera capture enabled for RNVP raw video.\n");
 		cameraCapture->StartAsyncCapture();
+	}
+	else if (forceDisableCamera) {
+		OutputDebugStringA("[AppMain] Camera capture disabled by environment; RNVP uses generated test video.\n");
 	}
 	else {
 		OutputDebugStringA("[AppMain] Camera capture unavailable; RNVP falls back to generated test video.\n");
@@ -1469,6 +1444,7 @@ int AppMain::Run() {
 		auto nextSendTime = std::chrono::steady_clock::now();
 		uint32_t frameId = 1;
 		uint64_t lastCameraFrameId = 0;
+		std::vector<uint8_t> lastCameraFrameCache;
 
 		while (videoSenderRunning.load()) {
 			const auto now = std::chrono::steady_clock::now();
@@ -1564,6 +1540,7 @@ int AppMain::Run() {
 				cameraFrameId != lastCameraFrameId;
 			if (hasCameraFrame) {
 				lastCameraFrameId = cameraFrameId;
+				lastCameraFrameCache = videoFrame;
 			}
 
 			{
@@ -1575,7 +1552,25 @@ int AppMain::Run() {
 					: 0.0;
 			}
 
-			if (!hasCameraFrame) {
+			bool usedCameraCache = false;
+			if (!hasCameraFrame &&
+				cameraCaptureEnabled &&
+				!lastCameraFrameCache.empty()) {
+				videoFrame = lastCameraFrameCache;
+				usedCameraCache = true;
+			}
+			else if (!hasCameraFrame && cameraCaptureEnabled) {
+				const auto sendInterval =
+					std::chrono::duration_cast<
+						std::chrono::steady_clock::duration>(
+							std::chrono::duration<double>(
+								1.0 / static_cast<double>(targetFps)
+							));
+				nextSendTime += sendInterval;
+				continue;
+			}
+
+			if (!hasCameraFrame && !usedCameraCache) {
 				videoFrame.resize(
 					static_cast<size_t>(texWidth) *
 					static_cast<size_t>(texHeight) *
@@ -1684,7 +1679,7 @@ int AppMain::Run() {
 					<< " source="
 					<< (hasCameraFrame
 						? (freshCameraFrame ? "camera" : "camera-cache")
-						: "fallback")
+						: (usedCameraCache ? "camera-hold" : "fallback"))
 					<< " size="
 					<< encodedPayload.size()
 					<< " rawSize="
@@ -1878,6 +1873,10 @@ int AppMain::Run() {
 					networkReceiveEnabled
 					? udpReceiver->GetStats()
 					: net::NetworkStatsSnapshot{};
+				const net::NetworkVideoReceiverStats videoReceiverStats =
+					networkReceiveEnabled
+					? networkVideoReceiver.GetStats()
+					: net::NetworkVideoReceiverStats{};
 
 				net::AdaptiveStreamingInput adaptiveInput{};
 				adaptiveInput.ackMissingRate = networkManager->GetLastAckMissingRate();
@@ -1897,6 +1896,22 @@ int AppMain::Run() {
 					receiverStats.deadlineNackSentFrames;
 				adaptiveInput.deadlineNackMissingChunks =
 					receiverStats.deadlineNackMissingChunks;
+				adaptiveInput.deadlineNackExpiredDroppedFrames =
+					receiverStats.deadlineNackExpiredDroppedFrames;
+				adaptiveInput.deadlineNackExpiredAfterNackFrames =
+					receiverStats.deadlineNackExpiredAfterNackFrames;
+				adaptiveInput.ackStaleDroppedFrames =
+					networkManager->GetAckStaleDroppedFrameCount();
+				adaptiveInput.ackKeyFrameRequests =
+					networkManager->GetAckKeyFrameRequestCount();
+				adaptiveInput.receiveFreshnessDroppedFrames =
+					videoReceiverStats.freshnessDroppedFrames;
+				adaptiveInput.receiveDecodeInputFrameAgeMs =
+					videoReceiverStats.decodeInputFrameAgeMs;
+				adaptiveInput.receiveLatestDecodedFrameAgeMs =
+					videoReceiverStats.latestDecodedFrameAgeMs;
+				adaptiveInput.receiveFreshnessDropThresholdMs =
+					videoReceiverStats.freshnessDropThresholdMs;
 				adaptiveInput.lastOutputQueueDropReason =
 					receiverStats.lastOutputQueueDropReason;
 				const net::PacketPacerStats pacingStats =
@@ -1975,10 +1990,7 @@ int AppMain::Run() {
 	if (videoSenderThread.joinable()) {
 		videoSenderThread.join();
 	}
-	videoReceiverDecodeRunning.store(false);
-	if (videoReceiverDecodeThread.joinable()) {
-		videoReceiverDecodeThread.join();
-	}
+	networkVideoReceiver.Stop();
 
 	runLoop.SetNetworkStatsProvider({});
 	networkExperimentReporter.Stop();

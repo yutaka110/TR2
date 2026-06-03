@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -11,11 +12,45 @@
 
 namespace {
 
+    constexpr uint64_t kDefaultFreshnessDropThresholdUs = 120000;
+    constexpr uint64_t kRetransmitFreshnessSlackUs = 15000;
+
     void NetworkDebugLog(const std::string& message) {
         OutputDebugStringA(message.c_str());
         OutputDebugStringA("\n");
 
         std::cout << message << "\n";
+    }
+
+    uint64_t FreshnessDropThresholdUs() {
+        static const uint64_t thresholdUs = []() {
+            char text[64]{};
+            const DWORD length = GetEnvironmentVariableA(
+                "RNVP_FRESHNESS_DROP_THRESHOLD_MS",
+                text,
+                static_cast<DWORD>(sizeof(text)));
+            if (length == 0 || length >= sizeof(text)) {
+                return kDefaultFreshnessDropThresholdUs;
+            }
+
+            char* end = nullptr;
+            const double valueMs = strtod(text, &end);
+            if (end == text || valueMs <= 0.0) {
+                return kDefaultFreshnessDropThresholdUs;
+            }
+
+            return static_cast<uint64_t>(valueMs * 1000.0);
+        }();
+        return thresholdUs;
+    }
+
+    uint64_t RetransmitFreshnessDeadlineUs() {
+        const uint64_t thresholdUs = FreshnessDropThresholdUs();
+        if (thresholdUs <= kRetransmitFreshnessSlackUs) {
+            return thresholdUs;
+        }
+
+        return thresholdUs - kRetransmitFreshnessSlackUs;
     }
 
 } // namespace
@@ -741,6 +776,18 @@ void NetworkManager::HandleAckControl(
     bool shouldCountStaleDrop = false;
 
     const uint64_t nowUs = NowMicroseconds();
+    const net::NetworkCondition condition = networkSimulator_.GetCondition();
+    const uint64_t simulatorOneWayDelayUs =
+        condition.enabled
+        ? static_cast<uint64_t>(condition.maxDelayMs) * 1000ull
+        : 0ull;
+    const double averageRttMs = GetAverageRttMs();
+    const uint64_t rttOneWayDelayUs =
+        averageRttMs > 0.0
+        ? static_cast<uint64_t>((averageRttMs * 1000.0) * 0.5)
+        : 0ull;
+    const uint64_t estimatedRetransmitDeliveryUs =
+        (std::max)(simulatorOneWayDelayUs, rttOneWayDelayUs);
 
     {
         std::lock_guard<std::mutex> lock(sentFramesMutex_);
@@ -775,9 +822,15 @@ void NetworkManager::HandleAckControl(
             const bool staleByFrameLag =
                 latestSentFrameId_ > record->frameId + kMaxRetransmitFrameLag;
 
+            const uint64_t retransmitDeadlineUs =
+                (std::min)(
+                    kMaxRetransmitAgeUs,
+                    RetransmitFreshnessDeadlineUs());
+
             const bool staleByAge =
                 nowUs > record->sendTimeUs &&
-                nowUs - record->sendTimeUs > kMaxRetransmitAgeUs;
+                nowUs - record->sendTimeUs +
+                    estimatedRetransmitDeliveryUs > retransmitDeadlineUs;
 
             const bool retransmitBudgetExhausted =
                 record->retransmitCount >= kMaxRetransmitsPerFrame;

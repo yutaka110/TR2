@@ -285,6 +285,9 @@
     <ClCompile Include="network\NetworkManager.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
+    <ClCompile Include="network\NetworkVideoReceiver.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
     <ClCompile Include="network\NetworkConditionSimulator.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
@@ -604,6 +607,9 @@
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\NetworkManager.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="network\NetworkVideoReceiver.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\NetworkConditionSimulator.h">

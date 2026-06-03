@@ -30,7 +30,7 @@
 #include "vfx/ParticleRenderer.h"
 #include "vfx/TrailRenderer.h"
 #include "../network/NetworkStats.h"
-#include "../network/FrameReassembler.h"
+#include "../network/NetworkVideoReceiver.h"
 #include "../network/NetworkConditionSimulator.h"
 
 class AppFrameRenderer;
@@ -83,13 +83,12 @@ public:
     void SetAdaptiveControlModeSetter(std::function<void(int)> setter);
     void SetCongestionControlModeSetter(std::function<void(int)> setter);
 
-    void SetReceivedFrameProvider(std::function<bool(net::CompletedFrame&)> provider);
-    void SetNetworkFrameDecodeNotifier(std::function<void()> notifier);
+    void SetReceivedFrameProvider(std::function<bool(net::DecodedVideoFrame&)> provider);
     void SetNetworkFrameDisplayNotifier(std::function<void()> notifier);
 
     void SetReceivedVideoTexture(
         Microsoft::WRL::ComPtr<ID3D12Resource> texture,
-        Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer,
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uploadBuffers,
         D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle,
         uint32_t width,
         uint32_t height);
@@ -99,7 +98,10 @@ private:
     void WaitForFrameResource(UINT frameIndex);
     void SignalFrameResource(UINT frameIndex);
     void FlushGpu();
-    void UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList);
+    void WaitForReceivedVideoUploadBuffer(UINT uploadBufferIndex);
+    void UploadReceivedVideoFrame(
+        ID3D12GraphicsCommandList* commandList,
+        UINT frameIndex);
 
     DebugCamera& debugCamera_;
     AppRuntimeState& runtimeState_;
@@ -157,24 +159,28 @@ private:
     std::function<void(int)> adaptiveControlModeSetter_;
     std::function<void(int)> congestionControlModeSetter_;
 
-    std::function<bool(net::CompletedFrame&)> receivedFrameProvider_;
-    std::function<void()> networkFrameDecodeNotifier_;
+    std::function<bool(net::DecodedVideoFrame&)> receivedFrameProvider_;
     std::function<void()> networkFrameDisplayNotifier_;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> receivedVideoTexture_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> receivedVideoUploadBuffer_;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> receivedVideoUploadBuffers_;
     D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoSrvGpuHandle_{};
     uint32_t receivedVideoWidth_ = 0;
     uint32_t receivedVideoHeight_ = 0;
-    double receiveJpegDecodeMs_ = 0.0;
+    uint32_t receivedVideoUploadCursor_ = 0;
+    int activeReceivedVideoUploadBufferIndex_ = -1;
+    double receiveUploadBufferWaitMs_ = 0.0;
     double textureUploadMs_ = 0.0;
     double presentGpuWaitMs_ = 0.0;
-    double frameResourceWaitMs_ = 0.0;
+    double renderFramePacingWaitMs_ = 0.0;
+    double waitableSwapChainWaitMs_ = 0.0;
     double presentMs_ = 0.0;
-    bool hasReceiveJpegDecodeMs_ = false;
+    bool hasReceiveUploadBufferWaitMs_ = false;
     bool hasTextureUploadMs_ = false;
     bool hasPresentGpuWaitMs_ = false;
-    bool hasFrameResourceWaitMs_ = false;
+    bool hasRenderFramePacingWaitMs_ = false;
+    bool hasWaitableSwapChainWaitMs_ = false;
     bool hasPresentMs_ = false;
     std::vector<uint64_t> frameFenceValues_;
+    std::vector<uint64_t> receivedVideoUploadFenceValues_;
 };

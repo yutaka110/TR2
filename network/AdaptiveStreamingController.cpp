@@ -19,6 +19,10 @@ namespace net {
             return "DecodeLoad";
         case AdaptiveDegradationCause::DisplayLoad:
             return "DisplayLoad";
+        case AdaptiveDegradationCause::FrameFreshness:
+            return "FrameFreshness";
+        case AdaptiveDegradationCause::RecoveryDeadline:
+            return "RecoveryDeadline";
         case AdaptiveDegradationCause::PacingQueue:
             return "PacingQueue";
         case AdaptiveDegradationCause::None:
@@ -71,12 +75,22 @@ namespace net {
         lossOnlyBadTimeSec_ = 0.0;
         cooldownSec_ = 0.0;
         observedTimeSec_ = 0.0;
+        degradationCauseHoldSec_ = 0.0;
+        qoeHoldSec_ = 0.0;
+        heldQoeScore_ = 0.0;
+        heldDegradationCause_ = AdaptiveDegradationCause::None;
         hasDropCounters_ = false;
         lastDeadlineDroppedFrames_ = 0;
         lastOutputQueueDroppedFrames_ = 0;
         hasNackCounters_ = false;
         lastDeadlineNackSentFrames_ = 0;
         lastDeadlineNackMissingChunks_ = 0;
+        lastDeadlineNackExpiredDroppedFrames_ = 0;
+        lastDeadlineNackExpiredAfterNackFrames_ = 0;
+        lastAckStaleDroppedFrames_ = 0;
+        lastAckKeyFrameRequests_ = 0;
+        hasFreshnessCounters_ = false;
+        lastReceiveFreshnessDroppedFrames_ = 0;
         hasPacingCounters_ = false;
         lastPacingDeadlineDroppedPackets_ = 0;
         activeBandwidthCeilingKbps_ = kMaxBitrateKbps;
@@ -148,6 +162,20 @@ namespace net {
         state_.lastOutputQueueDroppedFrames = input.outputQueueDroppedFrames;
         state_.lastDeadlineNackSentFrames = input.deadlineNackSentFrames;
         state_.lastDeadlineNackMissingChunks = input.deadlineNackMissingChunks;
+        state_.lastDeadlineNackExpiredDroppedFrames =
+            input.deadlineNackExpiredDroppedFrames;
+        state_.lastDeadlineNackExpiredAfterNackFrames =
+            input.deadlineNackExpiredAfterNackFrames;
+        state_.lastAckStaleDroppedFrames = input.ackStaleDroppedFrames;
+        state_.lastAckKeyFrameRequests = input.ackKeyFrameRequests;
+        state_.lastReceiveFreshnessDroppedFrames =
+            input.receiveFreshnessDroppedFrames;
+        state_.lastReceiveDecodeInputFrameAgeMs =
+            input.receiveDecodeInputFrameAgeMs;
+        state_.lastReceiveLatestDecodedFrameAgeMs =
+            input.receiveLatestDecodedFrameAgeMs;
+        state_.lastReceiveFreshnessDropThresholdMs =
+            input.receiveFreshnessDropThresholdMs;
         state_.lastEstimatedBandwidthKbps =
             static_cast<int>(input.estimatedBandwidthBps / 1000u);
         state_.lastDeliveryRateKbps =
@@ -167,6 +195,9 @@ namespace net {
         uint64_t outputQueueDropDelta = 0;
         uint64_t deadlineNackDelta = 0;
         uint64_t deadlineNackMissingChunkDelta = 0;
+        uint64_t recoveryDeadlineDropDelta = 0;
+        uint64_t retransmitStaleDropDelta = 0;
+        uint64_t freshnessDropDelta = 0;
         uint64_t pacingDeadlineDropDelta = 0;
 
         if (hasDropCounters_) {
@@ -193,11 +224,39 @@ namespace net {
                 deadlineNackMissingChunkDelta =
                     input.deadlineNackMissingChunks - lastDeadlineNackMissingChunks_;
             }
+            if (input.deadlineNackExpiredDroppedFrames >=
+                lastDeadlineNackExpiredDroppedFrames_) {
+                recoveryDeadlineDropDelta +=
+                    input.deadlineNackExpiredDroppedFrames -
+                    lastDeadlineNackExpiredDroppedFrames_;
+            }
+            if (input.ackStaleDroppedFrames >= lastAckStaleDroppedFrames_) {
+                retransmitStaleDropDelta =
+                    input.ackStaleDroppedFrames - lastAckStaleDroppedFrames_;
+            }
         }
 
         hasNackCounters_ = true;
         lastDeadlineNackSentFrames_ = input.deadlineNackSentFrames;
         lastDeadlineNackMissingChunks_ = input.deadlineNackMissingChunks;
+        lastDeadlineNackExpiredDroppedFrames_ =
+            input.deadlineNackExpiredDroppedFrames;
+        lastDeadlineNackExpiredAfterNackFrames_ =
+            input.deadlineNackExpiredAfterNackFrames;
+        lastAckStaleDroppedFrames_ = input.ackStaleDroppedFrames;
+        lastAckKeyFrameRequests_ = input.ackKeyFrameRequests;
+
+        if (hasFreshnessCounters_ &&
+            input.receiveFreshnessDroppedFrames >=
+            lastReceiveFreshnessDroppedFrames_) {
+            freshnessDropDelta =
+                input.receiveFreshnessDroppedFrames -
+                lastReceiveFreshnessDroppedFrames_;
+        }
+
+        hasFreshnessCounters_ = true;
+        lastReceiveFreshnessDroppedFrames_ =
+            input.receiveFreshnessDroppedFrames;
 
         if (hasPacingCounters_ &&
             input.pacingDeadlineDroppedPackets >=
@@ -218,24 +277,62 @@ namespace net {
         const uint64_t qualityDeadlineNackMissingChunkDelta =
             suppressPacingDropForQuality ? 0 : deadlineNackMissingChunkDelta;
 
-        const double qoeScore =
+        const double rawQoeScore =
             CalculateQoeScore(
                 input,
                 qualityDeadlineDropDelta,
-                outputQueueDropDelta);
-        state_.lastQoeScore = qoeScore;
+                outputQueueDropDelta,
+                recoveryDeadlineDropDelta,
+                retransmitStaleDropDelta,
+                freshnessDropDelta);
         const AdaptiveDegradationCause qualityDegradationCause =
             DetermineDegradationCause(
                 input,
                 qualityDeadlineDropDelta,
                 outputQueueDropDelta,
                 qualityDeadlineNackDelta,
-                qualityDeadlineNackMissingChunkDelta);
-        state_.lastDegradationCause =
+                qualityDeadlineNackMissingChunkDelta,
+                recoveryDeadlineDropDelta,
+                retransmitStaleDropDelta,
+                freshnessDropDelta);
+        const AdaptiveDegradationCause rawDegradationCause =
             qualityDegradationCause == AdaptiveDegradationCause::None &&
             HasPacingDropPressure(input, pacingDeadlineDropDelta)
             ? AdaptiveDegradationCause::PacingQueue
             : qualityDegradationCause;
+
+        if (rawQoeScore > 0.0) {
+            heldQoeScore_ = rawQoeScore;
+            qoeHoldSec_ = 1.25;
+        }
+        else if (qoeHoldSec_ > 0.0) {
+            qoeHoldSec_ = (std::max)(0.0, qoeHoldSec_ - deltaTimeSec);
+            if (qoeHoldSec_ <= 0.0) {
+                heldQoeScore_ = 0.0;
+            }
+        }
+        else {
+            heldQoeScore_ = 0.0;
+        }
+
+        if (rawDegradationCause != AdaptiveDegradationCause::None) {
+            heldDegradationCause_ = rawDegradationCause;
+            degradationCauseHoldSec_ = 1.25;
+        }
+        else if (degradationCauseHoldSec_ > 0.0) {
+            degradationCauseHoldSec_ =
+                (std::max)(0.0, degradationCauseHoldSec_ - deltaTimeSec);
+            if (degradationCauseHoldSec_ <= 0.0) {
+                heldDegradationCause_ = AdaptiveDegradationCause::None;
+            }
+        }
+        else {
+            heldDegradationCause_ = AdaptiveDegradationCause::None;
+        }
+
+        const double qoeScore = (std::max)(rawQoeScore, heldQoeScore_);
+        state_.lastQoeScore = qoeScore;
+        state_.lastDegradationCause = heldDegradationCause_;
 
         if (!enabled_ ||
             controlMode_ == AdaptiveControlMode::FixedQuality) {
@@ -320,10 +417,10 @@ namespace net {
             badTimeSec_ = 0.0;
             cooldownSec_ = 1.6;
         }
-        else if (congestionPressure && lossOnlyBadTimeSec_ >= 1.0) {
+        else if (bandwidthPressure && lossOnlyBadTimeSec_ >= 2.0) {
             ApplyAimdDecrease(
                 input,
-                state_.lastDegradationCause,
+                AdaptiveDegradationCause::Bandwidth,
                 false);
             lossOnlyBadTimeSec_ = 0.0;
             cooldownSec_ = 1.4;
@@ -495,6 +592,7 @@ namespace net {
 
         if (cause == AdaptiveDegradationCause::DecodeLoad ||
             cause == AdaptiveDegradationCause::DisplayLoad ||
+            cause == AdaptiveDegradationCause::FrameFreshness ||
             cause == AdaptiveDegradationCause::Rtt) {
             const int oldFps = state_.targetFps;
             const int fpsStep = hardProblem ? 4 : 2;
@@ -761,6 +859,10 @@ namespace net {
         case AdaptiveDegradationCause::DecodeLoad:
         case AdaptiveDegradationCause::DisplayLoad:
             return hardProblem ? 0.78 : 0.86;
+        case AdaptiveDegradationCause::FrameFreshness:
+            return hardProblem ? 0.76 : 0.84;
+        case AdaptiveDegradationCause::RecoveryDeadline:
+            return hardProblem ? 0.82 : 0.90;
         case AdaptiveDegradationCause::PacingQueue:
             return 1.0;
         case AdaptiveDegradationCause::None:
@@ -773,6 +875,7 @@ namespace net {
         const AdaptiveStreamingInput& input
     ) const {
         return input.bandwidthFeedbackSamples >= 128 &&
+            observedTimeSec_ >= 5.0 &&
             input.estimatedBandwidthBps >=
             static_cast<uint32_t>(kMinBitrateKbps * 1000) &&
             input.deliveryRateBps > 0;
@@ -872,8 +975,33 @@ namespace net {
         uint64_t deadlineDropDelta,
         uint64_t outputQueueDropDelta,
         uint64_t deadlineNackDelta,
-        uint64_t deadlineNackMissingChunkDelta
+        uint64_t deadlineNackMissingChunkDelta,
+        uint64_t recoveryDeadlineDropDelta,
+        uint64_t retransmitStaleDropDelta,
+        uint64_t freshnessDropDelta
     ) const {
+        const double freshnessThresholdMs =
+            input.receiveFreshnessDropThresholdMs;
+        const bool hasFreshnessThreshold = freshnessThresholdMs > 0.0;
+        const bool decodeInputStale =
+            hasFreshnessThreshold &&
+            input.receiveDecodeInputFrameAgeMs >= freshnessThresholdMs;
+        const bool latestDecodedStale =
+            hasFreshnessThreshold &&
+            input.receiveLatestDecodedFrameAgeMs >=
+            freshnessThresholdMs * 1.25;
+
+        if (freshnessDropDelta > 0 ||
+            decodeInputStale ||
+            latestDecodedStale) {
+            return AdaptiveDegradationCause::FrameFreshness;
+        }
+
+        if (recoveryDeadlineDropDelta > 0 ||
+            retransmitStaleDropDelta > 0) {
+            return AdaptiveDegradationCause::RecoveryDeadline;
+        }
+
         const CongestionControlMode congestionMode =
             ResolveActiveCongestionControlMode();
 
@@ -916,8 +1044,10 @@ namespace net {
             input.displayFps > 0.0;
 
         const bool rendererLag =
+            outputQueueDropDelta > 0 &&
             input.lastOutputQueueDropReason == "renderer-lag";
         const bool jitterBurst =
+            outputQueueDropDelta > 0 &&
             input.lastOutputQueueDropReason == "jitter-burst-release";
 
         if (rendererLag ||
@@ -968,12 +1098,53 @@ namespace net {
     double AdaptiveStreamingController::CalculateQoeScore(
         const AdaptiveStreamingInput& input,
         uint64_t deadlineDropDelta,
-        uint64_t outputQueueDropDelta
+        uint64_t outputQueueDropDelta,
+        uint64_t recoveryDeadlineDropDelta,
+        uint64_t retransmitStaleDropDelta,
+        uint64_t freshnessDropDelta
     ) const {
         double score = 0.0;
 
-        if (deadlineDropDelta > 0 || outputQueueDropDelta > 0) {
+        if (deadlineDropDelta > 0) {
             score = (std::max)(score, 3.0);
+        }
+        if (outputQueueDropDelta > 0) {
+            if (input.lastOutputQueueDropReason == "renderer-lag") {
+                score = (std::max)(score, 2.0);
+            }
+            else if (input.lastOutputQueueDropReason == "jitter-burst-release") {
+                score = (std::max)(score, 1.0);
+            }
+            else {
+                score = (std::max)(score, 2.0);
+            }
+        }
+
+        if (freshnessDropDelta > 0) {
+            score = (std::max)(score, 3.0);
+        }
+        else if (input.receiveFreshnessDropThresholdMs > 0.0) {
+            const double thresholdMs = input.receiveFreshnessDropThresholdMs;
+            const double frameAgeMs = (std::max)(
+                input.receiveDecodeInputFrameAgeMs,
+                input.receiveLatestDecodedFrameAgeMs);
+
+            if (frameAgeMs >= thresholdMs * 1.25) {
+                score = (std::max)(score, 3.0);
+            }
+            else if (frameAgeMs >= thresholdMs) {
+                score = (std::max)(score, 2.0);
+            }
+            else if (frameAgeMs >= thresholdMs * 0.75) {
+                score = (std::max)(score, 1.0);
+            }
+        }
+
+        if (recoveryDeadlineDropDelta > 0) {
+            score = (std::max)(score, 2.0);
+        }
+        else if (retransmitStaleDropDelta > 0) {
+            score = (std::max)(score, 1.0);
         }
 
         if (input.latencyMs >= 150.0 || input.rttMs >= 220.0) {

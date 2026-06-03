@@ -11,8 +11,6 @@
 #include "AppRuntimeState.h"
 #include "AppSceneResources.h"
 #include "EngineContext.h"
-#include "../network/PacketProtocol.h"
-#include "../../externals/DirectXTex/DirectXTex.h"
 
 #include <algorithm>
 #include <chrono>
@@ -41,77 +39,6 @@ void UpdateTimingEwma(double& value, bool& hasValue, double sampleMs) {
     }
 
     value = (value * (1.0 - kAlpha)) + (sampleMs * kAlpha);
-}
-
-bool DecodeJpegToRgba(
-    const std::vector<uint8_t>& jpeg,
-    std::vector<uint8_t>& outRgba,
-    uint32_t& outWidth,
-    uint32_t& outHeight) {
-    if (jpeg.empty()) {
-        return false;
-    }
-
-    DirectX::TexMetadata metadata{};
-    DirectX::ScratchImage decoded;
-    HRESULT hr = DirectX::LoadFromWICMemory(
-        jpeg.data(),
-        jpeg.size(),
-        DirectX::WIC_FLAGS_FORCE_RGB,
-        &metadata,
-        decoded
-    );
-
-    if (FAILED(hr)) {
-        static uint32_t decodeFailLogCount = 0;
-        if (decodeFailLogCount < 10) {
-            OutputDebugStringA("[ReceivedVideo] JPEG decode failed. Skip upload.\n");
-            decodeFailLogCount++;
-        }
-        return false;
-    }
-
-    const DirectX::Image* image = decoded.GetImage(0, 0, 0);
-    if (image == nullptr || image->pixels == nullptr ||
-        image->width == 0 || image->height == 0) {
-        return false;
-    }
-
-    DirectX::ScratchImage converted;
-    if (image->format != DXGI_FORMAT_R8G8B8A8_UNORM) {
-        hr = DirectX::Convert(
-            *image,
-            DXGI_FORMAT_R8G8B8A8_UNORM,
-            DirectX::TEX_FILTER_DEFAULT,
-            0.0f,
-            converted
-        );
-
-        if (FAILED(hr)) {
-            return false;
-        }
-
-        image = converted.GetImage(0, 0, 0);
-        if (image == nullptr || image->pixels == nullptr) {
-            return false;
-        }
-    }
-
-    outWidth = static_cast<uint32_t>(image->width);
-    outHeight = static_cast<uint32_t>(image->height);
-
-    const size_t dstRowPitch = static_cast<size_t>(outWidth) * 4u;
-    outRgba.resize(dstRowPitch * static_cast<size_t>(outHeight));
-
-    for (uint32_t y = 0; y < outHeight; ++y) {
-        std::memcpy(
-            outRgba.data() + static_cast<size_t>(y) * dstRowPitch,
-            image->pixels + static_cast<size_t>(y) * image->rowPitch,
-            dstRowPitch
-        );
-    }
-
-    return true;
 }
 
 void TransitionSceneDepthIfNeeded(
@@ -368,12 +295,8 @@ void AppRunLoop::SetCongestionControlModeSetter(std::function<void(int)> setter)
 }
 
 void AppRunLoop::SetReceivedFrameProvider(
-    std::function<bool(net::CompletedFrame&)> provider) {
+    std::function<bool(net::DecodedVideoFrame&)> provider) {
     receivedFrameProvider_ = std::move(provider);
-}
-
-void AppRunLoop::SetNetworkFrameDecodeNotifier(std::function<void()> notifier) {
-    networkFrameDecodeNotifier_ = std::move(notifier);
 }
 
 void AppRunLoop::SetNetworkFrameDisplayNotifier(std::function<void()> notifier) {
@@ -382,12 +305,15 @@ void AppRunLoop::SetNetworkFrameDisplayNotifier(std::function<void()> notifier) 
 
 void AppRunLoop::SetReceivedVideoTexture(
     Microsoft::WRL::ComPtr<ID3D12Resource> texture,
-    Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer,
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uploadBuffers,
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle,
     uint32_t width,
     uint32_t height) {
     receivedVideoTexture_ = std::move(texture);
-    receivedVideoUploadBuffer_ = std::move(uploadBuffer);
+    receivedVideoUploadBuffers_ = std::move(uploadBuffers);
+    receivedVideoUploadFenceValues_.assign(receivedVideoUploadBuffers_.size(), 0);
+    receivedVideoUploadCursor_ = 0;
+    activeReceivedVideoUploadBufferIndex_ = -1;
     receivedVideoSrvGpuHandle_ = srvGpuHandle;
     receivedVideoWidth_ = width;
     receivedVideoHeight_ = height;
@@ -395,11 +321,22 @@ void AppRunLoop::SetReceivedVideoTexture(
 
 void AppRunLoop::PopulateNetworkRenderTimings(
     net::NetworkStatsSnapshot& stats) const {
-    stats.receiveJpegDecodeMs = receiveJpegDecodeMs_;
+    stats.receiveUploadBufferWaitMs = receiveUploadBufferWaitMs_;
     stats.textureUploadMs = textureUploadMs_;
     stats.presentGpuWaitMs = presentGpuWaitMs_;
-    stats.frameResourceWaitMs = frameResourceWaitMs_;
+    stats.renderFramePacingWaitMs = renderFramePacingWaitMs_;
+    stats.waitableSwapChainWaitMs = waitableSwapChainWaitMs_;
     stats.presentMs = presentMs_;
+    stats.presentSyncInterval =
+        runtimeState_.lowLatencyPresentMode ? 0u : 1u;
+    stats.lowLatencyPresentMode = runtimeState_.lowLatencyPresentMode;
+    stats.waitableSwapChainPacingEnabled =
+        runtimeState_.waitableSwapChainPacingEnabled &&
+        !runtimeState_.lowLatencyPresentMode &&
+        swapChain_.HasFrameLatencyWaitableObject();
+    stats.waitableSwapChainAvailable =
+        swapChain_.HasFrameLatencyWaitableObject();
+    stats.swapChainBufferCount = swapChain_.BufferCount();
 }
 
 void AppRunLoop::UpdateFrame() {
@@ -524,6 +461,14 @@ void AppRunLoop::SignalFrameResource(UINT frameIndex) {
     engineContext_.SetFenceValue(fenceValue);
     commandQueue_->Signal(fence_, fenceValue);
     frameFenceValues_[frameIndex] = fenceValue;
+    if (activeReceivedVideoUploadBufferIndex_ >= 0) {
+        const auto uploadIndex =
+            static_cast<size_t>(activeReceivedVideoUploadBufferIndex_);
+        if (uploadIndex < receivedVideoUploadFenceValues_.size()) {
+            receivedVideoUploadFenceValues_[uploadIndex] = fenceValue;
+        }
+        activeReceivedVideoUploadBufferIndex_ = -1;
+    }
 }
 
 void AppRunLoop::FlushGpu() {
@@ -543,69 +488,56 @@ void AppRunLoop::FlushGpu() {
     }
 
     std::fill(frameFenceValues_.begin(), frameFenceValues_.end(), fenceValue);
+    std::fill(
+        receivedVideoUploadFenceValues_.begin(),
+        receivedVideoUploadFenceValues_.end(),
+        fenceValue);
 }
 
-void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList) {
+void AppRunLoop::WaitForReceivedVideoUploadBuffer(UINT uploadBufferIndex) {
+    if (uploadBufferIndex >= receivedVideoUploadFenceValues_.size() ||
+        commandQueue_ == nullptr ||
+        fence_ == nullptr ||
+        fenceEvent_ == nullptr) {
+        return;
+    }
+
+    const uint64_t fenceValue =
+        receivedVideoUploadFenceValues_[uploadBufferIndex];
+    if (fenceValue == 0 || fence_->GetCompletedValue() >= fenceValue) {
+        return;
+    }
+
+    fence_->SetEventOnCompletion(fenceValue, fenceEvent_);
+    WaitForSingleObject(fenceEvent_, INFINITE);
+}
+
+void AppRunLoop::UploadReceivedVideoFrame(
+    ID3D12GraphicsCommandList* commandList,
+    UINT frameIndex) {
     if (commandList == nullptr ||
         !receivedFrameProvider_ ||
         !receivedVideoTexture_ ||
-        !receivedVideoUploadBuffer_ ||
+        receivedVideoUploadBuffers_.empty() ||
         receivedVideoWidth_ == 0 ||
         receivedVideoHeight_ == 0) {
         return;
     }
+    (void)frameIndex;
 
-    net::CompletedFrame frame{};
+    net::DecodedVideoFrame frame{};
     if (!receivedFrameProvider_(frame)) {
         return;
     }
 
-    if (frame.codecType != net::CodecType::Raw &&
-        frame.codecType != net::CodecType::MJPEG) {
+    if (frame.rgba.empty() || frame.width == 0 || frame.height == 0) {
         return;
     }
 
-    std::vector<uint8_t> decodedJpegRgba;
-    const uint8_t* src = frame.data.data();
-    uint32_t srcWidth = receivedVideoWidth_;
-    uint32_t srcHeight = receivedVideoHeight_;
-    size_t srcPayloadBytes = frame.data.size();
-    bool decodedOnRenderThread = false;
-
-    if (frame.codecType == net::CodecType::MJPEG) {
-        const auto jpegDecodeStart = std::chrono::steady_clock::now();
-        if (!DecodeJpegToRgba(
-                frame.data,
-                decodedJpegRgba,
-                srcWidth,
-                srcHeight)) {
-            UpdateTimingEwma(
-                receiveJpegDecodeMs_,
-                hasReceiveJpegDecodeMs_,
-                ElapsedMs(jpegDecodeStart));
-            return;
-        }
-        UpdateTimingEwma(
-            receiveJpegDecodeMs_,
-            hasReceiveJpegDecodeMs_,
-            ElapsedMs(jpegDecodeStart));
-
-        src = decodedJpegRgba.data();
-        srcPayloadBytes = decodedJpegRgba.size();
-        decodedOnRenderThread = true;
-    }
-    else {
-        net::RawFramePayloadHeader rawHeader{};
-        if (net::DecodeRawFramePayloadHeader(
-                frame.data.data(),
-                frame.data.size(),
-                rawHeader)) {
-            src = frame.data.data() + net::kRawFramePayloadHeaderSize;
-            srcWidth = rawHeader.width;
-            srcHeight = rawHeader.height;
-            srcPayloadBytes = rawHeader.payloadBytes;
-        }
-    }
+    const uint8_t* src = frame.rgba.data();
+    const uint32_t srcWidth = frame.width;
+    const uint32_t srcHeight = frame.height;
+    const size_t srcPayloadBytes = frame.rgba.size();
 
     const size_t requiredSize =
         static_cast<size_t>(srcWidth) *
@@ -621,9 +553,27 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         return;
     }
 
-    if (decodedOnRenderThread && networkFrameDecodeNotifier_) {
-        networkFrameDecodeNotifier_();
+    const auto uploadBufferWaitStart = std::chrono::steady_clock::now();
+    const UINT uploadBufferIndex =
+        receivedVideoUploadCursor_ %
+        static_cast<UINT>(receivedVideoUploadBuffers_.size());
+    receivedVideoUploadCursor_ =
+        (receivedVideoUploadCursor_ + 1u) %
+        static_cast<UINT>(receivedVideoUploadBuffers_.size());
+
+    WaitForReceivedVideoUploadBuffer(uploadBufferIndex);
+    UpdateTimingEwma(
+        receiveUploadBufferWaitMs_,
+        hasReceiveUploadBufferWaitMs_,
+        ElapsedMs(uploadBufferWaitStart));
+
+    ID3D12Resource* uploadBuffer =
+        receivedVideoUploadBuffers_[uploadBufferIndex].Get();
+    if (uploadBuffer == nullptr) {
+        return;
     }
+    activeReceivedVideoUploadBufferIndex_ =
+        static_cast<int>(uploadBufferIndex);
 
     const auto textureUploadStart = std::chrono::steady_clock::now();
 
@@ -647,7 +597,7 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
     );
 
     uint8_t* mapped = nullptr;
-    const HRESULT mapHr = receivedVideoUploadBuffer_->Map(
+    const HRESULT mapHr = uploadBuffer->Map(
         0,
         nullptr,
         reinterpret_cast<void**>(&mapped)
@@ -739,7 +689,7 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
         }
     }
 
-    receivedVideoUploadBuffer_->Unmap(0, nullptr);
+    uploadBuffer->Unmap(0, nullptr);
 
     D3D12_RESOURCE_BARRIER toCopy{};
     toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -756,7 +706,7 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
     dstLocation.SubresourceIndex = 0;
 
     D3D12_TEXTURE_COPY_LOCATION srcLocation{};
-    srcLocation.pResource = receivedVideoUploadBuffer_.Get();
+    srcLocation.pResource = uploadBuffer;
     srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     srcLocation.PlacedFootprint = footprint;
 
@@ -789,6 +739,23 @@ void AppRunLoop::UploadReceivedVideoFrame(ID3D12GraphicsCommandList* commandList
 }
 
 void AppRunLoop::RenderFrame() {
+    const bool useWaitableSwapChain =
+        runtimeState_.waitableSwapChainPacingEnabled &&
+        !runtimeState_.lowLatencyPresentMode &&
+        swapChain_.HasFrameLatencyWaitableObject();
+    swapChain_.SetMaximumFrameLatency(
+        useWaitableSwapChain ? 1u : swapChain_.BufferCount());
+    const auto waitableSwapChainStart = std::chrono::steady_clock::now();
+    if (useWaitableSwapChain) {
+        WaitForSingleObject(
+            swapChain_.FrameLatencyWaitableObject(),
+            INFINITE);
+    }
+    UpdateTimingEwma(
+        waitableSwapChainWaitMs_,
+        hasWaitableSwapChainWaitMs_,
+        ElapsedMs(waitableSwapChainStart));
+
     UINT backBufferIndex = swapChain_.CurrentIndex();
     if (frameFenceValues_.size() != swapChain_.BufferCount()) {
         frameFenceValues_.assign(swapChain_.BufferCount(), 0);
@@ -796,11 +763,11 @@ void AppRunLoop::RenderFrame() {
 
     const auto frameSyncStart = std::chrono::steady_clock::now();
     WaitForFrameResource(backBufferIndex);
-    const double frameResourceWaitMs = ElapsedMs(frameSyncStart);
+    const double renderFramePacingWaitMs = ElapsedMs(frameSyncStart);
     UpdateTimingEwma(
-        frameResourceWaitMs_,
-        hasFrameResourceWaitMs_,
-        frameResourceWaitMs);
+        renderFramePacingWaitMs_,
+        hasRenderFramePacingWaitMs_,
+        renderFramePacingWaitMs);
 
     BeginFrameSystems();
 
@@ -820,7 +787,7 @@ void AppRunLoop::RenderFrame() {
 
     if (runtimeState_.showReceivedVideoInGame ||
         runtimeState_.showReceivedVideoPreviewWindow) {
-        UploadReceivedVideoFrame(commandList.Get());
+        UploadReceivedVideoFrame(commandList.Get(), backBufferIndex);
     }
 
     scene_.UpdateTransforms(
@@ -1045,7 +1012,9 @@ void AppRunLoop::RenderFrame() {
     clPool_.EndAndExecute(dev_);
     const auto presentSignalStart = std::chrono::steady_clock::now();
     SignalFrameResource(backBufferIndex);
-    swapChain_.Present(dev_, 1);
+    const UINT presentSyncInterval =
+        runtimeState_.lowLatencyPresentMode ? 0u : 1u;
+    swapChain_.Present(dev_, presentSyncInterval);
     const double presentMs = ElapsedMs(presentSignalStart);
     UpdateTimingEwma(
         presentMs_,
@@ -1054,5 +1023,5 @@ void AppRunLoop::RenderFrame() {
     UpdateTimingEwma(
         presentGpuWaitMs_,
         hasPresentGpuWaitMs_,
-        frameResourceWaitMs + presentMs);
+        renderFramePacingWaitMs + presentMs);
 }

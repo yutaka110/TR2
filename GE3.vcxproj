@@ -245,6 +245,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="network\NetworkExperimentReporter.cpp" />
     <ClCompile Include="network\NetworkExperimentRunner.cpp" />
     <ClCompile Include="network\NetworkManager.cpp" />
+    <ClCompile Include="network\NetworkVideoReceiver.cpp" />
     <ClCompile Include="network\NetworkStats.cpp" />
     <ClCompile Include="network\PacketPacer.cpp" />
     <ClCompile Include="network\UdpByteStream.cpp" />
@@ -444,6 +445,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="network\NetworkExperimentReporter.h" />
     <ClInclude Include="network\NetworkExperimentRunner.h" />
     <ClInclude Include="network\NetworkManager.h" />
+    <ClInclude Include="network\NetworkVideoReceiver.h" />
     <ClInclude Include="network\NetworkStats.h" />
     <ClInclude Include="network\PacketProtocol.h" />
     <ClInclude Include="network\PacketPacer.h" />

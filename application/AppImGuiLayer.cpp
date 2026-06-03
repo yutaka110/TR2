@@ -208,7 +208,9 @@ namespace {
         if (cause == "None" || cause.empty()) {
             return ImVec4(0.38f, 0.95f, 0.55f, 1.0f);
         }
-        if (cause == "DecodeLoad" || cause == "DisplayLoad") {
+        if (cause == "DecodeLoad" ||
+            cause == "DisplayLoad" ||
+            cause == "FrameFreshness") {
             return ImVec4(1.0f, 0.35f, 0.30f, 1.0f);
         }
         if (cause == "Bandwidth") {
@@ -1016,6 +1018,34 @@ namespace {
             ImGui::Text("Input Receive FPS: %.2f", stats.adaptiveLastReceiveFps);
             ImGui::Text("Input Decode FPS: %.2f", stats.adaptiveLastDecodeFps);
             ImGui::Text("Input Display FPS: %.2f", stats.adaptiveLastDisplayFps);
+            ImGui::Text("Freshness Drops: %llu",
+                static_cast<unsigned long long>(
+                    stats.receiveFreshnessDroppedFrames));
+            ImGui::Text("Decode Input Age: %.2f / %.2f ms",
+                stats.receiveDecodeInputFrameAgeMs,
+                stats.receiveFreshnessDropThresholdMs);
+            ImGui::Text("Latest Decoded Age: %.2f ms",
+                stats.receiveLatestDecodedFrameAgeMs);
+            ImGui::Text("Last Decode Drop: %s",
+                stats.receiveDecodeLastDropReason.empty()
+                    ? "none"
+                    : stats.receiveDecodeLastDropReason.c_str());
+            ImGui::Text("Upload Buffer Wait: %.2f ms",
+                stats.receiveUploadBufferWaitMs);
+            ImGui::Text("Texture Upload: %.2f ms", stats.textureUploadMs);
+            ImGui::Text("Render Pacing Wait: %.2f ms",
+                stats.renderFramePacingWaitMs);
+            ImGui::Text("Waitable Swapchain Wait: %.2f ms",
+                stats.waitableSwapChainWaitMs);
+            ImGui::Text("Present: %.2f ms", stats.presentMs);
+            ImGui::Text("Present Sync Interval: %u",
+                stats.presentSyncInterval);
+            ImGui::Text("Low Latency Present: %s",
+                stats.lowLatencyPresentMode ? "true" : "false");
+            ImGui::Text("Waitable VSync Pacing: %s",
+                stats.waitableSwapChainPacingEnabled ? "true" : "false");
+            ImGui::Text("Swapchain Buffers: %u",
+                stats.swapChainBufferCount);
             ImGui::Text("QoE Score: %.2f", stats.adaptiveLastQoeScore);
             ImGui::Text("Degradation Cause: %s",
                 stats.adaptiveDegradationCause.empty()
@@ -1665,6 +1695,8 @@ void AppImGuiLayer::BuildUi(
             if (ImGui::BeginTabItem("Video")) {
                 ImGui::Checkbox("Show RNVP Video In Game", &runtimeState.showReceivedVideoInGame);
                 ImGui::Checkbox("Preview Window", &runtimeState.showReceivedVideoPreviewWindow);
+                ImGui::Checkbox("Low Latency Present(0)", &runtimeState.lowLatencyPresentMode);
+                ImGui::Checkbox("Waitable VSync Pacing", &runtimeState.waitableSwapChainPacingEnabled);
                 ImGui::DragFloat("Video Scale X", &runtimeState.transformSprite.scale.x, 1.0f, 32.0f, 1280.0f);
                 ImGui::DragFloat("Video Scale Y", &runtimeState.transformSprite.scale.y, 1.0f, 32.0f, 720.0f);
                 ImGui::DragFloat("Video Pos X", &runtimeState.transformSprite.translate.x, 1.0f, -1000.0f, 2000.0f);

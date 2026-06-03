@@ -20,7 +20,9 @@ bool SwapChain::Create(core::Device& dev, HWND hwnd, UINT w, UINT h, UINT buffer
     scDesc.Scaling = DXGI_SCALING_STRETCH;
     scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     scDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-    scDesc.Flags = allowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    scDesc.Flags =
+        (allowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) |
+        DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
     ComPtr<IDXGISwapChain1> sc1;
     auto* factory = dev.GetFactory();
@@ -31,6 +33,9 @@ bool SwapChain::Create(core::Device& dev, HWND hwnd, UINT w, UINT h, UINT buffer
 
     hr = sc1.As(&swapChain_);
     if (FAILED(hr)) return false;
+    frameLatencyWaitableObject_ =
+        swapChain_->GetFrameLatencyWaitableObject();
+    SetMaximumFrameLatency(bufferCount_);
 
     // Alt+Enter を無効化（推奨）
     factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
@@ -100,9 +105,22 @@ void SwapChain::Resize(core::Device& dev, UINT w, UINT h)
     ReleaseBuffers();
     swapChain_->ResizeBuffers(
         bufferCount_, w, h, format_,
-        allowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+        (allowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) |
+        DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+    frameLatencyWaitableObject_ =
+        swapChain_->GetFrameLatencyWaitableObject();
+    SetMaximumFrameLatency(bufferCount_);
 
     CreateRTVs(dev);
+}
+
+bool SwapChain::SetMaximumFrameLatency(UINT maxLatency)
+{
+    if (!swapChain_) {
+        return false;
+    }
+
+    return SUCCEEDED(swapChain_->SetMaximumFrameLatency(maxLatency));
 }
 
 

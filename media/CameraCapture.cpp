@@ -156,11 +156,19 @@ bool CameraCapture::Initialize(UINT32 width, UINT32 height) {
     mfStarted_ = true;
     Log("[CameraCapture] MFStartup succeeded.");
 
+    if (!OpenReader(width, height)) {
+        Shutdown();
+        return false;
+    }
+
+    return true;
+}
+
+bool CameraCapture::OpenReader(UINT32 width, UINT32 height) {
     IMFAttributes* attr = nullptr;
-    hr = MFCreateAttributes(&attr, 1);
+    HRESULT hr = MFCreateAttributes(&attr, 1);
     if (FAILED(hr)) {
         LogHr("MFCreateAttributes failed", hr);
-        Shutdown();
         return false;
     }
 
@@ -177,7 +185,6 @@ bool CameraCapture::Initialize(UINT32 width, UINT32 height) {
     if (FAILED(hr) || count == 0 || devices == nullptr) {
         LogHr("MFEnumDeviceSources failed or no camera device found", hr);
         LogDirectShowVideoDevices();
-        Shutdown();
         return false;
     }
     {
@@ -198,7 +205,6 @@ bool CameraCapture::Initialize(UINT32 width, UINT32 height) {
 
     if (FAILED(hr) || mediaSource == nullptr) {
         LogHr("ActivateObject failed", hr);
-        Shutdown();
         return false;
     }
     Log("[CameraCapture] Camera media source activated.");
@@ -219,7 +225,6 @@ bool CameraCapture::Initialize(UINT32 width, UINT32 height) {
 
     if (FAILED(hr) || reader_ == nullptr) {
         LogHr("MFCreateSourceReaderFromMediaSource failed", hr);
-        Shutdown();
         return false;
     }
     Log("[CameraCapture] Source reader created.");
@@ -237,7 +242,7 @@ bool CameraCapture::Initialize(UINT32 width, UINT32 height) {
         Log("[CameraCapture] Requested RGB32 size failed; falling back to camera default size.");
         if (!ConfigureRgb32Output(width, height, false)) {
             Log("[CameraCapture] Configure RGB32 output failed.");
-            Shutdown();
+            ReleaseReader();
             return false;
         }
     }
@@ -256,6 +261,31 @@ bool CameraCapture::Initialize(UINT32 width, UINT32 height) {
         << ".\n";
     Log(oss.str());
     return true;
+}
+
+void CameraCapture::ReleaseReader() {
+    if (reader_) {
+        reader_->Release();
+        reader_ = nullptr;
+    }
+}
+
+bool CameraCapture::RecoverReader() {
+    if (!mfStarted_) {
+        return false;
+    }
+
+    Log("[CameraCapture] Recovering camera source reader.");
+    ReleaseReader();
+    frameFailureLogCount_ = 0;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    const bool recovered = OpenReader(outputWidth_, outputHeight_);
+    Log(recovered
+        ? "[CameraCapture] Camera source reader recovered."
+        : "[CameraCapture] Camera source reader recovery failed.");
+    return recovered;
 }
 
 bool CameraCapture::ConfigureRgb32Output(UINT32 width, UINT32 height, bool setFrameSize) {
@@ -340,6 +370,7 @@ bool CameraCapture::GetFrame(IMFSample** outSample) {
     DWORD streamIndex = 0;
     DWORD flags = 0;
     LONGLONG timestamp = 0;
+    const auto readStart = std::chrono::steady_clock::now();
     HRESULT hr = reader_->ReadSample(
         static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
         0,
@@ -348,6 +379,23 @@ bool CameraCapture::GetFrame(IMFSample** outSample) {
         &timestamp,
         outSample
     );
+    const double readMs =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - readStart
+        ).count();
+    if (readMs > 250.0 && frameFailureLogCount_ < 30) {
+        std::ostringstream oss;
+        oss << "[CameraCapture] ReadSample slow. ms="
+            << std::fixed
+            << std::setprecision(2)
+            << readMs
+            << " flags=0x"
+            << std::hex
+            << std::uppercase
+            << flags;
+        Log(oss.str());
+        ++frameFailureLogCount_;
+    }
 
     if (FAILED(hr)) {
         if (frameFailureLogCount_ < 30) {
@@ -385,6 +433,15 @@ bool CameraCapture::GetFrame(IMFSample** outSample) {
             << flags;
         Log(oss.str());
         ++frameFailureLogCount_;
+    }
+    if (*outSample == nullptr &&
+        (flags & MF_SOURCE_READERF_STREAMTICK) != 0) {
+        const HRESULT flushHr = reader_->Flush(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM));
+        if (FAILED(flushHr) && frameFailureLogCount_ < 30) {
+            LogHr("Flush after stream tick failed", flushHr);
+            ++frameFailureLogCount_;
+        }
     }
 
     return *outSample != nullptr;
@@ -553,12 +610,22 @@ double CameraCapture::GetAsyncCaptureFps() const {
 }
 
 void CameraCapture::AsyncCaptureLoop() {
+    constexpr auto kRecoverAfterNoFrame =
+        std::chrono::milliseconds(1500);
+    constexpr uint32_t kMinFailuresBeforeRecover = 30;
+
+    auto lastFrameTime = std::chrono::steady_clock::now();
+    uint32_t consecutiveFailures = 0;
+
     while (asyncRunning_.load()) {
         std::vector<uint8_t> frame;
         const bool captured = TryGetRgbaFrame(frame);
         const auto now = std::chrono::steady_clock::now();
 
         if (captured && !frame.empty()) {
+            lastFrameTime = now;
+            consecutiveFailures = 0;
+
             std::lock_guard<std::mutex> lock(latestFrameMutex_);
             latestFrame_ = std::move(frame);
             latestFrameId_++;
@@ -581,6 +648,14 @@ void CameraCapture::AsyncCaptureLoop() {
             }
         }
         else {
+            ++consecutiveFailures;
+            const auto noFrameDuration = now - lastFrameTime;
+            if (consecutiveFailures >= kMinFailuresBeforeRecover &&
+                noFrameDuration >= kRecoverAfterNoFrame) {
+                RecoverReader();
+                lastFrameTime = std::chrono::steady_clock::now();
+                consecutiveFailures = 0;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
@@ -589,10 +664,7 @@ void CameraCapture::AsyncCaptureLoop() {
 void CameraCapture::Shutdown() {
     StopAsyncCapture();
 
-    if (reader_) {
-        reader_->Release();
-        reader_ = nullptr;
-    }
+    ReleaseReader();
 
     if (mfStarted_) {
         MFShutdown();

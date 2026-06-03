@@ -29,6 +29,9 @@ public:
 
 private:
     void AsyncCaptureLoop();
+    bool OpenReader(UINT32 width, UINT32 height);
+    bool RecoverReader();
+    void ReleaseReader();
     bool ConfigureRgb32Output(UINT32 width, UINT32 height, bool setFrameSize);
     bool UpdateCurrentFrameSize();
     void LogDirectShowVideoDevices() const;
