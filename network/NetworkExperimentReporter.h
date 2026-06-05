@@ -65,6 +65,12 @@ namespace net {
             uint64_t fecParityPackets = 0;
             uint64_t fecRecoveredFrames = 0;
             uint64_t fecRecoveredChunks = 0;
+            bool adaptiveFecRecoveryWorking = false;
+            bool adaptiveFecGuardActive = false;
+            double adaptiveFecRecoveryEfficiency = 0.0;
+            uint64_t adaptiveFecParityPacketDelta = 0;
+            uint64_t adaptiveFecRecoveredFrameDelta = 0;
+            uint64_t adaptiveFecRecoveredChunkDelta = 0;
             double packetLossRate = 0.0;
             double currentJitterMs = 0.0;
         };
@@ -100,6 +106,12 @@ namespace net {
             std::string adaptiveControlMode;
             std::string adaptiveCongestionControlMode;
             std::array<uint32_t, 10> adaptiveCauseSamples{};
+            uint32_t adaptiveFecRecoveryWorkingSamples = 0;
+            uint32_t adaptiveFecGuardActiveSamples = 0;
+            double adaptiveFecRecoveryEfficiencySum = 0.0;
+            uint64_t adaptiveFecParityPacketDeltas = 0;
+            uint64_t adaptiveFecRecoveredFrameDeltas = 0;
+            uint64_t adaptiveFecRecoveredChunkDeltas = 0;
             std::vector<TimeSeriesSample> timeSeriesSamples;
 
             NetworkStatsSnapshot lastStats{};
@@ -156,6 +168,14 @@ namespace net {
             uint64_t fecParityPackets = 0;
             uint64_t fecRecoveredFrames = 0;
             uint64_t fecRecoveredChunks = 0;
+            uint32_t adaptiveFecRecoveryWorkingSamples = 0;
+            uint32_t adaptiveFecGuardActiveSamples = 0;
+            double adaptiveFecRecoveryWorkingRatio = 0.0;
+            double adaptiveFecGuardActiveRatio = 0.0;
+            double avgAdaptiveFecRecoveryEfficiency = 0.0;
+            uint64_t adaptiveFecParityPacketDeltas = 0;
+            uint64_t adaptiveFecRecoveredFrameDeltas = 0;
+            uint64_t adaptiveFecRecoveredChunkDeltas = 0;
             uint64_t simDroppedPackets = 0;
 
             int minTargetFps = 0;

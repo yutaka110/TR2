@@ -274,7 +274,18 @@ private:
     uint32_t adaptiveFecStableSamples_ = 0;
     uint32_t adaptiveFecHoldSamples_ = 0;
     uint16_t adaptiveFecHoldGroupChunkCount_ = 8;
+    uint64_t adaptiveFecHoldUntilUs_ = 0;
+    uint64_t adaptiveFecG2UntilUs_ = 0;
+    uint64_t adaptiveFecG2CooldownUntilUs_ = 0;
+    uint64_t adaptiveFecIneffectiveOffUntilUs_ = 0;
+    uint64_t adaptiveFecIneffectiveOffStartExpiredFrames_ = 0;
+    uint16_t adaptiveFecIneffectiveOffRearmGroupChunkCount_ = 8;
+    uint32_t adaptiveFecPostOffRearmSamples_ = 0;
+    uint16_t adaptiveFecPostOffRearmGroupChunkCount_ = 8;
     uint32_t adaptiveFecWasteSamples_ = 0;
+    uint32_t adaptiveFecIneffectiveSamples_ = 0;
+    uint32_t adaptiveFecUncoveredDeadlineSamples_ = 0;
+    uint32_t adaptiveFecCoveredRecoverySamples_ = 0;
 
     std::atomic<uint32_t> rnvpSequence_{ 1 };
 

@@ -119,8 +119,12 @@ namespace net {
         uint64_t lastFecParityPackets = 0;
         uint64_t lastFecRecoveredFrames = 0;
         uint64_t lastFecRecoveredChunks = 0;
+        uint64_t lastFecParityPacketDelta = 0;
+        uint64_t lastFecRecoveredFrameDelta = 0;
+        uint64_t lastFecRecoveredChunkDelta = 0;
         double lastFecRecoveryEfficiency = 0.0;
         bool lastFecRecoveryWorking = false;
+        bool lastFecRecoveryGuardActive = false;
         uint64_t lastDeadlineNackExpiredDroppedFrames = 0;
         uint64_t lastDeadlineNackExpiredAfterNackFrames = 0;
         uint64_t lastAckStaleDroppedFrames = 0;
@@ -170,6 +174,11 @@ namespace net {
         );
         void ApplyAimdMultiplicativeDecrease(double factor);
         void ApplyAimdDecrease(
+            const AdaptiveStreamingInput& input,
+            AdaptiveDegradationCause cause,
+            bool hardProblem
+        );
+        void ApplyAimdBitrateOnlyDecrease(
             const AdaptiveStreamingInput& input,
             AdaptiveDegradationCause cause,
             bool hardProblem
@@ -291,6 +300,14 @@ namespace net {
         uint64_t lastFecRecoveredFrames_ = 0;
         uint64_t lastFecRecoveredChunks_ = 0;
         double fecRecoveryGuardSec_ = 0.0;
+        double lastEffectiveFecRecoveryEfficiency_ = 0.0;
+        double fecRecoveryEvidenceSec_ = 0.0;
+        uint32_t recoveryDeadlineFallbackSamples_ = 0;
+        uint32_t nackExpiredRisingSamples_ = 0;
+        double nackExpiredGuardReleaseSec_ = 0.0;
+        double postNackExpiredGuardRearmSec_ = 0.0;
+        uint32_t nackExpiredBitrateOnlyDecreaseSamples_ = 0;
+        uint32_t nackExpiredBitrateOnlyDecreaseBudget_ = 2;
         int activeBandwidthCeilingKbps_ = 12000;
 
         static constexpr int kMinQuality = 35;
