@@ -677,6 +677,7 @@ int AppMain::Run() {
 	}
 
 	AppRuntimeState runtimeState{};
+	bool autoNetworkExperiment = false;
 	if (char networkModeBuffer[64]{};
 		GetEnvironmentVariableA(
 			"TR2_NETWORK_MODE",
@@ -687,6 +688,7 @@ int AppMain::Run() {
 	}
 	if (GetEnvironmentVariableA("TR2_NETWORK_EXPERIMENT_AUTO", nullptr, 0) > 0) {
 		runtimeState.networkExperimentMode = true;
+		autoNetworkExperiment = true;
 	}
 	if (char presentSyncBuffer[16]{};
 		GetEnvironmentVariableA(
@@ -973,6 +975,7 @@ int AppMain::Run() {
 	}
 	std::mutex adaptiveControllerMutex;
 	net::NetworkExperimentRunner networkExperimentRunner;
+	networkExperimentRunner.SetStopAfterOnePass(autoNetworkExperiment);
 	struct NetworkSendTelemetry {
 		std::mutex mutex;
 		double captureFps = 0.0;
@@ -1043,6 +1046,9 @@ int AppMain::Run() {
 			stats.ackStaleDroppedFrames = sender->GetAckStaleDroppedFrameCount();
 			stats.ackKeyFrameRequests = sender->GetAckKeyFrameRequestCount();
 			stats.ackKeyFramePending = sender->IsKeyFrameRequestPending();
+			stats.fecEnabled = sender->IsFecEnabled();
+			stats.adaptiveFecEnabled = sender->IsAdaptiveFecEnabled();
+			stats.fecGroupChunkCount = sender->GetFecGroupChunkCount();
 
 			const net::PacketPacerStats pacingStats =
 				sender->GetPacingStats();
@@ -1297,7 +1303,18 @@ int AppMain::Run() {
 			<< networkExperimentReporter.MarkdownFilePath()
 			<< " before/after: "
 			<< networkExperimentReporter.BeforeAfterFilePath()
+			<< " repeat: "
+			<< networkExperimentReporter.RepeatReportFilePath()
+			<< " manifest: "
+			<< networkExperimentReporter.ManifestFilePath()
 			<< "\n";
+		networkExperimentReporter.WriteManifest(
+			networkExperimentRunner.Scenarios(),
+			networkCsvLogger.FilePath(),
+			runtimeState.networkRuntimeMode,
+			autoNetworkExperiment,
+			autoNetworkExperiment,
+			networkExperimentRunner.WarmupSec());
 	}
 	else {
 		std::cerr << "[AppMain] Network experiment summary failed to start.\n";
@@ -1716,6 +1733,7 @@ int AppMain::Run() {
 	bool receiverRuntimeActive =
 		udpReceiver &&
 		udpReceiver->IsRunning();
+	bool autoNetworkExperimentShutdownRequested = false;
 
 	while (msg.message != WM_QUIT) {
 		if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -1775,6 +1793,20 @@ int AppMain::Run() {
 				if (networkManager) {
 					networkManager->SetNetworkCondition(
 						networkExperimentRunner.CurrentCondition());
+					networkManager->SetAdaptiveFecEnabled(
+						networkExperimentRunner.CurrentAdaptiveFecEnabled());
+					if (!networkExperimentRunner.CurrentAdaptiveFecEnabled()) {
+						networkManager->SetFecEnabled(
+							networkExperimentRunner.CurrentFecEnabled());
+						networkManager->SetFecGroupChunkCount(
+							networkExperimentRunner.CurrentFecGroupChunkCount());
+					}
+					else if (experimentScenarioChanged) {
+						networkManager->SetFecEnabled(
+							networkExperimentRunner.CurrentFecEnabled());
+						networkManager->SetFecGroupChunkCount(
+							networkExperimentRunner.CurrentFecGroupChunkCount());
+					}
 				}
 				if (adaptiveController) {
 					std::lock_guard<std::mutex> lock(
@@ -1794,6 +1826,9 @@ int AppMain::Run() {
 					networkManager &&
 					networkSendEnabled) {
 					networkManager->SetNetworkCondition(net::NetworkCondition{});
+					networkManager->SetAdaptiveFecEnabled(false);
+					networkManager->SetFecEnabled(true);
+					networkManager->SetFecGroupChunkCount(4);
 				}
 				if (experimentScenarioChanged &&
 					adaptiveController) {
@@ -1836,6 +1871,14 @@ int AppMain::Run() {
 						<< " congestionMode="
 						<< net::ToString(
 							networkExperimentRunner.CurrentCongestionControlMode())
+						<< " fec="
+						<< (networkExperimentRunner.CurrentAdaptiveFecEnabled()
+							? "adaptive"
+							: (networkExperimentRunner.CurrentFecEnabled()
+								? "on"
+								: "off"))
+						<< " fecGroup="
+						<< networkExperimentRunner.CurrentFecGroupChunkCount()
 						<< " remainingSec="
 						<< networkExperimentRunner.RemainingSec();
 				}
@@ -1846,6 +1889,32 @@ int AppMain::Run() {
 				OutputDebugStringA(oss.str().c_str());
 				OutputDebugStringA("\n");
 				std::cout << oss.str() << "\n";
+
+				if (!networkExperimentRunner.IsActive() &&
+					networkExperimentReporter.IsRunning()) {
+					networkExperimentReporter.Stop();
+				}
+
+				if (autoNetworkExperiment &&
+					networkExperimentRunner.IsCompleted() &&
+					!autoNetworkExperimentShutdownRequested) {
+					autoNetworkExperimentShutdownRequested = true;
+					if (networkExperimentReporter.IsRunning()) {
+						networkExperimentReporter.Stop();
+					}
+					if (networkCsvLogger.IsRunning()) {
+						networkCsvLogger.Stop();
+					}
+
+					const char* shutdownMessage =
+						"[AppMain] Auto network experiment completed; "
+						"flushed logs and requested application shutdown.";
+					OutputDebugStringA(shutdownMessage);
+					OutputDebugStringA("\n");
+					std::cout << shutdownMessage << "\n";
+					PostQuitMessage(0);
+					continue;
+				}
 			}
 
 			if (networkManager &&
@@ -1943,12 +2012,39 @@ int AppMain::Run() {
 					bandwidthStats.jitterTrendMs;
 				adaptiveInput.bandwidthFeedbackSamples =
 					bandwidthStats.feedbackSamples;
+				adaptiveInput.fecEnabled = networkManager->IsFecEnabled();
+				adaptiveInput.adaptiveFecEnabled =
+					networkManager->IsAdaptiveFecEnabled();
+				adaptiveInput.fecGroupChunkCount =
+					networkManager->GetFecGroupChunkCount();
+				adaptiveInput.fecParityPackets =
+					receiverStats.fecParityPackets;
+				adaptiveInput.fecRecoveredFrames =
+					receiverStats.fecRecoveredFrames;
+				adaptiveInput.fecRecoveredChunks =
+					receiverStats.fecRecoveredChunks;
 
+				net::AdaptiveStreamingState adaptiveState{};
 				{
 					std::lock_guard<std::mutex> lock(
 						adaptiveControllerMutex);
 					adaptiveController->Update(adaptiveInput, deltaTimeSec);
+					adaptiveState = adaptiveController->GetState();
 				}
+
+				networkManager->UpdateAdaptiveFec(
+					(std::max)(
+						adaptiveInput.packetLossRate,
+						adaptiveInput.bandwidthLossTrend),
+					adaptiveInput.ackMissingRate,
+					adaptiveInput.deadlineNackSentFrames,
+					adaptiveInput.deadlineNackExpiredDroppedFrames,
+					receiverStats.fecParityPackets,
+					receiverStats.fecRecoveredFrames,
+					adaptiveInput.estimatedBandwidthBps,
+					static_cast<uint32_t>(
+						(std::max)(0, adaptiveState.targetBitrateKbps)),
+					adaptiveInput.bandwidthQueueDelayMs);
 			}
 
 			if ((networkCsvLogger.IsRunning() ||
@@ -1974,7 +2070,9 @@ int AppMain::Run() {
 					networkExperimentReporter.RecordSample(
 						networkExperimentRunner.CurrentScenarioName(),
 						networkStats,
-						appTimeSec);
+						appTimeSec,
+						networkExperimentRunner.ElapsedSec(),
+						networkExperimentRunner.WarmupSec());
 				}
 
 				lastNetworkCsvSampleTime = now;

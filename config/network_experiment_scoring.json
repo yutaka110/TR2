@@ -1,0 +1,30 @@
+{
+  "p95LatencyMs": 1.0,
+  "frameDropRate": 500.0,
+  "droppedFrames": 8.0,
+  "deadlineDroppedFrames": 12.0,
+  "outputQueueDroppedFrames": 5.0,
+  "deadlineNackExpiredDroppedFrames": 3.0,
+  "fecParityPackets": 0.03,
+  "fecInefficiency": 20.0,
+  "fecRecoveredFramesBonus": 0.50,
+  "avgDisplayFpsBonus": 0.75,
+  "avgQoeScoreBonus": 8.0,
+  "qualityFloorPenalties": {
+    "fps": [
+      { "lte": 8, "penalty": 500.0 },
+      { "lt": 12, "penalty": 250.0 },
+      { "lt": 15, "penalty": 120.0 }
+    ],
+    "jpegQuality": [
+      { "lte": 40, "penalty": 450.0 },
+      { "lt": 55, "penalty": 220.0 },
+      { "lt": 65, "penalty": 90.0 }
+    ],
+    "bitrateKbps": [
+      { "lte": 1000, "penalty": 350.0 },
+      { "lt": 1800, "penalty": 180.0 },
+      { "lt": 2500, "penalty": 80.0 }
+    ]
+  }
+}

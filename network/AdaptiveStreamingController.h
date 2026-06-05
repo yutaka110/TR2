@@ -73,6 +73,12 @@ namespace net {
         double bandwidthLossTrend = 0.0;
         double bandwidthJitterTrendMs = 0.0;
         uint64_t bandwidthFeedbackSamples = 0;
+        bool fecEnabled = false;
+        bool adaptiveFecEnabled = false;
+        uint32_t fecGroupChunkCount = 0;
+        uint64_t fecParityPackets = 0;
+        uint64_t fecRecoveredFrames = 0;
+        uint64_t fecRecoveredChunks = 0;
     };
 
     struct AdaptiveStreamingState {
@@ -107,6 +113,14 @@ namespace net {
         double lastBandwidthRttTrendMs = 0.0;
         double lastBandwidthLossTrend = 0.0;
         double lastBandwidthJitterTrendMs = 0.0;
+        bool lastFecEnabled = false;
+        bool lastAdaptiveFecEnabled = false;
+        uint32_t lastFecGroupChunkCount = 0;
+        uint64_t lastFecParityPackets = 0;
+        uint64_t lastFecRecoveredFrames = 0;
+        uint64_t lastFecRecoveredChunks = 0;
+        double lastFecRecoveryEfficiency = 0.0;
+        bool lastFecRecoveryWorking = false;
         uint64_t lastDeadlineNackExpiredDroppedFrames = 0;
         uint64_t lastDeadlineNackExpiredAfterNackFrames = 0;
         uint64_t lastAckStaleDroppedFrames = 0;
@@ -272,6 +286,11 @@ namespace net {
         uint64_t lastReceiveFreshnessDroppedFrames_ = 0;
         bool hasPacingCounters_ = false;
         uint64_t lastPacingDeadlineDroppedPackets_ = 0;
+        bool hasFecCounters_ = false;
+        uint64_t lastFecParityPackets_ = 0;
+        uint64_t lastFecRecoveredFrames_ = 0;
+        uint64_t lastFecRecoveredChunks_ = 0;
+        double fecRecoveryGuardSec_ = 0.0;
         int activeBandwidthCeilingKbps_ = 12000;
 
         static constexpr int kMinQuality = 35;

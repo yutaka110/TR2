@@ -109,6 +109,12 @@ namespace net {
 		uint64_t deadlineNackExpiredDroppedFrames = 0;
 		uint64_t deadlineNackExpiredAfterNackFrames = 0;
 		uint64_t deadlineNackExpiredMissingChunks = 0;
+		bool fecEnabled = false;
+		bool adaptiveFecEnabled = false;
+		uint32_t fecGroupChunkCount = 0;
+		uint64_t fecParityPackets = 0;
+		uint64_t fecRecoveredFrames = 0;
+		uint64_t fecRecoveredChunks = 0;
 
 		// ============================================================
         // Adaptive Streaming
@@ -267,6 +273,8 @@ namespace net {
 			uint32_t missingChunkCount,
 			bool nackSent
 		);
+		void OnFecParityPacket();
+		void OnFecRecoveredFrame(uint32_t recoveredChunkCount);
 
 		// 重複packetを観測したときに呼ぶ
 		void OnDuplicatePacket();

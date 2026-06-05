@@ -29,19 +29,39 @@ namespace {
         const NetworkCondition& condition,
         AdaptiveControlMode mode,
         CongestionControlMode congestionMode,
-        double durationSec
+        double durationSec,
+        bool fecEnabled = true,
+        uint16_t fecGroupChunkCount = 4,
+        bool adaptiveFecEnabled = false
     ) {
         NetworkExperimentScenario scenario{};
         scenario.networkScenarioName = networkName;
         scenario.condition = condition;
         scenario.adaptiveControlMode = mode;
         scenario.congestionControlMode = congestionMode;
+        scenario.fecEnabled = fecEnabled;
+        scenario.adaptiveFecEnabled = adaptiveFecEnabled;
+        scenario.fecGroupChunkCount = static_cast<uint16_t>(
+            (std::max)(2u, (std::min)(32u,
+                static_cast<unsigned>(fecGroupChunkCount)))
+        );
         scenario.durationSec = durationSec;
         scenario.name =
             scenario.networkScenarioName + " / " + ToString(mode);
         if (mode == AdaptiveControlMode::QoeDeadlineAdaptive) {
             scenario.name += " / ";
             scenario.name += ToString(congestionMode);
+        }
+        scenario.name += " / ";
+        if (!scenario.fecEnabled && !scenario.adaptiveFecEnabled) {
+            scenario.name += "FEC off";
+        }
+        else if (scenario.adaptiveFecEnabled) {
+            scenario.name += "Adaptive FEC";
+        }
+        else {
+            scenario.name += "FEC g";
+            scenario.name += std::to_string(scenario.fecGroupChunkCount);
         }
         return scenario;
     }
@@ -78,11 +98,19 @@ namespace {
 
         if (!enabled) {
             if (!active_) {
+                if (completed_) {
+                    Reset();
+                    return true;
+                }
                 return false;
             }
 
             Reset();
             return true;
+        }
+
+        if (completed_) {
+            return false;
         }
 
         if (!active_) {
@@ -101,8 +129,21 @@ namespace {
             return false;
         }
 
+        if (currentIndex_ + 1 >= scenarios_.size()) {
+            if (stopAfterOnePass_) {
+                active_ = false;
+                completed_ = true;
+                elapsedSec_ = 0.0;
+                return true;
+            }
+
+            currentIndex_ = 0;
+        }
+        else {
+            currentIndex_++;
+        }
+
         elapsedSec_ = 0.0;
-        currentIndex_ = (currentIndex_ + 1) % scenarios_.size();
         return true;
     }
 
@@ -110,10 +151,19 @@ namespace {
         active_ = false;
         currentIndex_ = 0;
         elapsedSec_ = 0.0;
+        completed_ = false;
+    }
+
+    void NetworkExperimentRunner::SetStopAfterOnePass(bool enabled) {
+        stopAfterOnePass_ = enabled;
     }
 
     bool NetworkExperimentRunner::IsActive() const {
         return active_;
+    }
+
+    bool NetworkExperimentRunner::IsCompleted() const {
+        return completed_;
     }
 
     const NetworkExperimentScenario& NetworkExperimentRunner::CurrentScenario() const {
@@ -132,12 +182,32 @@ namespace {
         return CurrentScenario().congestionControlMode;
     }
 
+    bool NetworkExperimentRunner::CurrentFecEnabled() const {
+        return CurrentScenario().fecEnabled;
+    }
+
+    bool NetworkExperimentRunner::CurrentAdaptiveFecEnabled() const {
+        return CurrentScenario().adaptiveFecEnabled;
+    }
+
+    uint16_t NetworkExperimentRunner::CurrentFecGroupChunkCount() const {
+        return CurrentScenario().fecGroupChunkCount;
+    }
+
     const std::string& NetworkExperimentRunner::CurrentScenarioName() const {
         return CurrentScenario().name;
     }
 
     const std::string& NetworkExperimentRunner::CurrentNetworkScenarioName() const {
         return CurrentScenario().networkScenarioName;
+    }
+
+    double NetworkExperimentRunner::ElapsedSec() const {
+        return elapsedSec_;
+    }
+
+    double NetworkExperimentRunner::WarmupSec() const {
+        return warmupSec_;
     }
 
     double NetworkExperimentRunner::RemainingSec() const {
@@ -152,6 +222,11 @@ namespace {
 
     size_t NetworkExperimentRunner::ScenarioCount() const {
         return scenarios_.size();
+    }
+
+    const std::vector<NetworkExperimentScenario>&
+        NetworkExperimentRunner::Scenarios() const {
+        return scenarios_;
     }
 
     std::vector<NetworkExperimentScenario>
@@ -214,6 +289,22 @@ namespace {
             MakeScenario("Burst loss", burstLoss,
                 AdaptiveControlMode::QoeDeadlineAdaptive,
                 CongestionControlMode::Hybrid, durationSec),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec,
+                false, 4, false),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec,
+                true, 8, false),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec,
+                true, 2, false),
+            MakeScenario("Burst loss", burstLoss,
+                AdaptiveControlMode::QoeDeadlineAdaptive,
+                CongestionControlMode::Hybrid, durationSec,
+                true, 4, true),
         };
     }
 

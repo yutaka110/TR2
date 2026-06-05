@@ -93,6 +93,11 @@ namespace net {
         lastReceiveFreshnessDroppedFrames_ = 0;
         hasPacingCounters_ = false;
         lastPacingDeadlineDroppedPackets_ = 0;
+        hasFecCounters_ = false;
+        lastFecParityPackets_ = 0;
+        lastFecRecoveredFrames_ = 0;
+        lastFecRecoveredChunks_ = 0;
+        fecRecoveryGuardSec_ = 0.0;
         activeBandwidthCeilingKbps_ = kMaxBitrateKbps;
         state_.bandwidthCeilingKbps = activeBandwidthCeilingKbps_;
     }
@@ -184,6 +189,12 @@ namespace net {
         state_.lastBandwidthRttTrendMs = input.bandwidthRttTrendMs;
         state_.lastBandwidthLossTrend = input.bandwidthLossTrend;
         state_.lastBandwidthJitterTrendMs = input.bandwidthJitterTrendMs;
+        state_.lastFecEnabled = input.fecEnabled;
+        state_.lastAdaptiveFecEnabled = input.adaptiveFecEnabled;
+        state_.lastFecGroupChunkCount = input.fecGroupChunkCount;
+        state_.lastFecParityPackets = input.fecParityPackets;
+        state_.lastFecRecoveredFrames = input.fecRecoveredFrames;
+        state_.lastFecRecoveredChunks = input.fecRecoveredChunks;
         activeBandwidthCeilingKbps_ = CalculateBandwidthCeilingKbps(input);
         state_.bandwidthCeilingKbps = activeBandwidthCeilingKbps_;
         state_.controlMode = controlMode_;
@@ -269,6 +280,50 @@ namespace net {
         hasPacingCounters_ = true;
         lastPacingDeadlineDroppedPackets_ =
             input.pacingDeadlineDroppedPackets;
+
+        uint64_t fecParityPacketDelta = 0;
+        uint64_t fecRecoveredFrameDelta = 0;
+        uint64_t fecRecoveredChunkDelta = 0;
+        if (hasFecCounters_) {
+            if (input.fecParityPackets >= lastFecParityPackets_) {
+                fecParityPacketDelta =
+                    input.fecParityPackets - lastFecParityPackets_;
+            }
+            if (input.fecRecoveredFrames >= lastFecRecoveredFrames_) {
+                fecRecoveredFrameDelta =
+                    input.fecRecoveredFrames - lastFecRecoveredFrames_;
+            }
+            if (input.fecRecoveredChunks >= lastFecRecoveredChunks_) {
+                fecRecoveredChunkDelta =
+                    input.fecRecoveredChunks - lastFecRecoveredChunks_;
+            }
+        }
+
+        hasFecCounters_ = true;
+        lastFecParityPackets_ = input.fecParityPackets;
+        lastFecRecoveredFrames_ = input.fecRecoveredFrames;
+        lastFecRecoveredChunks_ = input.fecRecoveredChunks;
+
+        const uint64_t fecRecoveredUnits =
+            (std::max)(fecRecoveredFrameDelta, fecRecoveredChunkDelta);
+        const double fecRecoveryEfficiency =
+            fecParityPacketDelta > 0
+            ? static_cast<double>(fecRecoveredUnits) /
+                static_cast<double>(fecParityPacketDelta)
+            : (fecRecoveredUnits > 0 ? 1.0 : 0.0);
+        const bool fecRecoveryWorkingNow =
+            fecRecoveredUnits > 0 &&
+            (fecParityPacketDelta == 0 || fecRecoveryEfficiency >= 0.25);
+        if (fecRecoveryWorkingNow) {
+            fecRecoveryGuardSec_ = (std::max)(fecRecoveryGuardSec_, 2.5);
+        }
+        else if (fecRecoveryGuardSec_ > 0.0) {
+            fecRecoveryGuardSec_ =
+                (std::max)(0.0, fecRecoveryGuardSec_ - deltaTimeSec);
+        }
+        state_.lastFecRecoveryEfficiency = fecRecoveryEfficiency;
+        state_.lastFecRecoveryWorking =
+            fecRecoveryWorkingNow || fecRecoveryGuardSec_ > 0.0;
 
         const uint64_t qualityDeadlineDropDelta =
             suppressPacingDropForQuality ? 0 : deadlineDropDelta;
@@ -356,23 +411,49 @@ namespace net {
             return;
         }
 
-        const bool hardQoeProblem = qoeScore >= 2.0;
-        const bool moderateQoeProblem = qoeScore >= 1.0;
+        const bool displayHealthy =
+            input.displayedFrames < 10 ||
+            input.displayFps <= 0.0 ||
+            input.displayFps >=
+            static_cast<double>(state_.targetFps) * 0.85;
+        const bool fecGuardDisplayHealthy =
+            input.displayedFrames < 10 ||
+            input.displayFps <= 0.0 ||
+            input.displayFps >=
+            static_cast<double>(state_.targetFps) * 0.70;
+        const bool fecRecoveryCoversDeadline =
+            recoveryDeadlineDropDelta == 0 ||
+            (fecRecoveredFrameDelta >= recoveryDeadlineDropDelta &&
+                recoveryDeadlineDropDelta <= 5);
+        const bool fecQualityGuard =
+            state_.lastFecRecoveryWorking &&
+            fecRecoveryCoversDeadline &&
+            qualityDeadlineDropDelta == 0 &&
+            outputQueueDropDelta == 0 &&
+            retransmitStaleDropDelta == 0 &&
+            freshnessDropDelta == 0 &&
+            input.latencyMs < 90.0 &&
+            fecGuardDisplayHealthy;
+
+        const bool hardQoeProblem =
+            qoeScore >= 2.0 &&
+            !(fecQualityGuard && qoeScore < 3.0);
+        const bool moderateQoeProblem =
+            qoeScore >= 1.0 &&
+            !fecQualityGuard;
         const bool congestionPressure =
             HasCongestionPressure(
                 input,
                 qualityDeadlineNackDelta,
                 qualityDeadlineNackMissingChunkDelta);
         const bool bandwidthPressure = HasBandwidthPressure(input);
+        const bool guardedCongestionPressure =
+            congestionPressure && !fecQualityGuard;
+        const bool guardedBandwidthPressure =
+            bandwidthPressure && !fecQualityGuard;
         const bool lossOnlyPressure =
             !moderateQoeProblem &&
-            congestionPressure;
-
-        const bool displayHealthy =
-            input.displayedFrames < 10 ||
-            input.displayFps <= 0.0 ||
-            input.displayFps >=
-            static_cast<double>(state_.targetFps) * 0.85;
+            guardedCongestionPressure;
 
         const bool stableNetwork =
             qoeScore <= 0.25 &&
@@ -417,7 +498,7 @@ namespace net {
             badTimeSec_ = 0.0;
             cooldownSec_ = 1.6;
         }
-        else if (bandwidthPressure && lossOnlyBadTimeSec_ >= 2.0) {
+        else if (guardedBandwidthPressure && lossOnlyBadTimeSec_ >= 2.0) {
             ApplyAimdDecrease(
                 input,
                 AdaptiveDegradationCause::Bandwidth,
@@ -428,7 +509,7 @@ namespace net {
         else if (lossOnlyPressure && lossOnlyBadTimeSec_ >= 4.0) {
             ApplyAimdDecrease(
                 input,
-                bandwidthPressure
+                guardedBandwidthPressure
                 ? AdaptiveDegradationCause::Bandwidth
                 : AdaptiveDegradationCause::PacketLoss,
                 false);

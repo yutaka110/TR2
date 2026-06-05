@@ -79,6 +79,23 @@ public:
     bool IsPacingEnabled() const;
     void SetPacingTargetBitrateKbps(uint32_t bitrateKbps);
     net::PacketPacerStats GetPacingStats() const;
+    void SetFecEnabled(bool enabled);
+    bool IsFecEnabled() const;
+    void SetAdaptiveFecEnabled(bool enabled);
+    bool IsAdaptiveFecEnabled() const;
+    void SetFecGroupChunkCount(uint16_t groupChunkCount);
+    uint16_t GetFecGroupChunkCount() const;
+    void UpdateAdaptiveFec(
+        double packetLossRate,
+        double ackMissingRate,
+        uint64_t deadlineNackSentFrames,
+        uint64_t deadlineNackExpiredDroppedFrames,
+        uint64_t fecParityPackets,
+        uint64_t fecRecoveredFrames,
+        uint32_t estimatedBandwidthBps,
+        uint32_t targetBitrateKbps,
+        double queueDelayMs
+    );
 
     struct TransportFeedbackStats {
         uint64_t feedbackPackets = 0;
@@ -136,6 +153,17 @@ private:
         net::CodecType codecType,
         uint32_t streamId,
         bool keyFrame,
+        uint64_t sendTimeUs,
+        const char* context
+    );
+
+    bool SendRNVPFecParity(
+        const std::vector<uint8_t>& data,
+        uint32_t frameId,
+        net::CodecType codecType,
+        uint32_t streamId,
+        bool keyFrame,
+        uint16_t chunkCount,
         uint64_t sendTimeUs,
         const char* context
     );
@@ -234,6 +262,19 @@ private:
     net::NetworkConditionSimulator networkSimulator_;
     net::PacketPacer packetPacer_;
     net::BandwidthEstimator bandwidthEstimator_;
+    std::atomic<bool> fecEnabled_{ true };
+    std::atomic<bool> adaptiveFecEnabled_{ false };
+    std::atomic<uint16_t> fecGroupChunkCount_{ 4 };
+    mutable std::mutex adaptiveFecMutex_;
+    uint64_t adaptiveFecLastDeadlineNackSentFrames_ = 0;
+    uint64_t adaptiveFecLastDeadlineNackExpiredDroppedFrames_ = 0;
+    uint64_t adaptiveFecLastParityPackets_ = 0;
+    uint64_t adaptiveFecLastRecoveredFrames_ = 0;
+    double adaptiveFecLossPressureEma_ = 0.0;
+    uint32_t adaptiveFecStableSamples_ = 0;
+    uint32_t adaptiveFecHoldSamples_ = 0;
+    uint16_t adaptiveFecHoldGroupChunkCount_ = 8;
+    uint32_t adaptiveFecWasteSamples_ = 0;
 
     std::atomic<uint32_t> rnvpSequence_{ 1 };
 

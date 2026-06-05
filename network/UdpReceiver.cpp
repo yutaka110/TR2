@@ -559,7 +559,8 @@ namespace {
         const size_t payloadSize = header.payloadSize;
 
         switch (packetType) {
-        case PacketType::Data: {
+        case PacketType::Data:
+        case PacketType::Fec: {
             lastRnvpDataAddr_ = fromAddr;
             hasLastRnvpDataAddr_ = true;
             TrackTransportFeedback(header, receiveTimeUs);
@@ -583,6 +584,7 @@ namespace {
             // 「LastChunkを受け取ったときだけACKを返す」方式にする。
             // ============================================================
             const bool isLastChunk =
+                packetType == PacketType::Data &&
                 (header.flags & PacketFlag_LastChunk) != 0;
 
             if (ackInfo.valid && isLastChunk) {

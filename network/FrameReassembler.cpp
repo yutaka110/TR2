@@ -38,7 +38,7 @@ namespace net {
             *outAckInfo = FrameAckInfo{};
         }
 
-        ParsedDataPacket parsed;
+        ParsedDataPacket parsed{};
         if (!TryParseDataPacket(packetData, packetSize, parsed)) {
             return std::nullopt;
         }
@@ -103,6 +103,48 @@ namespace net {
             return std::nullopt;
         }
 
+        if (parsed.isFec) {
+            if (StoreFecParity(frame, parsed) && stats_) {
+                stats_->OnFecParityPacket();
+            }
+            frame.lastUpdateTimeUs = receiveTimeUs;
+
+            const uint32_t fecRecoveredChunks =
+                TryRecoverMissingChunksWithFec(frame);
+            if (fecRecoveredChunks > 0 && stats_) {
+                stats_->OnFecRecoveredFrame(fecRecoveredChunks);
+            }
+
+            if (outAckInfo && parsed.isRnvp) {
+                *outAckInfo = BuildAckInfoFromPendingFrame(frame);
+            }
+
+            if (frame.receivedCount == frame.chunkCount) {
+                auto completed = TryBuildFrame(frame, receiveTimeUs);
+
+                if (frame.nackSent && completed && stats_) {
+                    stats_->OnDeadlineNackRecoveredFrame();
+                }
+                frame.recoveryState = FrameRecoveryState::Recovered;
+
+                pendingFrames_.erase(frameKey);
+                RetireFrame(frameKey);
+
+                if (completed && stats_) {
+                    stats_->OnFrameCompleted(
+                        completed->frameId,
+                        static_cast<uint64_t>(completed->data.size()),
+                        completed->sendTimeUs,
+                        completed->receiveTimeUs
+                    );
+                }
+
+                return completed;
+            }
+
+            return std::nullopt;
+        }
+
         if (frame.received[parsed.chunkIndex]) {
             if (stats_) {
                 stats_->OnDuplicatePacket();
@@ -124,6 +166,12 @@ namespace net {
         frame.receivedCount++;
         frame.latestSequence = parsed.sequence;
         frame.lastUpdateTimeUs = receiveTimeUs;
+
+        const uint32_t fecRecoveredChunks =
+            TryRecoverMissingChunksWithFec(frame);
+        if (fecRecoveredChunks > 0 && stats_) {
+            stats_->OnFecRecoveredFrame(fecRecoveredChunks);
+        }
 
         if (outAckInfo && parsed.isRnvp) {
             *outAckInfo = BuildAckInfoFromPendingFrame(frame);
@@ -334,11 +382,12 @@ namespace net {
 
             // FrameReassemblerはData専用。
             // ACK / Ping / Pong / Control はUdpReceiver側で処理する。
-            if (packetType != PacketType::Data) {
+            if (!IsMediaPacket(packetType)) {
                 return false;
             }
 
             outPacket.isRnvp = true;
+            outPacket.isFec = packetType == PacketType::Fec;
             outPacket.sequence = header.sequence;
             outPacket.streamId = header.streamId;
 
@@ -352,6 +401,44 @@ namespace net {
 
             outPacket.codecType = static_cast<CodecType>(header.codecType);
             outPacket.payload = packetData + kRnvpHeaderV1Size;
+
+            if (outPacket.isFec) {
+                FecPayloadHeader fecHeader{};
+                if (!DecodeFecPayloadHeader(
+                    outPacket.payload,
+                    header.payloadSize,
+                    fecHeader)) {
+                    return false;
+                }
+
+                const uint32_t groupStart = header.chunkIndex;
+                const uint32_t groupEnd =
+                    groupStart + fecHeader.protectedChunkCount;
+                if (fecHeader.protectedChunkCount == 0 ||
+                    groupStart >= header.chunkCount ||
+                    groupEnd > header.chunkCount) {
+                    return false;
+                }
+
+                const size_t expectedChunkCount =
+                    (static_cast<size_t>(fecHeader.framePayloadBytes) +
+                        kMaxUdpPayloadSize - 1) /
+                    kMaxUdpPayloadSize;
+                if (expectedChunkCount == 0 ||
+                    expectedChunkCount != header.chunkCount) {
+                    return false;
+                }
+
+                outPacket.fecFramePayloadBytes =
+                    fecHeader.framePayloadBytes;
+                outPacket.fecParityPayloadBytes =
+                    fecHeader.parityPayloadBytes;
+                outPacket.fecProtectedChunkCount =
+                    fecHeader.protectedChunkCount;
+                outPacket.payload =
+                    packetData + kRnvpHeaderV1Size + kFecPayloadHeaderSize;
+                outPacket.payloadSize = fecHeader.parityPayloadBytes;
+            }
 
             return true;
         }
@@ -388,6 +475,154 @@ namespace net {
         }
 
         return completed;
+    }
+
+    bool FrameReassembler::StoreFecParity(
+        PendingFrame& frame,
+        const ParsedDataPacket& packet
+    ) {
+        if (!packet.isFec ||
+            packet.payload == nullptr ||
+            packet.payloadSize == 0 ||
+            packet.fecParityPayloadBytes != packet.payloadSize) {
+            return false;
+        }
+
+        const uint64_t maxFramePayloadBytes =
+            static_cast<uint64_t>(frame.chunkCount) * kMaxUdpPayloadSize;
+        if (packet.fecFramePayloadBytes == 0 ||
+            packet.fecFramePayloadBytes > maxFramePayloadBytes ||
+            packet.chunkIndex >= frame.chunkCount ||
+            packet.fecProtectedChunkCount == 0 ||
+            static_cast<uint32_t>(packet.chunkIndex) +
+            packet.fecProtectedChunkCount > frame.chunkCount) {
+            return false;
+        }
+
+        frame.fecFramePayloadBytes = packet.fecFramePayloadBytes;
+        FecParityGroup group{};
+        group.startChunkIndex = packet.chunkIndex;
+        group.protectedChunkCount = packet.fecProtectedChunkCount;
+        group.parityPayloadBytes = packet.fecParityPayloadBytes;
+        group.parity.assign(
+            packet.payload,
+            packet.payload + packet.payloadSize
+        );
+
+        auto existing = std::find_if(
+            frame.fecParityGroups.begin(),
+            frame.fecParityGroups.end(),
+            [&group](const FecParityGroup& candidate) {
+                return candidate.startChunkIndex == group.startChunkIndex &&
+                    candidate.protectedChunkCount == group.protectedChunkCount;
+            }
+        );
+
+        if (existing != frame.fecParityGroups.end()) {
+            *existing = std::move(group);
+        }
+        else {
+            frame.fecParityGroups.push_back(std::move(group));
+        }
+        frame.latestSequence = packet.sequence;
+        frame.lastUpdateTimeUs = packet.sendTimeUs;
+
+        return true;
+    }
+
+    uint32_t FrameReassembler::TryRecoverMissingChunksWithFec(
+        PendingFrame& frame
+    ) {
+        if (frame.fecFramePayloadBytes == 0 ||
+            frame.fecParityGroups.empty()) {
+            return 0;
+        }
+
+        uint32_t recoveredChunkCount = 0;
+
+        for (const FecParityGroup& group : frame.fecParityGroups) {
+            if (group.parity.empty() ||
+                group.startChunkIndex >= frame.chunkCount ||
+                group.protectedChunkCount == 0 ||
+                static_cast<uint32_t>(group.startChunkIndex) +
+                group.protectedChunkCount > frame.chunkCount) {
+                continue;
+            }
+
+            uint16_t missingChunkIndex = 0;
+            uint32_t missingInGroup = 0;
+
+            const uint16_t groupEnd = static_cast<uint16_t>(
+                group.startChunkIndex + group.protectedChunkCount
+            );
+            for (uint16_t chunkIndex = group.startChunkIndex;
+                chunkIndex < groupEnd;
+                ++chunkIndex) {
+                if (!frame.received[chunkIndex]) {
+                    missingChunkIndex = chunkIndex;
+                    missingInGroup++;
+                }
+            }
+
+            if (missingInGroup != 1) {
+                continue;
+            }
+
+            const size_t recoveredChunkSize =
+                ExpectedChunkSize(frame, missingChunkIndex);
+            if (recoveredChunkSize == 0 ||
+                recoveredChunkSize > group.parity.size()) {
+                continue;
+            }
+
+            std::vector<uint8_t> recovered(
+                group.parity.begin(),
+                group.parity.begin() + recoveredChunkSize
+            );
+
+            for (uint16_t chunkIndex = group.startChunkIndex;
+                chunkIndex < groupEnd;
+                ++chunkIndex) {
+                if (!frame.received[chunkIndex]) {
+                    continue;
+                }
+
+                const std::vector<uint8_t>& chunk = frame.chunks[chunkIndex];
+                const size_t xorSize =
+                    (std::min)(recovered.size(), chunk.size());
+                for (size_t i = 0; i < xorSize; ++i) {
+                    recovered[i] ^= chunk[i];
+                }
+            }
+
+            frame.chunks[missingChunkIndex] = std::move(recovered);
+            frame.received[missingChunkIndex] = true;
+            frame.receivedCount++;
+            recoveredChunkCount++;
+        }
+
+        return recoveredChunkCount;
+    }
+
+    size_t FrameReassembler::ExpectedChunkSize(
+        const PendingFrame& frame,
+        uint16_t chunkIndex
+    ) const {
+        if (frame.fecFramePayloadBytes == 0 ||
+            chunkIndex >= frame.chunkCount) {
+            return 0;
+        }
+
+        const size_t offset =
+            static_cast<size_t>(chunkIndex) * kMaxUdpPayloadSize;
+        if (offset >= frame.fecFramePayloadBytes) {
+            return 0;
+        }
+
+        return (std::min)(
+            kMaxUdpPayloadSize,
+            static_cast<size_t>(frame.fecFramePayloadBytes) - offset
+        );
     }
 
     void FrameReassembler::CleanupOldFrames(uint64_t nowUs) {

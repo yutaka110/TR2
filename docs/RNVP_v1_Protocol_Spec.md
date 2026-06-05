@@ -81,6 +81,7 @@ Validation rules:
 | 3 | `Pong` | Ping receiver to ping sender | RTT measurement response. |
 | 4 | `Control` | Either side | Quality, FPS, bitrate, keyframe, or stats command. |
 | 5 | `TransportFeedback` | Receiver to sender | Batched packet arrival/loss feedback for congestion and bandwidth estimation. |
+| 6 | `Fec` | Sender to receiver | Group-level XOR parity used to recover one missing chunk per protected group without waiting for NACK retransmission. |
 
 ## 6. Packet Flags
 
@@ -204,7 +205,59 @@ Sender-side interpretation:
 
 The sender and receiver clocks are not assumed to be synchronized. The first implementation therefore uses interval differences, not absolute one-way delay, as the congestion signal.
 
-## 12. Ping/Pong RTT Measurement
+## 12. FEC Payload
+
+RNVP v1 includes lightweight group-level XOR FEC packets. After sending all data chunks for a frame, the sender may split the frame chunks into small groups and send one parity packet per group for the same `(streamId, frameId)`.
+
+The RNVP header fields are interpreted as:
+
+| RNVP Header Field | FEC Meaning |
+| --- | --- |
+| `chunkIndex` | First data chunk protected by this parity group. |
+| `chunkCount` | Total data chunk count for the frame. |
+
+The FEC payload starts with an 8-byte header followed by parity bytes.
+
+| Offset | Field | Type | Description |
+| ---: | --- | --- | --- |
+| 0 | `framePayloadBytes` | `u32` | Original encoded frame payload size before chunking. |
+| 4 | `parityPayloadBytes` | `u16` | Number of parity bytes after this header. Usually `1200`. |
+| 6 | `protectedChunkCount` | `u16` | Number of data chunks protected by this parity group. |
+| 8 | `parity[]` | `u8[]` | XOR of all chunks in the group, with short chunks zero-padded for parity calculation. |
+
+Receiver behavior:
+
+1. Store the FEC parity with the pending frame.
+2. For each FEC group, if exactly one protected chunk is missing and all other chunks in that group are present, reconstruct the missing chunk by XORing the parity with the received group chunks.
+3. Recover multiple chunks in one frame when the losses land in different FEC groups.
+4. Complete the frame immediately if recovery succeeds.
+5. Fall back to the existing deadline NACK/selective retransmission path when any group has more than one missing chunk.
+
+This FEC mode is intentionally small: it handles one missing chunk per group without adding decoding delay or a larger block-code dependency. It improves isolated loss and some burst loss patterns, especially when a burst crosses group boundaries. It complements, rather than replaces, deadline-based NACK.
+
+Current sender controls:
+
+| Control | Default | Meaning |
+| --- | ---: | --- |
+| `RNVP_FEC_ENABLED` | enabled | Set to `0` to disable FEC parity packets. |
+| `RNVP_FEC_GROUP_CHUNKS` | `4` | Number of data chunks protected by one XOR parity packet. Clamped to `2..32`. |
+
+Runtime experiments can override these defaults per scenario. Fixed FEC scenarios keep
+`fecGroupChunkCount` constant, while Adaptive FEC lets the sender adjust the group
+size from live telemetry:
+
+- `g2`: stronger protection, higher parity overhead, suited to high loss or expired deadline NACKs.
+- `g4`: balanced default for moderate random loss and short burst loss.
+- `g8`: lower overhead, used when the stream is mostly stable or bandwidth/queue pressure is high.
+- `off`: no parity packets; keeps the baseline for A/B comparison.
+
+Adaptive FEC is intentionally conservative. It enables parity when packet loss,
+ACK-missing rate, deadline NACKs, or queue delay indicate recovery pressure, and
+relaxes to `g8` or disables parity when the path is stable and bandwidth is tight.
+The summary CSV, raw CSV, markdown report, and manifest include FEC enabled/adaptive
+state, group size, parity packets, recovered frames, and recovered chunks.
+
+## 13. Ping/Pong RTT Measurement
 
 ### Ping Payload
 
@@ -232,7 +285,7 @@ The sender tracks:
 - max RTT
 - RTT sample count
 
-## 13. Control Payload
+## 14. Control Payload
 
 Control payload size is 8 bytes.
 
@@ -256,9 +309,11 @@ Control payload size is 8 bytes.
 
 `RequestKeyFrame` is used when selective retransmission is not expected to recover useful video in time, or repeated incomplete frames indicate the stream needs a clean reference point.
 
-## 14. Selective Retransmission Policy
+## 15. Selective Retransmission Policy
 
 RNVP v1 is not a reliable byte stream. It is a low-latency video transport with bounded recovery.
+
+FEC is attempted before deadline NACK can recover a frame. If a protected group has exactly one missing chunk and its FEC parity packet is available, the receiver reconstructs the chunk locally and avoids the retransmission round trip. If FEC cannot recover the frame, the normal NACK path remains unchanged.
 
 Sender-side retransmission state:
 
@@ -281,7 +336,7 @@ When an ACK has `missingChunkCount > 0`:
 
 This keeps recovery selective and bounded. RNVP attempts to recover frames that can still arrive in time, but avoids wasting bandwidth on stale video.
 
-## 15. Deadline NACK Policy
+## 16. Deadline NACK Policy
 
 Receiver-side incomplete frame recovery uses these current constants:
 
@@ -310,7 +365,7 @@ Keyframe request triggers include:
 - at least `2` expired frames
 - at least `3` consecutive incomplete frames
 
-## 16. Display Deadline Policy
+## 17. Display Deadline Policy
 
 RNVP is optimized for interactive video. The display deadline is currently:
 
@@ -328,7 +383,7 @@ Deadline behavior:
 
 The policy is intentional: for realtime video, a fresh frame is usually more valuable than a late complete frame.
 
-## 17. Jitter Buffer Policy
+## 18. Jitter Buffer Policy
 
 The jitter buffer stores completed frames in `(streamId, frameId)` order.
 
@@ -373,7 +428,7 @@ if maxJitterMs >= 25:
 
 The result is clamped and smoothed to avoid sudden playback rhythm changes.
 
-## 18. Adaptive Streaming Policy
+## 19. Adaptive Streaming Policy
 
 Adaptive streaming consumes network and pipeline telemetry:
 
@@ -423,7 +478,7 @@ Cause-specific degradation:
 
 Bitrate is mapped to resolution, FPS, and JPEG quality. Lower bitrate tiers reduce resolution and FPS first, then quality.
 
-## 19. RNVP Congestion Control Policy
+## 20. RNVP Congestion Control Policy
 
 RNVP separates media transport, control, feedback, and congestion control.
 
@@ -457,7 +512,7 @@ The active bitrate is still clamped by the BandwidthEstimator ceiling. This prev
 
 `Fixed Quality` mode remains a fixed A/B baseline. `Loss Reactive` maps to `Loss Based` congestion control. `QoE/Deadline Adaptive` can use `Loss Based`, `Delay Based`, or `Hybrid`; the default is `Hybrid`.
 
-## 20. Packet Pacing Policy
+## 21. Packet Pacing Policy
 
 RNVP data packets are paced before they enter the network condition simulator or UDP `sendto` path. The pacer smooths a frame's chunk burst into packet-spaced transmission based on the current adaptive target bitrate.
 
@@ -481,6 +536,7 @@ Packet priority:
 | Packet Category | Pacing Behavior | Reason |
 | --- | --- | --- |
 | RNVP `Data` | Normal paced queue | Smooth frame chunk bursts. |
+| RNVP `Fec` | Normal paced queue after frame data | Group parity should stay close to the protected frame without overtaking normal chunks and polluting sequence-loss telemetry. |
 | Selective retransmit chunks | High-priority paced queue | Recovery should not sit behind new video for too long. |
 | Ping/Pong | Immediate path | RTT feedback should stay fresh. |
 | ACK / Deadline NACK | Immediate receiver path | Missing chunk feedback is latency-sensitive. |
@@ -511,7 +567,7 @@ Pacing telemetry:
 
 The pacing design complements adaptive streaming: the controller chooses an appropriate bitrate, and the pacer makes packet emission match that bitrate smoothly.
 
-## 21. Bandwidth Estimation Policy
+## 22. Bandwidth Estimation Policy
 
 The sender maintains a `BandwidthEstimator` fed by packet-level TransportFeedback and Ping/Pong RTT samples.
 
@@ -544,7 +600,7 @@ Current behavior:
 - Recovery is allowed only when the estimated ceiling has headroom above the current target and TransportFeedback trends are stable.
 - When the target bitrate is above the estimated ceiling and delivery rate or queue/loss/jitter trends show pressure, the controller marks the cause as `Bandwidth` and reduces the target bitrate.
 
-## 22. Telemetry and Evaluation
+## 23. Telemetry and Evaluation
 
 RNVP exports telemetry to CSV and Markdown reports. Important fields include:
 
@@ -554,6 +610,7 @@ RNVP exports telemetry to CSV and Markdown reports. Important fields include:
 - deadline drops
 - output queue drop reason
 - ACK count and missing chunk counts
+- FEC parity packets and FEC-recovered frames/chunks
 - retransmitted frames and chunks
 - stale retransmit drops
 - keyframe requests
@@ -568,32 +625,33 @@ RNVP exports telemetry to CSV and Markdown reports. Important fields include:
 
 The experiment reporter can compare Fixed Quality, Loss Reactive, and QoE/Deadline Adaptive under the same network scenario.
 
-## 23. Current Limitations
+## 24. Current Limitations
 
 - RNVP v1 has no encryption or authentication.
 - There is no congestion-control interoperability with TCP-friendly algorithms.
 - ACK/NACK packets are not themselves retransmitted.
 - Selective retransmission is intentionally limited to one retransmit per frame.
+- Current XOR FEC can recover only one missing chunk per protected group.
 - `H264` is represented in the protocol but MJPEG is the main active realtime path.
 - Packet sequence tracking is used for diagnostics; it is not a full reorder/recovery protocol.
 - Packet pacing is local sender-side smoothing; it is not yet a full congestion-control algorithm.
 - BandwidthEstimator caps adaptive recovery, but it is not yet a full congestion-control algorithm with probing state, fairness, or congestion window modeling.
 - The current implementation targets local and controlled-network experiments, not internet-scale NAT traversal.
 
-## 24. Future Extensions
+## 25. Future Extensions
 
 - Add protocol capability negotiation.
 - Add sender and receiver session ids.
 - Add explicit NACK packet type while keeping ACK payload compatibility.
-- Add FEC for small burst losses.
+- Add Reed-Solomon style FEC for heavier burst losses.
 - Add congestion window or pacing model.
 - Add explicit probe-up/probe-down states for BandwidthEstimator-driven congestion control.
 - Add authenticated control packets.
 - Add codec-specific metadata extension headers.
 - Add multi-stream synchronization for audio/video.
 
-## 25. Interview Summary
+## 26. Interview Summary
 
-RNVP v1 is a UDP-based realtime video protocol with explicit frame/chunk headers, deadline-based NACK, bounded selective retransmission, packet-level TransportFeedback, packet pacing, jitter buffering, display-deadline dropping, RTT measurement, control commands, and QoE-driven adaptive streaming.
+RNVP v1 is a UDP-based realtime video protocol with explicit frame/chunk headers, lightweight XOR FEC, deadline-based NACK, bounded selective retransmission, packet-level TransportFeedback, packet pacing, jitter buffering, display-deadline dropping, RTT measurement, control commands, and QoE-driven adaptive streaming.
 
 The core design choice is that RNVP does not try to recover every byte or burst every chunk immediately. It paces useful media packets, recovers only missing chunks that can still contribute to a useful frame, and drops stale video to protect interactive latency.
