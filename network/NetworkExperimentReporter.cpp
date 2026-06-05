@@ -8,12 +8,83 @@
 #include <iomanip>
 #include <fstream>
 #include <limits>
+#include <regex>
 #include <sstream>
 #include <ctime>
 #include <unordered_map>
 
+#include <Windows.h>
+
 namespace net {
 namespace {
+
+    enum class PenaltyComparison {
+        LessThan,
+        LessThanOrEqual
+    };
+
+    struct QualityPenaltyRule {
+        PenaltyComparison comparison = PenaltyComparison::LessThan;
+        double threshold = 0.0;
+        double penalty = 0.0;
+    };
+
+    struct ScoringConfig {
+        double p95LatencyMsWeight = 1.0;
+        double frameDropRateWeight = 500.0;
+        double droppedFramesWeight = 8.0;
+        double deadlineDroppedFramesWeight = 12.0;
+        double outputQueueDroppedFramesWeight = 5.0;
+        double deadlineNackExpiredDroppedFramesWeight = 3.0;
+        double fecParityPacketWeight = 0.03;
+        double fecInefficiencyPenaltyWeight = 20.0;
+        double fecRecoveredFrameBonusWeight = 0.50;
+        double avgDisplayFpsBonusWeight = 0.75;
+        double avgQoeScoreBonusWeight = 8.0;
+
+        std::vector<QualityPenaltyRule> fpsPenaltyRules;
+        std::vector<QualityPenaltyRule> jpegQualityPenaltyRules;
+        std::vector<QualityPenaltyRule> bitrateKbpsPenaltyRules;
+
+        bool loadedFromFile = false;
+        std::string sourcePath = "defaults";
+    };
+
+    std::vector<QualityPenaltyRule> DefaultFpsPenaltyRules() {
+        return {
+            { PenaltyComparison::LessThanOrEqual, 8.0, 500.0 },
+            { PenaltyComparison::LessThan, 12.0, 250.0 },
+            { PenaltyComparison::LessThan, 15.0, 120.0 }
+        };
+    }
+
+    std::vector<QualityPenaltyRule> DefaultJpegQualityPenaltyRules() {
+        return {
+            { PenaltyComparison::LessThanOrEqual, 40.0, 450.0 },
+            { PenaltyComparison::LessThan, 55.0, 220.0 },
+            { PenaltyComparison::LessThan, 65.0, 90.0 }
+        };
+    }
+
+    std::vector<QualityPenaltyRule> DefaultBitratePenaltyRules() {
+        return {
+            { PenaltyComparison::LessThanOrEqual, 1000.0, 350.0 },
+            { PenaltyComparison::LessThan, 1800.0, 180.0 },
+            { PenaltyComparison::LessThan, 2500.0, 80.0 }
+        };
+    }
+
+    ScoringConfig MakeDefaultScoringConfig() {
+        ScoringConfig config{};
+        config.fpsPenaltyRules = DefaultFpsPenaltyRules();
+        config.jpegQualityPenaltyRules = DefaultJpegQualityPenaltyRules();
+        config.bitrateKbpsPenaltyRules = DefaultBitratePenaltyRules();
+        return config;
+    }
+
+    ScoringConfig g_scoringConfig = MakeDefaultScoringConfig();
+
+    std::string FormatDouble(double value);
 
     std::string MakeTimestamp() {
         const auto now = std::chrono::system_clock::now();
@@ -50,10 +121,346 @@ namespace {
         return escaped;
     }
 
+    std::string EscapeJson(std::string value) {
+        std::string escaped;
+        escaped.reserve(value.size() + 8);
+
+        for (const char ch : value) {
+            switch (ch) {
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\b':
+                escaped += "\\b";
+                break;
+            case '\f':
+                escaped += "\\f";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                escaped.push_back(ch);
+                break;
+            }
+        }
+
+        return escaped;
+    }
+
+    std::string EnvironmentValue(const char* name) {
+        const DWORD requiredSize = GetEnvironmentVariableA(name, nullptr, 0);
+        if (requiredSize == 0) {
+            return {};
+        }
+
+        std::string value(requiredSize, '\0');
+        const DWORD written = GetEnvironmentVariableA(
+            name,
+            value.data(),
+            requiredSize
+        );
+        if (written == 0) {
+            return {};
+        }
+
+        value.resize(written);
+        return value;
+    }
+
+    void WriteJsonStringField(
+        std::ostream& out,
+        const char* name,
+        const std::string& value,
+        bool trailingComma
+    ) {
+        out << "    \"" << name << "\": \"" << EscapeJson(value) << "\"";
+        if (trailingComma) {
+            out << ',';
+        }
+        out << '\n';
+    }
+
+    const char* JsonBool(bool value) {
+        return value ? "true" : "false";
+    }
+
+    bool ExtractJsonNumber(
+        const std::string& text,
+        const std::string& key,
+        double& value
+    ) {
+        const std::regex pattern(
+            "\"" + key + "\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?)"
+        );
+        std::smatch match;
+        if (!std::regex_search(text, match, pattern) || match.size() < 2) {
+            return false;
+        }
+
+        char* end = nullptr;
+        const double parsed = std::strtod(match[1].str().c_str(), &end);
+        if (end == match[1].str().c_str()) {
+            return false;
+        }
+
+        value = parsed;
+        return true;
+    }
+
+    std::string ExtractJsonArrayBlock(
+        const std::string& text,
+        const std::string& key
+    ) {
+        const std::string keyPattern = "\"" + key + "\"";
+        const size_t keyPos = text.find(keyPattern);
+        if (keyPos == std::string::npos) {
+            return {};
+        }
+
+        const size_t arrayStart = text.find('[', keyPos);
+        if (arrayStart == std::string::npos) {
+            return {};
+        }
+
+        size_t depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (size_t i = arrayStart; i < text.size(); ++i) {
+            const char ch = text[i];
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                }
+                else if (ch == '\\') {
+                    escaped = true;
+                }
+                else if (ch == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (ch == '"') {
+                inString = true;
+                continue;
+            }
+            if (ch == '[') {
+                depth++;
+            }
+            else if (ch == ']') {
+                if (depth == 0) {
+                    return {};
+                }
+                depth--;
+                if (depth == 0) {
+                    return text.substr(arrayStart, i - arrayStart + 1);
+                }
+            }
+        }
+
+        return {};
+    }
+
+    std::vector<QualityPenaltyRule> ParseQualityPenaltyRules(
+        const std::string& text,
+        const std::string& key
+    ) {
+        std::vector<QualityPenaltyRule> rules;
+        const std::string arrayBlock = ExtractJsonArrayBlock(text, key);
+        if (arrayBlock.empty()) {
+            return rules;
+        }
+
+        const std::regex objectPattern("\\{([^\\}]*)\\}");
+        for (auto it = std::sregex_iterator(
+                arrayBlock.begin(),
+                arrayBlock.end(),
+                objectPattern);
+            it != std::sregex_iterator();
+            ++it) {
+            const std::string objectText = (*it)[1].str();
+            double threshold = 0.0;
+            double penalty = 0.0;
+            QualityPenaltyRule rule{};
+
+            if (ExtractJsonNumber(objectText, "lte", threshold)) {
+                rule.comparison = PenaltyComparison::LessThanOrEqual;
+            }
+            else if (ExtractJsonNumber(objectText, "lt", threshold)) {
+                rule.comparison = PenaltyComparison::LessThan;
+            }
+            else {
+                continue;
+            }
+
+            if (!ExtractJsonNumber(objectText, "penalty", penalty)) {
+                continue;
+            }
+
+            rule.threshold = threshold;
+            rule.penalty = penalty;
+            rules.push_back(rule);
+        }
+
+        return rules;
+    }
+
+    ScoringConfig LoadScoringConfigFromFile(
+        const std::string& configPath
+    ) {
+        ScoringConfig config = MakeDefaultScoringConfig();
+
+        std::ifstream file(configPath);
+        if (!file) {
+            return config;
+        }
+
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        const std::string text = buffer.str();
+        if (text.empty()) {
+            return config;
+        }
+
+        ExtractJsonNumber(
+            text,
+            "p95LatencyMs",
+            config.p95LatencyMsWeight);
+        ExtractJsonNumber(
+            text,
+            "frameDropRate",
+            config.frameDropRateWeight);
+        ExtractJsonNumber(
+            text,
+            "droppedFrames",
+            config.droppedFramesWeight);
+        ExtractJsonNumber(
+            text,
+            "deadlineDroppedFrames",
+            config.deadlineDroppedFramesWeight);
+        ExtractJsonNumber(
+            text,
+            "outputQueueDroppedFrames",
+            config.outputQueueDroppedFramesWeight);
+        ExtractJsonNumber(
+            text,
+            "deadlineNackExpiredDroppedFrames",
+            config.deadlineNackExpiredDroppedFramesWeight);
+        ExtractJsonNumber(
+            text,
+            "fecParityPackets",
+            config.fecParityPacketWeight);
+        ExtractJsonNumber(
+            text,
+            "fecInefficiency",
+            config.fecInefficiencyPenaltyWeight);
+        ExtractJsonNumber(
+            text,
+            "fecRecoveredFramesBonus",
+            config.fecRecoveredFrameBonusWeight);
+        ExtractJsonNumber(
+            text,
+            "avgDisplayFpsBonus",
+            config.avgDisplayFpsBonusWeight);
+        ExtractJsonNumber(
+            text,
+            "avgQoeScoreBonus",
+            config.avgQoeScoreBonusWeight);
+
+        const std::vector<QualityPenaltyRule> fpsRules =
+            ParseQualityPenaltyRules(text, "fps");
+        const std::vector<QualityPenaltyRule> jpegRules =
+            ParseQualityPenaltyRules(text, "jpegQuality");
+        const std::vector<QualityPenaltyRule> bitrateRules =
+            ParseQualityPenaltyRules(text, "bitrateKbps");
+
+        if (!fpsRules.empty()) {
+            config.fpsPenaltyRules = fpsRules;
+        }
+        if (!jpegRules.empty()) {
+            config.jpegQualityPenaltyRules = jpegRules;
+        }
+        if (!bitrateRules.empty()) {
+            config.bitrateKbpsPenaltyRules = bitrateRules;
+        }
+
+        config.loadedFromFile = true;
+        config.sourcePath = configPath;
+        return config;
+    }
+
+    const char* PenaltyComparisonName(PenaltyComparison comparison) {
+        return comparison == PenaltyComparison::LessThanOrEqual
+            ? "lte"
+            : "lt";
+    }
+
+    double ApplyQualityPenaltyRules(
+        double value,
+        const std::vector<QualityPenaltyRule>& rules
+    ) {
+        if (value <= 0.0) {
+            return 0.0;
+        }
+
+        for (const QualityPenaltyRule& rule : rules) {
+            const bool matched =
+                rule.comparison == PenaltyComparison::LessThanOrEqual
+                ? value <= rule.threshold
+                : value < rule.threshold;
+            if (matched) {
+                return rule.penalty;
+            }
+        }
+
+        return 0.0;
+    }
+
+    void WritePenaltyRuleArray(
+        std::ostream& file,
+        const std::vector<QualityPenaltyRule>& rules,
+        const char* indent
+    ) {
+        file << "[\n";
+        for (size_t i = 0; i < rules.size(); ++i) {
+            const QualityPenaltyRule& rule = rules[i];
+            file << indent << "  { \""
+                << PenaltyComparisonName(rule.comparison)
+                << "\": "
+                << FormatDouble(rule.threshold)
+                << ", \"penalty\": "
+                << FormatDouble(rule.penalty)
+                << " }";
+            if (i + 1 < rules.size()) {
+                file << ',';
+            }
+            file << '\n';
+        }
+        file << indent << "]";
+    }
+
     std::string FormatDouble(double value) {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(3) << value;
         return oss.str();
+    }
+
+    uint64_t SubtractCounter(uint64_t value, uint64_t baseline) {
+        if (value < baseline) {
+            return 0;
+        }
+        return value - baseline;
     }
 
     std::string FormatPercent(double ratio) {
@@ -193,8 +600,14 @@ namespace {
         if (cause == "DisplayLoad") {
             return 6;
         }
-        if (cause == "PacingQueue") {
+        if (cause == "FrameFreshness") {
             return 7;
+        }
+        if (cause == "RecoveryDeadline") {
+            return 8;
+        }
+        if (cause == "PacingQueue") {
+            return 9;
         }
         return 0;
     }
@@ -214,6 +627,10 @@ namespace {
         case 6:
             return "DisplayLoad";
         case 7:
+            return "FrameFreshness";
+        case 8:
+            return "RecoveryDeadline";
+        case 9:
             return "PacingQueue";
         case 0:
         default:
@@ -235,6 +652,9 @@ namespace {
     bool NetworkExperimentReporter::Start(const std::string& directory) {
         Stop();
 
+        g_scoringConfig =
+            LoadScoringConfigFromFile("config/network_experiment_scoring.json");
+
         std::error_code ec;
         std::filesystem::create_directories(directory, ec);
         if (ec) {
@@ -251,6 +671,10 @@ namespace {
             basePath / ("network_report_" + timestamp + ".md");
         const std::filesystem::path beforeAfterPath =
             basePath / ("network_before_after_" + timestamp + ".md");
+        const std::filesystem::path repeatReportPath =
+            basePath / ("network_repeat_report_" + timestamp + ".md");
+        const std::filesystem::path manifestPath =
+            basePath / ("network_experiment_manifest_" + timestamp + ".json");
 
         csvFile_.open(csvPath, std::ios::out | std::ios::trunc);
         if (!csvFile_) {
@@ -258,6 +682,8 @@ namespace {
             textFilePath_.clear();
             markdownFilePath_.clear();
             beforeAfterFilePath_.clear();
+            repeatReportFilePath_.clear();
+            manifestFilePath_.clear();
             previousSummaryCsvPath_.clear();
             generatedTimestamp_.clear();
             summaries_.clear();
@@ -271,6 +697,8 @@ namespace {
             textFilePath_.clear();
             markdownFilePath_.clear();
             beforeAfterFilePath_.clear();
+            repeatReportFilePath_.clear();
+            manifestFilePath_.clear();
             previousSummaryCsvPath_.clear();
             generatedTimestamp_.clear();
             summaries_.clear();
@@ -281,6 +709,8 @@ namespace {
         textFilePath_ = textPath.string();
         markdownFilePath_ = markdownPath.string();
         beforeAfterFilePath_ = beforeAfterPath.string();
+        repeatReportFilePath_ = repeatReportPath.string();
+        manifestFilePath_ = manifestPath.string();
         previousSummaryCsvPath_ =
             FindPreviousSummaryCsv(directory, csvFilePath_);
         generatedTimestamp_ = timestamp;
@@ -294,6 +724,7 @@ namespace {
         textFile_.flush();
         WriteMarkdownReport();
         WriteBeforeAfterReport();
+        WriteRepeatReport();
 
         return true;
     }
@@ -318,7 +749,9 @@ namespace {
     void NetworkExperimentReporter::RecordSample(
         const std::string& scenarioName,
         const NetworkStatsSnapshot& stats,
-        double appTimeSec
+        double appTimeSec,
+        double scenarioElapsedSec,
+        double warmupSec
     ) {
         if (!csvFile_.is_open() || scenarioName.empty()) {
             return;
@@ -329,6 +762,8 @@ namespace {
             ResetCurrent();
             current_.name = scenarioName;
             current_.startTimeSec = appTimeSec;
+            current_.measurementStartTimeSec = appTimeSec;
+            current_.warmupSec = (std::max)(0.0, warmupSec);
             current_.minDisplayFps = (std::numeric_limits<double>::max)();
             current_.minTargetFps = (std::numeric_limits<int>::max)();
             current_.minTargetJpegQuality = (std::numeric_limits<int>::max)();
@@ -337,6 +772,20 @@ namespace {
         }
 
         current_.endTimeSec = appTimeSec;
+        const bool isWarmup =
+            scenarioElapsedSec < current_.warmupSec;
+        if (isWarmup) {
+            current_.warmupSampleCount++;
+            current_.lastStats = stats;
+            return;
+        }
+
+        if (current_.sampleCount == 0) {
+            current_.measurementStartTimeSec = appTimeSec;
+            current_.measurementBaselineStats = stats;
+            current_.hasMeasurementBaselineStats = true;
+        }
+
         current_.sampleCount++;
 
         current_.latencySumMs += stats.currentLatencyMs;
@@ -438,14 +887,36 @@ namespace {
             stats.bandwidthLossTrend;
         timeSeriesSample.bandwidthJitterTrendMs =
             stats.bandwidthJitterTrendMs;
+        const NetworkStatsSnapshot& baseline =
+            current_.measurementBaselineStats;
         timeSeriesSample.deadlineNackSentFrames =
-            stats.deadlineNackSentFrames;
+            SubtractCounter(
+                stats.deadlineNackSentFrames,
+                baseline.deadlineNackSentFrames);
         timeSeriesSample.deadlineNackRecoveredFrames =
-            stats.deadlineNackRecoveredFrames;
+            SubtractCounter(
+                stats.deadlineNackRecoveredFrames,
+                baseline.deadlineNackRecoveredFrames);
         timeSeriesSample.deadlineNackExpiredDroppedFrames =
-            stats.deadlineNackExpiredDroppedFrames;
+            SubtractCounter(
+                stats.deadlineNackExpiredDroppedFrames,
+                baseline.deadlineNackExpiredDroppedFrames);
         timeSeriesSample.ackRetransmittedChunks =
-            stats.ackRetransmittedChunks;
+            SubtractCounter(
+                stats.ackRetransmittedChunks,
+                baseline.ackRetransmittedChunks);
+        timeSeriesSample.fecParityPackets =
+            SubtractCounter(
+                stats.fecParityPackets,
+                baseline.fecParityPackets);
+        timeSeriesSample.fecRecoveredFrames =
+            SubtractCounter(
+                stats.fecRecoveredFrames,
+                baseline.fecRecoveredFrames);
+        timeSeriesSample.fecRecoveredChunks =
+            SubtractCounter(
+                stats.fecRecoveredChunks,
+                baseline.fecRecoveredChunks);
         timeSeriesSample.packetLossRate = stats.packetLossRate;
         timeSeriesSample.currentJitterMs = stats.currentJitterMs;
         current_.timeSeriesSamples.push_back(timeSeriesSample);
@@ -473,6 +944,204 @@ namespace {
         return beforeAfterFilePath_;
     }
 
+    const std::string& NetworkExperimentReporter::RepeatReportFilePath() const {
+        return repeatReportFilePath_;
+    }
+
+    const std::string& NetworkExperimentReporter::ManifestFilePath() const {
+        return manifestFilePath_;
+    }
+
+    void NetworkExperimentReporter::WriteManifest(
+        const std::vector<NetworkExperimentScenario>& scenarios,
+        const std::string& rawCsvPath,
+        NetworkRuntimeMode runtimeMode,
+        bool autoExperiment,
+        bool stopAfterOnePass,
+        double warmupSec
+    ) const {
+        if (manifestFilePath_.empty()) {
+            return;
+        }
+
+        std::ofstream file(manifestFilePath_, std::ios::out | std::ios::trunc);
+        if (!file) {
+            return;
+        }
+
+        const char* envNames[] = {
+            "TR2_NETWORK_MODE",
+            "TR2_NETWORK_EXPERIMENT_AUTO",
+            "RNVP_DISABLE_CAMERA",
+            "RNVP_FEC_ENABLED",
+            "RNVP_FEC_GROUP_CHUNKS",
+            "RNVP_PRESENT_SYNC_INTERVAL",
+            "RNVP_LOW_LATENCY_PRESENT",
+            "RNVP_WAITABLE_SWAPCHAIN"
+        };
+
+        file << "{\n";
+        file << "  \"schemaVersion\": 1,\n";
+        file << "  \"generated\": \"" << EscapeJson(generatedTimestamp_)
+            << "\",\n";
+        file << "  \"artifacts\": {\n";
+        WriteJsonStringField(file, "rawCsv", rawCsvPath, true);
+        WriteJsonStringField(file, "summaryCsv", csvFilePath_, true);
+        WriteJsonStringField(file, "summaryText", textFilePath_, true);
+        WriteJsonStringField(file, "reportMarkdown", markdownFilePath_, true);
+        WriteJsonStringField(file, "beforeAfterReport", beforeAfterFilePath_, true);
+        WriteJsonStringField(file, "repeatabilityReport", repeatReportFilePath_, false);
+        file << "  },\n";
+
+        file << "  \"runtime\": {\n";
+        file << "    \"networkRuntimeMode\": \""
+            << EscapeJson(ToString(runtimeMode)) << "\",\n";
+        file << "    \"autoExperiment\": " << JsonBool(autoExperiment)
+            << ",\n";
+        file << "    \"stopAfterOnePass\": " << JsonBool(stopAfterOnePass)
+            << ",\n";
+        file << "    \"scenarioCount\": " << scenarios.size() << ",\n";
+        file << "    \"warmupSec\": " << FormatDouble(warmupSec) << "\n";
+        file << "  },\n";
+
+        file << "  \"environment\": {\n";
+        for (size_t i = 0; i < std::size(envNames); ++i) {
+            const std::string value = EnvironmentValue(envNames[i]);
+            file << "    \"" << envNames[i] << "\": ";
+            if (value.empty()) {
+                file << "null";
+            }
+            else {
+                file << "\"" << EscapeJson(value) << "\"";
+            }
+            if (i + 1 < std::size(envNames)) {
+                file << ',';
+            }
+            file << '\n';
+        }
+        file << "  },\n";
+
+        file << "  \"scoring\": {\n";
+        file << "    \"configPath\": \""
+            << EscapeJson(g_scoringConfig.sourcePath) << "\",\n";
+        file << "    \"loadedFromFile\": "
+            << JsonBool(g_scoringConfig.loadedFromFile) << ",\n";
+        file << "    \"lowerScoreWins\": true,\n";
+        file << "    \"controllerComparisonUsesQoeBonus\": true,\n";
+        file << "    \"repeatabilityReportUsesQoeBonus\": false,\n";
+        file << "    \"weights\": {\n";
+        file << "      \"p95LatencyMs\": "
+            << FormatDouble(g_scoringConfig.p95LatencyMsWeight) << ",\n";
+        file << "      \"frameDropRate\": "
+            << FormatDouble(g_scoringConfig.frameDropRateWeight) << ",\n";
+        file << "      \"droppedFrames\": "
+            << FormatDouble(g_scoringConfig.droppedFramesWeight) << ",\n";
+        file << "      \"deadlineDroppedFrames\": "
+            << FormatDouble(g_scoringConfig.deadlineDroppedFramesWeight)
+            << ",\n";
+        file << "      \"outputQueueDroppedFrames\": "
+            << FormatDouble(g_scoringConfig.outputQueueDroppedFramesWeight)
+            << ",\n";
+        file << "      \"deadlineNackExpiredDroppedFrames\": "
+            << FormatDouble(
+                g_scoringConfig.deadlineNackExpiredDroppedFramesWeight)
+            << ",\n";
+        file << "      \"fecParityPackets\": "
+            << FormatDouble(g_scoringConfig.fecParityPacketWeight)
+            << ",\n";
+        file << "      \"fecInefficiency\": "
+            << FormatDouble(g_scoringConfig.fecInefficiencyPenaltyWeight)
+            << ",\n";
+        file << "      \"fecRecoveredFramesBonus\": "
+            << FormatDouble(g_scoringConfig.fecRecoveredFrameBonusWeight)
+            << ",\n";
+        file << "      \"avgDisplayFpsBonus\": "
+            << FormatDouble(g_scoringConfig.avgDisplayFpsBonusWeight)
+            << ",\n";
+        file << "      \"avgQoeScoreBonus\": "
+            << FormatDouble(g_scoringConfig.avgQoeScoreBonusWeight)
+            << "\n";
+        file << "    },\n";
+        file << "    \"qualityFloorPenalties\": {\n";
+        file << "      \"fps\": ";
+        WritePenaltyRuleArray(
+            file,
+            g_scoringConfig.fpsPenaltyRules,
+            "      ");
+        file << ",\n";
+        file << "      \"jpegQuality\": ";
+        WritePenaltyRuleArray(
+            file,
+            g_scoringConfig.jpegQualityPenaltyRules,
+            "      ");
+        file << ",\n";
+        file << "      \"bitrateKbps\": ";
+        WritePenaltyRuleArray(
+            file,
+            g_scoringConfig.bitrateKbpsPenaltyRules,
+            "      ");
+        file << "\n";
+        file << "    }\n";
+        file << "  },\n";
+
+        file << "  \"scenarios\": [\n";
+        for (size_t i = 0; i < scenarios.size(); ++i) {
+            const NetworkExperimentScenario& scenario = scenarios[i];
+            const NetworkCondition& condition = scenario.condition;
+            file << "    {\n";
+            file << "      \"index\": " << i << ",\n";
+            file << "      \"name\": \"" << EscapeJson(scenario.name)
+                << "\",\n";
+            file << "      \"networkScenarioName\": \""
+                << EscapeJson(scenario.networkScenarioName) << "\",\n";
+            file << "      \"durationSec\": " << FormatDouble(
+                scenario.durationSec) << ",\n";
+            file << "      \"warmupSec\": " << FormatDouble(warmupSec)
+                << ",\n";
+            file << "      \"measurementSec\": "
+                << FormatDouble(
+                    (std::max)(0.0, scenario.durationSec - warmupSec))
+                << ",\n";
+            file << "      \"adaptiveControlMode\": \""
+                << EscapeJson(ToString(scenario.adaptiveControlMode))
+                << "\",\n";
+            file << "      \"congestionControlMode\": \""
+                << EscapeJson(ToString(scenario.congestionControlMode))
+                << "\",\n";
+            file << "      \"fec\": {\n";
+            file << "        \"enabled\": " << JsonBool(scenario.fecEnabled)
+                << ",\n";
+            file << "        \"adaptive\": "
+                << JsonBool(scenario.adaptiveFecEnabled) << ",\n";
+            file << "        \"groupChunkCount\": "
+                << scenario.fecGroupChunkCount << "\n";
+            file << "      },\n";
+            file << "      \"networkCondition\": {\n";
+            file << "        \"enabled\": " << JsonBool(condition.enabled)
+                << ",\n";
+            file << "        \"lossRate\": " << FormatDouble(condition.lossRate)
+                << ",\n";
+            file << "        \"duplicateRate\": "
+                << FormatDouble(condition.duplicateRate) << ",\n";
+            file << "        \"reorderRate\": "
+                << FormatDouble(condition.reorderRate) << ",\n";
+            file << "        \"minDelayMs\": " << condition.minDelayMs << ",\n";
+            file << "        \"maxDelayMs\": " << condition.maxDelayMs << ",\n";
+            file << "        \"burstLossLength\": "
+                << condition.burstLossLength << ",\n";
+            file << "        \"maxPendingPackets\": "
+                << condition.maxPendingPackets << "\n";
+            file << "      }\n";
+            file << "    }";
+            if (i + 1 < scenarios.size()) {
+                file << ',';
+            }
+            file << '\n';
+        }
+        file << "  ]\n";
+        file << "}\n";
+    }
+
     void NetworkExperimentReporter::ResetCurrent() {
         current_ = ScenarioAccumulator{};
         hasCurrent_ = false;
@@ -488,6 +1157,7 @@ namespace {
         summaries_.push_back(summary);
         WriteMarkdownReport();
         WriteBeforeAfterReport();
+        WriteRepeatReport();
         ResetCurrent();
     }
 
@@ -500,8 +1170,13 @@ namespace {
             << "scenarioName,"
             << "sampleCount,"
             << "startTimeSec,"
+            << "measurementStartTimeSec,"
             << "endTimeSec,"
             << "durationSec,"
+            << "warmupSec,"
+            << "measurementSec,"
+            << "warmupSampleCount,"
+            << "measuredSampleCount,"
             << "avgLatencyMs,"
             << "p95LatencyMs,"
             << "maxLatencyMs,"
@@ -530,6 +1205,12 @@ namespace {
             << "deadlineNackExpiredDroppedFrames,"
             << "deadlineNackExpiredAfterNackFrames,"
             << "deadlineNackExpiredMissingChunks,"
+            << "fecEnabled,"
+            << "adaptiveFecEnabled,"
+            << "fecGroupChunkCount,"
+            << "fecParityPackets,"
+            << "fecRecoveredFrames,"
+            << "fecRecoveredChunks,"
             << "simDroppedPackets,"
             << "minTargetFps,"
             << "minTargetJpegQuality,"
@@ -553,8 +1234,13 @@ namespace {
                 << EscapeCsv(summary.name) << ','
                 << summary.sampleCount << ','
                 << summary.startTimeSec << ','
+                << summary.measurementStartTimeSec << ','
                 << summary.endTimeSec << ','
                 << summary.durationSec << ','
+                << summary.warmupSec << ','
+                << summary.measurementSec << ','
+                << summary.warmupSampleCount << ','
+                << summary.measuredSampleCount << ','
                 << summary.avgLatencyMs << ','
                 << summary.p95LatencyMs << ','
                 << summary.maxLatencyMs << ','
@@ -583,6 +1269,12 @@ namespace {
                 << summary.deadlineNackExpiredDroppedFrames << ','
                 << summary.deadlineNackExpiredAfterNackFrames << ','
                 << summary.deadlineNackExpiredMissingChunks << ','
+                << (summary.fecEnabled ? 1 : 0) << ','
+                << (summary.adaptiveFecEnabled ? 1 : 0) << ','
+                << summary.fecGroupChunkCount << ','
+                << summary.fecParityPackets << ','
+                << summary.fecRecoveredFrames << ','
+                << summary.fecRecoveredChunks << ','
                 << summary.simDroppedPackets << ','
                 << summary.minTargetFps << ','
                 << summary.minTargetJpegQuality << ','
@@ -602,6 +1294,13 @@ namespace {
             textFile_ << "  samples: " << summary.sampleCount
                 << " durationSec: " << FormatDouble(summary.durationSec)
                 << "\n";
+            textFile_ << "  warmup/measurement sec: "
+                << FormatDouble(summary.warmupSec) << " / "
+                << FormatDouble(summary.measurementSec)
+                << " measuredSamples: "
+                << summary.measuredSampleCount
+                << " warmupSamplesExcluded: "
+                << summary.warmupSampleCount << "\n";
             textFile_ << "  latency avg/p95/max ms: "
                 << FormatDouble(summary.avgLatencyMs) << " / "
                 << FormatDouble(summary.p95LatencyMs) << " / "
@@ -654,6 +1353,13 @@ namespace {
                 << summary.deadlineNackExpiredDroppedFrames << " / "
                 << summary.deadlineNackExpiredAfterNackFrames << " / "
                 << summary.deadlineNackExpiredMissingChunks << "\n";
+            textFile_ << "  fec enabled/adaptive/group parity/recoveredFrames/recoveredChunks: "
+                << (summary.fecEnabled ? "on" : "off") << " / "
+                << (summary.adaptiveFecEnabled ? "on" : "off") << " / "
+                << summary.fecGroupChunkCount << " / "
+                << summary.fecParityPackets << " / "
+                << summary.fecRecoveredFrames << " / "
+                << summary.fecRecoveredChunks << "\n";
             textFile_ << "  verdict: " << summary.verdict;
             if (!summary.notes.empty()) {
                 textFile_ << " (" << summary.notes << ")";
@@ -680,6 +1386,9 @@ namespace {
         uint64_t totalDeadlineNackRecoveries = 0;
         uint64_t totalDeadlineNackMissingChunks = 0;
         uint64_t totalDeadlineNackExpiredDrops = 0;
+        uint64_t totalFecParityPackets = 0;
+        uint64_t totalFecRecoveredFrames = 0;
+        uint64_t totalFecRecoveredChunks = 0;
         double worstP95LatencyMs = 0.0;
 
         for (const ScenarioSummary& summary : summaries_) {
@@ -693,6 +1402,9 @@ namespace {
             totalDeadlineNackMissingChunks += summary.deadlineNackMissingChunks;
             totalDeadlineNackExpiredDrops +=
                 summary.deadlineNackExpiredDroppedFrames;
+            totalFecParityPackets += summary.fecParityPackets;
+            totalFecRecoveredFrames += summary.fecRecoveredFrames;
+            totalFecRecoveredChunks += summary.fecRecoveredChunks;
             worstP95LatencyMs =
                 (std::max)(worstP95LatencyMs, summary.p95LatencyMs);
         }
@@ -737,13 +1449,22 @@ namespace {
             else {
                 file << "- Selective retransmit was not needed in completed scenarios.\n";
             }
+            file << "- FEC sent " << totalFecParityPackets
+                << " parity packets and recovered "
+                << totalFecRecoveredFrames << " frames / "
+                << totalFecRecoveredChunks
+                << " chunks across completed scenarios.\n";
+            file << "- Evaluation window: the first "
+                << FormatDouble(summaries_.front().warmupSec)
+                << " sec of each scenario is warmup and excluded from "
+                << "summary averages, scoring, and cumulative counters.\n";
             file << "\n";
         }
 
         file << "## Scenario Results\n\n";
         file
-            << "| Scenario | Verdict | Runtime | Adaptive Mode | Congestion Mode | Cause | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | NACK Expired | Notes |\n"
-            << "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+            << "| Scenario | Verdict | Runtime | Adaptive Mode | Congestion Mode | FEC | Cause | Warmup s | Measured Samples | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | FEC Recovered | NACK Expired | Notes |\n"
+            << "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
         for (const ScenarioSummary& summary : summaries_) {
             file << "| "
@@ -762,9 +1483,17 @@ namespace {
                     ? "unknown"
                     : summary.adaptiveCongestionControlMode) << " | "
                 << EscapeMarkdownTable(
+                    summary.adaptiveFecEnabled
+                    ? "adaptive"
+                    : (summary.fecEnabled
+                        ? "g" + std::to_string(summary.fecGroupChunkCount)
+                        : "off")) << " | "
+                << EscapeMarkdownTable(
                     summary.dominantAdaptiveDegradationCause.empty()
                     ? "None"
                     : summary.dominantAdaptiveDegradationCause) << " | "
+                << FormatDouble(summary.warmupSec) << " | "
+                << summary.measuredSampleCount << " | "
                 << FormatDouble(summary.avgDisplayFps) << " | "
                 << FormatDouble(summary.minDisplayFps) << " | "
                 << FormatDouble(summary.avgLatencyMs) << " | "
@@ -773,6 +1502,7 @@ namespace {
                 << summary.outputQueueDroppedFrames << " | "
                 << summary.deadlineNackSentFrames << " | "
                 << summary.deadlineNackRecoveredFrames << " | "
+                << summary.fecRecoveredFrames << " | "
                 << summary.deadlineNackExpiredDroppedFrames << " | "
                 << EscapeMarkdownTable(
                     summary.notes.empty() ? "none" : summary.notes)
@@ -820,51 +1550,14 @@ namespace {
                     std::string::npos;
             };
 
-            const auto frameDropRate =
-                [](const ScenarioSummary& summary) -> double {
-                const uint64_t totalFrames =
-                    summary.displayedFrames + summary.droppedFrames;
-                if (totalFrames == 0) {
-                    return 0.0;
-                }
-                return static_cast<double>(summary.droppedFrames) /
-                    static_cast<double>(totalFrames);
-            };
-
-            const auto averageQoeScore =
-                [](const ScenarioSummary& summary) -> double {
-                if (summary.timeSeriesSamples.empty()) {
-                    return 0.0;
-                }
-
-                double sum = 0.0;
-                for (const TimeSeriesSample& sample :
-                    summary.timeSeriesSamples) {
-                    sum += sample.adaptiveQoeScore;
-                }
-                return sum /
-                    static_cast<double>(summary.timeSeriesSamples.size());
-            };
-
             const auto scoreController =
                 [&](const ScenarioSummary& summary) -> double {
-                double score = summary.p95LatencyMs;
-                score += frameDropRate(summary) * 500.0;
-                score += static_cast<double>(summary.droppedFrames) * 8.0;
-                score += static_cast<double>(summary.deadlineDroppedFrames) *
-                    12.0;
-                score += static_cast<double>(
-                    summary.outputQueueDroppedFrames) * 5.0;
-                score += static_cast<double>(
-                    summary.deadlineNackExpiredDroppedFrames) * 3.0;
-                score -= summary.avgDisplayFps * 0.75;
-                score -= averageQoeScore(summary) * 8.0;
-                return score;
+                return BuildScoreBreakdown(summary, true, true).finalScore;
             };
 
             file
-                << "| Network Scenario | Controller | Frame Drop | Drop vs Fixed | Avg Latency ms | Latency vs Fixed | Display FPS | FPS vs Fixed | Avg QoE | NACK Recovered | NACK Expired | Target FPS | Target JPEG | Verdict |\n"
-                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+                << "| Network Scenario | Controller | Frame Drop | Drop vs Fixed | Avg Latency ms | Latency vs Fixed | Display FPS | FPS vs Fixed | Avg QoE | FEC Eff | FEC Rec | FEC Parity | Quality Penalty | Final Score | NACK Recovered | NACK Expired | Target FPS | Target JPEG | Target Bitrate kbps | Verdict |\n"
+                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
             for (const std::string& networkScenario : networkScenarioOrder) {
                 const auto it =
@@ -882,12 +1575,14 @@ namespace {
                 }
 
                 for (const ScenarioSummary* summary : it->second) {
-                    const double dropRate = frameDropRate(*summary);
-                    const double avgQoeScore = averageQoeScore(*summary);
+                    const double dropRate = FrameDropRate(*summary);
+                    const ScoreBreakdown score =
+                        BuildScoreBreakdown(*summary, true, true);
+                    const double avgQoeScore = AverageQoeScore(*summary);
                     const std::string dropVsFixed = fixedBaseline == nullptr
                         ? "n/a"
                         : FormatImprovementRatio(
-                            frameDropRate(*fixedBaseline),
+                            FrameDropRate(*fixedBaseline),
                             dropRate,
                             false);
                     const std::string latencyVsFixed = fixedBaseline == nullptr
@@ -913,11 +1608,52 @@ namespace {
                         << FormatDouble(summary->avgDisplayFps) << " | "
                         << fpsVsFixed << " | "
                         << FormatDouble(avgQoeScore) << " | "
+                        << FormatPercent(FecRecoveryEfficiency(*summary))
+                        << " | "
+                        << summary->fecRecoveredFrames << " | "
+                        << summary->fecParityPackets << " | "
+                        << FormatDouble(score.qualityPenalty) << " | "
+                        << FormatDouble(score.finalScore) << " | "
                         << summary->deadlineNackRecoveredFrames << " | "
                         << summary->deadlineNackExpiredDroppedFrames << " | "
                         << summary->minTargetFps << " | "
                         << summary->minTargetJpegQuality << " | "
+                        << summary->minTargetBitrateKbps << " | "
                         << summary->verdict << " |\n";
+                }
+            }
+
+            file << "\n";
+            file << "### Controller Score Breakdown\n\n";
+            file << "Lower final score wins. `FPS Bonus`, `QoE Bonus`, and `FEC Recovery Bonus` are positive values that are subtracted from the final score; the other columns add cost. `Frame Drop Penalty` combines drop rate, dropped frames, and deadline drops. FEC overhead penalizes parity traffic, while FEC inefficiency penalizes parity streams that recover too few frames.\n\n";
+            file
+                << "| Network Scenario | Controller | Latency Score | Frame Drop Penalty | Output Queue Penalty | NACK Expire Penalty | FEC Overhead | FEC Inefficiency | FEC Recovery Bonus | FPS Bonus | QoE Bonus | Quality Penalty | Final Score |\n"
+                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n";
+
+            for (const std::string& networkScenario : networkScenarioOrder) {
+                const auto it =
+                    summariesByNetworkScenario.find(networkScenario);
+                if (it == summariesByNetworkScenario.end()) {
+                    continue;
+                }
+
+                for (const ScenarioSummary* summary : it->second) {
+                    const ScoreBreakdown score =
+                        BuildScoreBreakdown(*summary, true, true);
+                    file << "| "
+                        << EscapeMarkdownTable(networkScenario) << " | "
+                        << EscapeMarkdownTable(modeName(*summary)) << " | "
+                        << FormatDouble(score.latencyScore) << " | "
+                        << FormatDouble(score.frameDropPenalty) << " | "
+                        << FormatDouble(score.outputQueuePenalty) << " | "
+                        << FormatDouble(score.nackExpirePenalty) << " | "
+                        << FormatDouble(score.fecOverheadPenalty) << " | "
+                        << FormatDouble(score.fecInefficiencyPenalty) << " | "
+                        << FormatDouble(score.fecRecoveryBonus) << " | "
+                        << FormatDouble(score.fpsBonus) << " | "
+                        << FormatDouble(score.qoeBonus) << " | "
+                        << FormatDouble(score.qualityPenalty) << " | "
+                        << FormatDouble(score.finalScore) << " |\n";
                 }
             }
 
@@ -955,11 +1691,11 @@ namespace {
 
                 std::string why = "best latency/drop/FPS balance";
                 if (winner->p95LatencyMs < 150.0 &&
-                    frameDropRate(*winner) <= 0.01) {
+                    FrameDropRate(*winner) <= 0.01) {
                     why = "kept p95 under 150ms with almost no frame drops";
                 }
                 else if (fixedBaseline != nullptr &&
-                    frameDropRate(*winner) < frameDropRate(*fixedBaseline) &&
+                    FrameDropRate(*winner) < FrameDropRate(*fixedBaseline) &&
                     winner->avgDisplayFps >= fixedBaseline->avgDisplayFps) {
                     why = "reduced drops without sacrificing display FPS";
                 }
@@ -971,10 +1707,12 @@ namespace {
 
                 std::string fixedBaselineText = "not available";
                 std::string evidence = "score "
-                    + FormatDouble(winnerScore);
+                    + FormatDouble(winnerScore) +
+                    ", quality penalty " +
+                    FormatDouble(QualityFloorPenalty(*winner));
                 if (fixedBaseline != nullptr) {
                     fixedBaselineText =
-                        FormatPercent(frameDropRate(*fixedBaseline)) +
+                        FormatPercent(FrameDropRate(*fixedBaseline)) +
                         " drop, " +
                         FormatDouble(fixedBaseline->avgLatencyMs) +
                         " ms latency, " +
@@ -983,8 +1721,8 @@ namespace {
                     evidence =
                         "drop " +
                         FormatImprovementRatio(
-                            frameDropRate(*fixedBaseline),
-                            frameDropRate(*winner),
+                            FrameDropRate(*fixedBaseline),
+                            FrameDropRate(*winner),
                             false) +
                         ", latency " +
                         FormatImprovementRatio(
@@ -996,7 +1734,8 @@ namespace {
                             fixedBaseline->avgDisplayFps,
                             winner->avgDisplayFps,
                             true) +
-                        " vs Fixed";
+                        " vs Fixed, quality penalty " +
+                        FormatDouble(QualityFloorPenalty(*winner));
                 }
 
                 file << "| "
@@ -1033,11 +1772,11 @@ namespace {
                             summary->adaptiveCongestionControlMode.empty()
                             ? "unknown"
                             : summary->adaptiveCongestionControlMode) << " | "
-                        << FormatPercent(frameDropRate(*summary)) << " | "
+                        << FormatPercent(FrameDropRate(*summary)) << " | "
                         << FormatDouble(summary->avgLatencyMs) << " | "
                         << FormatDouble(summary->p95LatencyMs) << " | "
                         << FormatDouble(summary->avgDisplayFps) << " | "
-                        << FormatDouble(averageQoeScore(*summary)) << " | "
+                        << FormatDouble(AverageQoeScore(*summary)) << " | "
                         << FormatDouble(scoreController(*summary)) << " |\n";
                 }
             }
@@ -1087,7 +1826,7 @@ namespace {
                 }
 
                 const std::string evidence =
-                    "drop " + FormatPercent(frameDropRate(*winner)) +
+                    "drop " + FormatPercent(FrameDropRate(*winner)) +
                     ", p95 " + FormatDouble(winner->p95LatencyMs) +
                     " ms, fps " + FormatDouble(winner->avgDisplayFps) +
                     ", score " + FormatDouble(winnerScore);
@@ -1305,7 +2044,7 @@ namespace {
                 }
 
                 file << "### " << summary->name << "\n\n";
-                file << "Adaptive cause score legend: None=0, Loss=20, Jitter=40, RTT=60, Bandwidth=80, DecodeLoad=100, DisplayLoad=120, PacingQueue=140. Target bitrate and bandwidth ceiling are drawn as `kbps / 120` to share the same axis as quality and FPS.\n\n";
+                file << "Adaptive cause score legend: None=0, Loss=20, Jitter=40, RTT=60, Bandwidth=80, DecodeLoad=100, DisplayLoad=120, FrameFreshness=140, RecoveryDeadline=160, PacingQueue=180. Target bitrate and bandwidth ceiling are drawn as `kbps / 120` to share the same axis as quality and FPS.\n\n";
 
                 writeChart(
                     summary->name + " - FPS and Latency",
@@ -1496,30 +2235,9 @@ namespace {
                     std::string::npos;
             };
 
-            const auto frameDropRate =
-                [](const ScenarioSummary& summary) -> double {
-                const uint64_t totalFrames =
-                    summary.displayedFrames + summary.droppedFrames;
-                if (totalFrames == 0) {
-                    return 0.0;
-                }
-                return static_cast<double>(summary.droppedFrames) /
-                    static_cast<double>(totalFrames);
-            };
-
             const auto scoreController =
                 [&](const ScenarioSummary& summary) -> double {
-                double score = summary.p95LatencyMs;
-                score += frameDropRate(summary) * 500.0;
-                score += static_cast<double>(summary.droppedFrames) * 8.0;
-                score += static_cast<double>(summary.deadlineDroppedFrames) *
-                    12.0;
-                score += static_cast<double>(
-                    summary.outputQueueDroppedFrames) * 5.0;
-                score += static_cast<double>(
-                    summary.deadlineNackExpiredDroppedFrames) * 3.0;
-                score -= summary.avgDisplayFps * 0.75;
-                return score;
+                return BuildScoreBreakdown(summary, false, true).finalScore;
             };
 
             uint32_t comparableScenarioCount = 0;
@@ -1565,8 +2283,8 @@ namespace {
                     adaptiveWinCount++;
                 }
 
-                const double fixedDropRate = frameDropRate(*fixedBaseline);
-                const double winnerDropRate = frameDropRate(*winner);
+                const double fixedDropRate = FrameDropRate(*fixedBaseline);
+                const double winnerDropRate = FrameDropRate(*winner);
                 const double dropImprovement =
                     std::abs(fixedDropRate) < 0.0001
                     ? 0.0
@@ -1620,6 +2338,7 @@ namespace {
                     << FormatSignedPercent(bestFpsImprovement)
                     << " at " << bestFpsScenario << ".\n";
                 file << "- Interview framing: under the same network condition, Fixed Quality is the baseline and the adaptive modes are judged by user-visible outcomes: deadline latency, displayed FPS, frame drop rate, QoE, and selective retransmit recovery.\n\n";
+                file << "- Quality guardrail: modes that fall below configured FPS, JPEG quality, or bitrate floors receive extra score penalties so low-quality escape routes do not win by latency alone. The exact weights and thresholds are saved in the experiment manifest.\n\n";
             }
         }
 
@@ -1955,14 +2674,7 @@ namespace {
 
             const auto scoreScenario =
                 [](const ScenarioSummary& summary) -> double {
-                double score = summary.p95LatencyMs;
-                score += static_cast<double>(summary.droppedFrames) * 8.0;
-                score += static_cast<double>(summary.deadlineDroppedFrames) * 12.0;
-                score += static_cast<double>(summary.outputQueueDroppedFrames) * 5.0;
-                score += static_cast<double>(
-                    summary.deadlineNackExpiredDroppedFrames) * 3.0;
-                score -= summary.avgDisplayFps * 0.75;
-                return score;
+                return BuildScoreBreakdown(summary, false, false).finalScore;
             };
 
             file
@@ -2003,7 +2715,9 @@ namespace {
 
                 std::string tradeoff = "none observed";
                 if (winner->minTargetJpegQuality <= 40 ||
-                    winner->minTargetFps <= 8) {
+                    winner->minTargetFps <= 8 ||
+                    (winner->minTargetBitrateKbps > 0 &&
+                        winner->minTargetBitrateKbps <= 1000)) {
                     tradeoff = "quality or FPS reached the lower adaptive bound";
                 }
                 else if (winner->deadlineNackExpiredDroppedFrames > 0) {
@@ -2145,6 +2859,419 @@ namespace {
         file.flush();
     }
 
+    void NetworkExperimentReporter::WriteRepeatReport() const {
+        if (repeatReportFilePath_.empty() || csvFilePath_.empty()) {
+            return;
+        }
+
+        std::ofstream file(repeatReportFilePath_, std::ios::out | std::ios::trunc);
+        if (!file) {
+            return;
+        }
+
+        file << "# Network Repeatability Report\n\n";
+        file << "Generated: " << generatedTimestamp_ << "\n\n";
+
+        const std::filesystem::path csvPath(csvFilePath_);
+        const std::filesystem::path directory = csvPath.parent_path();
+        const std::vector<std::string> candidateSummaryPaths =
+            FindLatestSummaryCsvs(directory.string(), 8);
+
+        std::vector<std::string> summaryPaths;
+        const std::vector<ScenarioSummary> currentRunSummaries =
+            LoadSummaryCsv(csvFilePath_);
+        std::error_code currentPathEc;
+        const std::filesystem::path currentSummaryPath =
+            std::filesystem::absolute(csvFilePath_, currentPathEc)
+            .lexically_normal();
+        if (!currentRunSummaries.empty()) {
+            summaryPaths.push_back(csvFilePath_);
+        }
+
+        for (const std::string& candidatePath : candidateSummaryPaths) {
+            std::error_code candidatePathEc;
+            const std::filesystem::path normalizedCandidate =
+                std::filesystem::absolute(candidatePath, candidatePathEc)
+                .lexically_normal();
+            if (!currentPathEc && !candidatePathEc &&
+                normalizedCandidate == currentSummaryPath) {
+                continue;
+            }
+            summaryPaths.push_back(candidatePath);
+            if (summaryPaths.size() >= 3) {
+                break;
+            }
+        }
+
+        file << "## Source Runs\n\n";
+        if (summaryPaths.empty()) {
+            file << "- Waiting for completed `network_summary_*.csv` files.\n\n";
+            return;
+        }
+
+        file
+            << "| Order | Summary CSV |\n"
+            << "| ---: | --- |\n";
+        for (size_t i = 0; i < summaryPaths.size(); ++i) {
+            file << "| " << (i + 1) << " | `"
+                << EscapeMarkdownTable(
+                    std::filesystem::path(summaryPaths[i]).filename().string())
+                << "` |\n";
+        }
+        file << "\n";
+
+        struct RepeatRun {
+            std::string path;
+            std::string label;
+            std::vector<ScenarioSummary> summaries;
+            std::unordered_map<std::string, const ScenarioSummary*> byName;
+        };
+
+        std::vector<RepeatRun> runs;
+        runs.reserve(summaryPaths.size());
+        for (const std::string& path : summaryPaths) {
+            RepeatRun run{};
+            run.path = path;
+            run.label = std::filesystem::path(path).filename().string();
+            run.summaries = LoadSummaryCsv(path);
+            if (run.summaries.empty()) {
+                continue;
+            }
+            for (const ScenarioSummary& summary : run.summaries) {
+                run.byName[summary.name] = &summary;
+            }
+            runs.push_back(std::move(run));
+        }
+
+        const double requiredWarmupSec = currentRunSummaries.empty()
+            ? 0.0
+            : currentRunSummaries.front().warmupSec;
+        auto isCompatibleRun =
+            [requiredWarmupSec](const RepeatRun& run) -> bool {
+            if (run.summaries.empty()) {
+                return false;
+            }
+
+            for (const ScenarioSummary& summary : run.summaries) {
+                if (std::fabs(summary.warmupSec - requiredWarmupSec) > 0.001) {
+                    return false;
+                }
+                if (requiredWarmupSec > 0.0 &&
+                    summary.measuredSampleCount == 0) {
+                    return false;
+                }
+            }
+
+            return true;
+        };
+
+        std::vector<RepeatRun> compatibleRuns;
+        compatibleRuns.reserve(runs.size());
+        size_t incompatibleRunCount = 0;
+        for (RepeatRun& run : runs) {
+            if (isCompatibleRun(run)) {
+                compatibleRuns.push_back(std::move(run));
+            }
+            else {
+                incompatibleRunCount++;
+            }
+        }
+        runs = std::move(compatibleRuns);
+
+        if (incompatibleRunCount > 0) {
+            file << "## Evaluation Compatibility\n\n";
+            file << "- Excluded " << incompatibleRunCount
+                << " older/incompatible run(s) from repeatability because "
+                << "their warmup window or measured-sample schema differs "
+                << "from the current run.\n\n";
+        }
+
+        if (runs.size() < 3) {
+            file << "## Status\n\n";
+            file << "- Need 3 compatible completed summary CSV files; found "
+                << runs.size()
+                << " compatible completed run(s). Run more automatic "
+                << "experiments with the same manifest/scoring config to "
+                << "enable repeatability statistics.\n\n";
+            return;
+        }
+
+        file << "## Evaluation Window\n\n";
+        file << "- Warmup excluded per scenario: "
+            << FormatDouble(runs.front().summaries.front().warmupSec)
+            << " sec.\n";
+        file << "- Repeatability metrics use the measured window recorded in "
+            << "`measurementSec` / `measuredSampleCount`, so startup "
+            << "transients do not dominate the winner.\n\n";
+
+        std::vector<std::string> scenarioOrder;
+        for (const ScenarioSummary& summary : runs.front().summaries) {
+            bool presentInAllRuns = true;
+            for (const RepeatRun& run : runs) {
+                if (run.byName.find(summary.name) == run.byName.end()) {
+                    presentInAllRuns = false;
+                    break;
+                }
+            }
+            if (presentInAllRuns) {
+                scenarioOrder.push_back(summary.name);
+            }
+        }
+
+        const auto formatStats =
+            [](const RepeatMetricStats& stats) -> std::string {
+            if (stats.count == 0) {
+                return "n/a";
+            }
+
+            return FormatDouble(stats.mean) + " +/- " +
+                FormatDouble(stats.stddev) + " (" +
+                FormatDouble(stats.min) + "-" +
+                FormatDouble(stats.max) + ")";
+        };
+
+        const auto repeatScore =
+            [](const ScenarioSummary& summary) -> double {
+            return BuildScoreBreakdown(summary, false, false).finalScore;
+        };
+
+        std::vector<std::string> networkScenarioOrder;
+        for (const ScenarioSummary& summary : runs.front().summaries) {
+            const std::string networkScenario =
+                ExtractNetworkScenarioName(summary.name);
+            if (std::find(
+                networkScenarioOrder.begin(),
+                networkScenarioOrder.end(),
+                networkScenario) == networkScenarioOrder.end()) {
+                networkScenarioOrder.push_back(networkScenario);
+            }
+        }
+
+        uint32_t stableWinnerCount = 0;
+        uint32_t comparableWinnerCount = 0;
+        for (const std::string& networkScenario : networkScenarioOrder) {
+            std::unordered_map<std::string, uint32_t> winnerCounts;
+            for (const RepeatRun& run : runs) {
+                const ScenarioSummary* winner = nullptr;
+                double winnerScore = 0.0;
+                for (const ScenarioSummary& summary : run.summaries) {
+                    if (ExtractNetworkScenarioName(summary.name) !=
+                        networkScenario) {
+                        continue;
+                    }
+                    const double candidateScore = repeatScore(summary);
+                    if (winner == nullptr || candidateScore < winnerScore) {
+                        winner = &summary;
+                        winnerScore = candidateScore;
+                    }
+                }
+                if (winner != nullptr) {
+                    winnerCounts[ModeLabel(*winner)]++;
+                }
+            }
+
+            if (!winnerCounts.empty()) {
+                comparableWinnerCount++;
+                uint32_t bestCount = 0;
+                for (const auto& entry : winnerCounts) {
+                    bestCount = (std::max)(bestCount, entry.second);
+                }
+                if (bestCount == runs.size()) {
+                    stableWinnerCount++;
+                }
+            }
+        }
+
+        file << "## Executive Summary\n\n";
+        file << "- Runs analyzed: " << runs.size()
+            << " latest completed summaries.\n";
+        file << "- Common scenario rows: " << scenarioOrder.size() << ".\n";
+        file << "- Winner stability: " << stableWinnerCount << " / "
+            << comparableWinnerCount
+            << " network scenarios had the same winner in all analyzed runs.\n";
+        file << "- Score formula: latency, drops, output queue drops, stale "
+            << "NACK expiry, FPS bonus, and quality guardrail penalty. "
+            << "QoE time-series bonus is omitted here because persisted summary "
+            << "CSV files do not contain per-sample QoE history.\n\n";
+
+        file << "## Scenario Repeatability\n\n";
+        if (scenarioOrder.empty()) {
+            file << "- No scenario names were common across all analyzed runs.\n\n";
+        }
+        else {
+            file
+                << "| Scenario | Runs | Display FPS | P95 Latency ms | Dropped Frames | Final Score |\n"
+                << "| --- | ---: | ---: | ---: | ---: | ---: |\n";
+
+            for (const std::string& scenarioName : scenarioOrder) {
+                std::vector<double> fpsValues;
+                std::vector<double> p95Values;
+                std::vector<double> dropValues;
+                std::vector<double> scoreValues;
+                fpsValues.reserve(runs.size());
+                p95Values.reserve(runs.size());
+                dropValues.reserve(runs.size());
+                scoreValues.reserve(runs.size());
+
+                for (const RepeatRun& run : runs) {
+                    const auto it = run.byName.find(scenarioName);
+                    if (it == run.byName.end()) {
+                        continue;
+                    }
+                    const ScenarioSummary& summary = *it->second;
+                    fpsValues.push_back(summary.avgDisplayFps);
+                    p95Values.push_back(summary.p95LatencyMs);
+                    dropValues.push_back(
+                        static_cast<double>(summary.droppedFrames));
+                    scoreValues.push_back(repeatScore(summary));
+                }
+
+                file << "| "
+                    << EscapeMarkdownTable(scenarioName) << " | "
+                    << fpsValues.size() << " | "
+                    << formatStats(ComputeRepeatMetricStats(fpsValues)) << " | "
+                    << formatStats(ComputeRepeatMetricStats(p95Values)) << " | "
+                    << formatStats(ComputeRepeatMetricStats(dropValues)) << " | "
+                    << formatStats(ComputeRepeatMetricStats(scoreValues)) << " |\n";
+            }
+            file << "\n";
+        }
+
+        file << "## Winner Consistency\n\n";
+        file
+            << "| Network Scenario | Agreement | Majority Winner | Run Winners | Interpretation |\n"
+            << "| --- | ---: | --- | --- | --- |\n";
+
+        for (const std::string& networkScenario : networkScenarioOrder) {
+            std::vector<std::string> runWinners;
+            std::unordered_map<std::string, uint32_t> winnerCounts;
+
+            for (const RepeatRun& run : runs) {
+                const ScenarioSummary* winner = nullptr;
+                double winnerScore = 0.0;
+                for (const ScenarioSummary& summary : run.summaries) {
+                    if (ExtractNetworkScenarioName(summary.name) !=
+                        networkScenario) {
+                        continue;
+                    }
+                    const double candidateScore = repeatScore(summary);
+                    if (winner == nullptr || candidateScore < winnerScore) {
+                        winner = &summary;
+                        winnerScore = candidateScore;
+                    }
+                }
+
+                if (winner == nullptr) {
+                    runWinners.push_back("n/a");
+                    continue;
+                }
+
+                const std::string winnerMode = ModeLabel(*winner);
+                runWinners.push_back(winnerMode);
+                winnerCounts[winnerMode]++;
+            }
+
+            std::string majorityWinner = "n/a";
+            uint32_t majorityCount = 0;
+            for (const auto& entry : winnerCounts) {
+                if (entry.second > majorityCount) {
+                    majorityWinner = entry.first;
+                    majorityCount = entry.second;
+                }
+            }
+
+            std::ostringstream runWinnerText;
+            for (size_t i = 0; i < runWinners.size(); ++i) {
+                if (i > 0) {
+                    runWinnerText << " / ";
+                }
+                runWinnerText << runWinners[i];
+            }
+
+            const std::string interpretation =
+                majorityCount == runs.size()
+                ? "stable winner"
+                : "winner varied across runs; inspect stddev before claiming dominance";
+
+            file << "| "
+                << EscapeMarkdownTable(networkScenario) << " | "
+                << majorityCount << " / " << runs.size() << " | "
+                << EscapeMarkdownTable(majorityWinner) << " | "
+                << EscapeMarkdownTable(runWinnerText.str()) << " | "
+                << EscapeMarkdownTable(interpretation) << " |\n";
+        }
+
+        file << "\n";
+        file << "## Interview-Ready Reading\n\n";
+        file << "- Use the mean as the expected behavior and stddev/min/max as "
+            << "the stability evidence.\n";
+        file << "- A mode that wins 3 / 3 runs is a stronger portfolio claim than "
+            << "a mode that wins only once by a narrow score.\n";
+        file << "- If winner consistency is low, the next engineering task should "
+            << "be reducing variance or increasing scenario duration before "
+            << "tuning adaptive control weights.\n";
+    }
+
+    std::vector<std::string> NetworkExperimentReporter::FindLatestSummaryCsvs(
+        const std::string& directory,
+        size_t count
+    ) {
+        std::vector<std::pair<std::filesystem::file_time_type, std::string>>
+            candidates;
+        std::error_code ec;
+
+        for (const auto& entry : std::filesystem::directory_iterator(
+            directory,
+            ec)) {
+            if (ec) {
+                break;
+            }
+
+            if (!entry.is_regular_file(ec) || ec) {
+                ec.clear();
+                continue;
+            }
+
+            const std::filesystem::path path = entry.path();
+            const std::string fileName = path.filename().string();
+            if (fileName.rfind("network_summary_", 0) != 0 ||
+                path.extension() != ".csv") {
+                continue;
+            }
+
+            if (entry.file_size(ec) == 0 || ec) {
+                ec.clear();
+                continue;
+            }
+
+            const std::filesystem::file_time_type writeTime =
+                entry.last_write_time(ec);
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+
+            candidates.emplace_back(writeTime, path.string());
+        }
+
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.first > rhs.first;
+            }
+        );
+
+        std::vector<std::string> paths;
+        const size_t limit = (std::min)(count, candidates.size());
+        paths.reserve(limit);
+        for (size_t i = 0; i < limit; ++i) {
+            paths.push_back(candidates[i].second);
+        }
+
+        return paths;
+    }
+
     std::string NetworkExperimentReporter::FindPreviousSummaryCsv(
         const std::string& directory,
         const std::string& currentCsvPath
@@ -2253,10 +3380,24 @@ namespace {
                 ParseUint64OrDefault(getCell(row, "sampleCount")));
             summary.startTimeSec =
                 ParseDoubleOrDefault(getCell(row, "startTimeSec"));
+            summary.measurementStartTimeSec =
+                ParseDoubleOrDefault(
+                    getCell(row, "measurementStartTimeSec"));
             summary.endTimeSec =
                 ParseDoubleOrDefault(getCell(row, "endTimeSec"));
             summary.durationSec =
                 ParseDoubleOrDefault(getCell(row, "durationSec"));
+            summary.warmupSec =
+                ParseDoubleOrDefault(getCell(row, "warmupSec"));
+            summary.measurementSec =
+                ParseDoubleOrDefault(getCell(row, "measurementSec"));
+            summary.warmupSampleCount = static_cast<uint32_t>(
+                ParseUint64OrDefault(getCell(row, "warmupSampleCount")));
+            summary.measuredSampleCount = static_cast<uint32_t>(
+                ParseUint64OrDefault(getCell(row, "measuredSampleCount")));
+            if (summary.measuredSampleCount == 0) {
+                summary.measuredSampleCount = summary.sampleCount;
+            }
             summary.avgLatencyMs =
                 ParseDoubleOrDefault(getCell(row, "avgLatencyMs"));
             summary.p95LatencyMs =
@@ -2320,6 +3461,18 @@ namespace {
             summary.deadlineNackExpiredMissingChunks =
                 ParseUint64OrDefault(
                     getCell(row, "deadlineNackExpiredMissingChunks"));
+            summary.fecEnabled =
+                ParseUint64OrDefault(getCell(row, "fecEnabled")) != 0;
+            summary.adaptiveFecEnabled =
+                ParseUint64OrDefault(getCell(row, "adaptiveFecEnabled")) != 0;
+            summary.fecGroupChunkCount = static_cast<uint32_t>(
+                ParseUint64OrDefault(getCell(row, "fecGroupChunkCount")));
+            summary.fecParityPackets =
+                ParseUint64OrDefault(getCell(row, "fecParityPackets"));
+            summary.fecRecoveredFrames =
+                ParseUint64OrDefault(getCell(row, "fecRecoveredFrames"));
+            summary.fecRecoveredChunks =
+                ParseUint64OrDefault(getCell(row, "fecRecoveredChunks"));
             summary.simDroppedPackets =
                 ParseUint64OrDefault(getCell(row, "simDroppedPackets"));
             summary.minTargetFps =
@@ -2395,9 +3548,19 @@ namespace {
         summary.name = current.name;
         summary.sampleCount = current.sampleCount;
         summary.startTimeSec = current.startTimeSec;
+        summary.measurementStartTimeSec = current.measurementStartTimeSec;
         summary.endTimeSec = current.endTimeSec;
         summary.durationSec =
             (std::max)(0.0, current.endTimeSec - current.startTimeSec);
+        summary.warmupSec = current.warmupSec;
+        summary.measurementSec =
+            current.sampleCount == 0
+            ? 0.0
+            : (std::max)(
+                0.0,
+                current.endTimeSec - current.measurementStartTimeSec);
+        summary.warmupSampleCount = current.warmupSampleCount;
+        summary.measuredSampleCount = current.sampleCount;
 
         const double sampleCount =
             (std::max)(1.0, static_cast<double>(current.sampleCount));
@@ -2420,38 +3583,96 @@ namespace {
         summary.avgJitterMs = current.jitterSumMs / sampleCount;
         summary.maxJitterMs = current.maxJitterMs;
 
-        summary.completedFrames = current.lastStats.completedFrames;
-        summary.displayedFrames = current.lastStats.displayedFrames;
-        summary.droppedFrames = current.lastStats.droppedFrames;
+        const NetworkStatsSnapshot& baseline =
+            current.hasMeasurementBaselineStats
+            ? current.measurementBaselineStats
+            : current.lastStats;
+
+        summary.completedFrames =
+            SubtractCounter(
+                current.lastStats.completedFrames,
+                baseline.completedFrames);
+        summary.displayedFrames =
+            SubtractCounter(
+                current.lastStats.displayedFrames,
+                baseline.displayedFrames);
+        summary.droppedFrames =
+            SubtractCounter(
+                current.lastStats.droppedFrames,
+                baseline.droppedFrames);
         summary.deadlineDroppedFrames =
-            current.lastStats.deadlineDroppedFrames;
+            SubtractCounter(
+                current.lastStats.deadlineDroppedFrames,
+                baseline.deadlineDroppedFrames);
         summary.outputQueueDroppedFrames =
-            current.lastStats.outputQueueDroppedFrames;
+            SubtractCounter(
+                current.lastStats.outputQueueDroppedFrames,
+                baseline.outputQueueDroppedFrames);
         summary.outputQueueDropEvents =
-            current.lastStats.outputQueueDropEvents;
+            SubtractCounter(
+                current.lastStats.outputQueueDropEvents,
+                baseline.outputQueueDropEvents);
         summary.outputQueueDropBurstEvents =
-            current.lastStats.outputQueueDropBurstEvents;
+            SubtractCounter(
+                current.lastStats.outputQueueDropBurstEvents,
+                baseline.outputQueueDropBurstEvents);
         summary.maxOutputQueueDropOldestAgeMs =
             current.lastStats.maxOutputQueueDropOldestAgeMs;
         summary.lastOutputQueueDropReason =
-            current.lastStats.lastOutputQueueDropReason;
-        summary.ackCount = current.lastStats.ackCount;
+            summary.outputQueueDroppedFrames == 0
+            ? std::string{}
+            : current.lastStats.lastOutputQueueDropReason;
+        summary.ackCount =
+            SubtractCounter(
+                current.lastStats.ackCount,
+                baseline.ackCount);
         summary.ackRetransmittedFrames =
-            current.lastStats.ackRetransmittedFrames;
+            SubtractCounter(
+                current.lastStats.ackRetransmittedFrames,
+                baseline.ackRetransmittedFrames);
         summary.deadlineNackSentFrames =
-            current.lastStats.deadlineNackSentFrames;
+            SubtractCounter(
+                current.lastStats.deadlineNackSentFrames,
+                baseline.deadlineNackSentFrames);
         summary.deadlineNackRecoveredFrames =
-            current.lastStats.deadlineNackRecoveredFrames;
+            SubtractCounter(
+                current.lastStats.deadlineNackRecoveredFrames,
+                baseline.deadlineNackRecoveredFrames);
         summary.deadlineNackMissingChunks =
-            current.lastStats.deadlineNackMissingChunks;
+            SubtractCounter(
+                current.lastStats.deadlineNackMissingChunks,
+                baseline.deadlineNackMissingChunks);
         summary.deadlineNackExpiredDroppedFrames =
-            current.lastStats.deadlineNackExpiredDroppedFrames;
+            SubtractCounter(
+                current.lastStats.deadlineNackExpiredDroppedFrames,
+                baseline.deadlineNackExpiredDroppedFrames);
         summary.deadlineNackExpiredAfterNackFrames =
-            current.lastStats.deadlineNackExpiredAfterNackFrames;
+            SubtractCounter(
+                current.lastStats.deadlineNackExpiredAfterNackFrames,
+                baseline.deadlineNackExpiredAfterNackFrames);
         summary.deadlineNackExpiredMissingChunks =
-            current.lastStats.deadlineNackExpiredMissingChunks;
+            SubtractCounter(
+                current.lastStats.deadlineNackExpiredMissingChunks,
+                baseline.deadlineNackExpiredMissingChunks);
+        summary.fecEnabled = current.lastStats.fecEnabled;
+        summary.adaptiveFecEnabled = current.lastStats.adaptiveFecEnabled;
+        summary.fecGroupChunkCount = current.lastStats.fecGroupChunkCount;
+        summary.fecParityPackets =
+            SubtractCounter(
+                current.lastStats.fecParityPackets,
+                baseline.fecParityPackets);
+        summary.fecRecoveredFrames =
+            SubtractCounter(
+                current.lastStats.fecRecoveredFrames,
+                baseline.fecRecoveredFrames);
+        summary.fecRecoveredChunks =
+            SubtractCounter(
+                current.lastStats.fecRecoveredChunks,
+                baseline.fecRecoveredChunks);
         summary.simDroppedPackets =
-            current.lastStats.networkSimulation.droppedPackets;
+            SubtractCounter(
+                current.lastStats.networkSimulation.droppedPackets,
+                baseline.networkSimulation.droppedPackets);
 
         summary.minTargetFps =
             current.minTargetFps == (std::numeric_limits<int>::max)()
@@ -2513,6 +3734,184 @@ namespace {
         return values[lowerIndex] * (1.0 - t) + values[upperIndex] * t;
     }
 
+    double NetworkExperimentReporter::FrameDropRate(
+        const ScenarioSummary& summary
+    ) {
+        const uint64_t totalFrames =
+            summary.displayedFrames + summary.droppedFrames;
+        if (totalFrames == 0) {
+            return 0.0;
+        }
+
+        return static_cast<double>(summary.droppedFrames) /
+            static_cast<double>(totalFrames);
+    }
+
+    double NetworkExperimentReporter::AverageQoeScore(
+        const ScenarioSummary& summary
+    ) {
+        if (summary.timeSeriesSamples.empty()) {
+            return 0.0;
+        }
+
+        double sum = 0.0;
+        for (const TimeSeriesSample& sample : summary.timeSeriesSamples) {
+            sum += sample.adaptiveQoeScore;
+        }
+
+        return sum /
+            static_cast<double>(summary.timeSeriesSamples.size());
+    }
+
+    double NetworkExperimentReporter::FecRecoveryEfficiency(
+        const ScenarioSummary& summary
+    ) {
+        if (summary.fecParityPackets == 0) {
+            return 0.0;
+        }
+
+        return static_cast<double>(summary.fecRecoveredFrames) /
+            static_cast<double>(summary.fecParityPackets);
+    }
+
+    NetworkExperimentReporter::RepeatMetricStats
+        NetworkExperimentReporter::ComputeRepeatMetricStats(
+            const std::vector<double>& values
+        ) {
+        RepeatMetricStats stats{};
+        stats.count = static_cast<uint32_t>(values.size());
+        if (values.empty()) {
+            return stats;
+        }
+
+        stats.min = values.front();
+        stats.max = values.front();
+        double sum = 0.0;
+        for (const double value : values) {
+            sum += value;
+            stats.min = (std::min)(stats.min, value);
+            stats.max = (std::max)(stats.max, value);
+        }
+        stats.mean = sum / static_cast<double>(values.size());
+
+        double varianceSum = 0.0;
+        for (const double value : values) {
+            const double delta = value - stats.mean;
+            varianceSum += delta * delta;
+        }
+        stats.stddev =
+            std::sqrt(varianceSum / static_cast<double>(values.size()));
+
+        return stats;
+    }
+
+    std::string NetworkExperimentReporter::ModeLabel(
+        const ScenarioSummary& summary
+    ) {
+        std::string mode = summary.adaptiveControlMode.empty()
+            ? "unknown"
+            : summary.adaptiveControlMode;
+        if (summary.adaptiveControlMode == "QoE/Deadline Adaptive" &&
+            !summary.adaptiveCongestionControlMode.empty()) {
+            mode += " / ";
+            mode += summary.adaptiveCongestionControlMode;
+        }
+        mode += " / ";
+        if (summary.adaptiveFecEnabled) {
+            mode += "Adaptive FEC";
+        }
+        else if (summary.fecEnabled) {
+            mode += "FEC g";
+            mode += std::to_string(summary.fecGroupChunkCount);
+        }
+        else {
+            mode += "FEC off";
+        }
+        return mode;
+    }
+
+    double NetworkExperimentReporter::QualityFloorPenalty(
+        const ScenarioSummary& summary
+    ) {
+        return
+            ApplyQualityPenaltyRules(
+                static_cast<double>(summary.minTargetFps),
+                g_scoringConfig.fpsPenaltyRules) +
+            ApplyQualityPenaltyRules(
+                static_cast<double>(summary.minTargetJpegQuality),
+                g_scoringConfig.jpegQualityPenaltyRules) +
+            ApplyQualityPenaltyRules(
+                static_cast<double>(summary.minTargetBitrateKbps),
+                g_scoringConfig.bitrateKbpsPenaltyRules);
+    }
+
+    NetworkExperimentReporter::ScoreBreakdown
+        NetworkExperimentReporter::BuildScoreBreakdown(
+            const ScenarioSummary& summary,
+            bool includeQoeBonus,
+            bool includeFrameDropRatePenalty
+        ) {
+        ScoreBreakdown score{};
+
+        score.latencyScore =
+            summary.p95LatencyMs * g_scoringConfig.p95LatencyMsWeight;
+        score.frameDropPenalty =
+            static_cast<double>(summary.droppedFrames) *
+            g_scoringConfig.droppedFramesWeight +
+            static_cast<double>(summary.deadlineDroppedFrames) *
+            g_scoringConfig.deadlineDroppedFramesWeight;
+        if (includeFrameDropRatePenalty) {
+            score.frameDropPenalty +=
+                FrameDropRate(summary) *
+                g_scoringConfig.frameDropRateWeight;
+        }
+        score.outputQueuePenalty =
+            static_cast<double>(summary.outputQueueDroppedFrames) *
+            g_scoringConfig.outputQueueDroppedFramesWeight;
+        score.nackExpirePenalty =
+            static_cast<double>(
+                summary.deadlineNackExpiredDroppedFrames) *
+            g_scoringConfig.deadlineNackExpiredDroppedFramesWeight;
+        score.fecOverheadPenalty =
+            static_cast<double>(summary.fecParityPackets) *
+            g_scoringConfig.fecParityPacketWeight;
+        if (summary.fecParityPackets > 0) {
+            const double efficiency =
+                FecRecoveryEfficiency(summary);
+            score.fecInefficiencyPenalty =
+                (std::max)(0.0, 0.25 - efficiency) *
+                g_scoringConfig.fecInefficiencyPenaltyWeight;
+        }
+        score.fecRecoveryBonus =
+            static_cast<double>(
+                (std::min)(
+                    summary.fecRecoveredFrames,
+                    summary.fecParityPackets)) *
+            g_scoringConfig.fecRecoveredFrameBonusWeight;
+        score.fpsBonus =
+            summary.avgDisplayFps *
+            g_scoringConfig.avgDisplayFpsBonusWeight;
+        score.qoeBonus = includeQoeBonus
+            ? AverageQoeScore(summary) *
+                g_scoringConfig.avgQoeScoreBonusWeight
+            : 0.0;
+        score.qualityPenalty = QualityFloorPenalty(summary);
+
+        score.finalScore =
+            score.latencyScore +
+            score.frameDropPenalty +
+            score.outputQueuePenalty +
+            score.nackExpirePenalty -
+            score.fecRecoveryBonus +
+            score.fecOverheadPenalty +
+            score.fecInefficiencyPenalty -
+            score.fpsBonus -
+            score.qoeBonus +
+            score.qualityPenalty;
+
+        return score;
+    }
+
     std::string NetworkExperimentReporter::BuildVerdictNotes(
         const ScenarioSummary& summary
     ) {
@@ -2548,7 +3947,10 @@ namespace {
             notes.push_back("display fps below adaptive target");
         }
 
-        if (summary.minTargetFps <= 8 || summary.minTargetJpegQuality <= 40) {
+        if (summary.minTargetFps <= 8 ||
+            summary.minTargetJpegQuality <= 40 ||
+            (summary.minTargetBitrateKbps > 0 &&
+                summary.minTargetBitrateKbps <= 1000)) {
             notes.push_back("adaptive reached minimum quality");
         }
 

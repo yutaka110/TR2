@@ -53,9 +53,52 @@ namespace {
         return thresholdUs - kRetransmitFreshnessSlackUs;
     }
 
+    bool DefaultRnvpFecEnabled() {
+        char text[16]{};
+        const DWORD length = GetEnvironmentVariableA(
+            "RNVP_FEC_ENABLED",
+            text,
+            static_cast<DWORD>(sizeof(text)));
+        if (length == 0 || length >= sizeof(text)) {
+            return true;
+        }
+
+        return text[0] != '0';
+    }
+
+    uint16_t ClampRnvpFecGroupChunkCount(uint16_t value) {
+        return static_cast<uint16_t>(
+            (std::max)(2u, (std::min)(32u, static_cast<unsigned>(value)))
+        );
+    }
+
+    uint16_t DefaultRnvpFecGroupChunkCount() {
+        char text[16]{};
+        const DWORD length = GetEnvironmentVariableA(
+            "RNVP_FEC_GROUP_CHUNKS",
+            text,
+            static_cast<DWORD>(sizeof(text)));
+        if (length == 0 || length >= sizeof(text)) {
+            return uint16_t{ 4 };
+        }
+
+        char* end = nullptr;
+        const long value = std::strtol(text, &end, 10);
+        if (end == text) {
+            return uint16_t{ 4 };
+        }
+
+        return static_cast<uint16_t>(
+            (std::max)(2L, (std::min)(32L, value))
+        );
+    }
+
 } // namespace
 
 NetworkManager::NetworkManager(const std::string& ip, uint16_t port) {
+    fecEnabled_.store(DefaultRnvpFecEnabled());
+    fecGroupChunkCount_.store(DefaultRnvpFecGroupChunkCount());
+
     WSADATA wsa{};
     int result = WSAStartup(MAKEWORD(2, 2), &wsa);
     if (result != 0) {
@@ -354,7 +397,157 @@ bool NetworkManager::SendRNVPFramePackets(
         );
     }
 
+    SendRNVPFecParity(
+        data,
+        frameId,
+        codecType,
+        streamId,
+        keyFrame,
+        chunkCount,
+        sendTimeUs,
+        context
+    );
+
     return true;
+}
+
+bool NetworkManager::SendRNVPFecParity(
+    const std::vector<uint8_t>& data,
+    uint32_t frameId,
+    net::CodecType codecType,
+    uint32_t streamId,
+    bool keyFrame,
+    uint16_t chunkCount,
+    uint64_t sendTimeUs,
+    const char* context
+) {
+    if (!IsFecEnabled() ||
+        udpSocket_ == INVALID_SOCKET ||
+        data.empty() ||
+        chunkCount <= 1) {
+        return false;
+    }
+
+    const size_t maxPayload = net::kMaxUdpPayloadSize;
+    const size_t totalSize = data.size();
+    if (totalSize >
+        static_cast<size_t>((std::numeric_limits<uint32_t>::max)())) {
+        return false;
+    }
+
+    const uint16_t groupChunkCount = GetFecGroupChunkCount();
+    bool sentAnyParity = false;
+
+    for (uint32_t groupStartValue = 0;
+        groupStartValue < chunkCount;
+        groupStartValue += groupChunkCount) {
+        const uint16_t groupStart =
+            static_cast<uint16_t>(groupStartValue);
+        const uint16_t chunksInGroup = static_cast<uint16_t>(
+            (std::min)(
+                static_cast<uint32_t>(groupChunkCount),
+                static_cast<uint32_t>(chunkCount - groupStartValue)
+            )
+        );
+
+        if (chunksInGroup <= 1) {
+            continue;
+        }
+
+        size_t parityPayloadSize = 0;
+        for (uint16_t groupOffset = 0;
+            groupOffset < chunksInGroup;
+            ++groupOffset) {
+            const uint16_t chunkIndex =
+                static_cast<uint16_t>(groupStart + groupOffset);
+            const size_t offset =
+                static_cast<size_t>(chunkIndex) * maxPayload;
+            if (offset >= totalSize) {
+                break;
+            }
+
+            const size_t chunkSize =
+                (std::min)(maxPayload, totalSize - offset);
+            parityPayloadSize =
+                (std::max)(parityPayloadSize, chunkSize);
+        }
+
+        if (parityPayloadSize == 0 ||
+            parityPayloadSize > maxPayload) {
+            continue;
+        }
+
+        std::vector<uint8_t> parity(parityPayloadSize, 0);
+        for (uint16_t groupOffset = 0;
+            groupOffset < chunksInGroup;
+            ++groupOffset) {
+            const uint16_t chunkIndex =
+                static_cast<uint16_t>(groupStart + groupOffset);
+            const size_t offset =
+                static_cast<size_t>(chunkIndex) * maxPayload;
+            if (offset >= totalSize) {
+                break;
+            }
+
+            const size_t chunkSize =
+                (std::min)(maxPayload, totalSize - offset);
+            for (size_t i = 0; i < chunkSize; ++i) {
+                parity[i] ^= data[offset + i];
+            }
+        }
+
+        const size_t payloadSize =
+            net::kFecPayloadHeaderSize + parityPayloadSize;
+        std::vector<uint8_t> packet(net::kRnvpHeaderV1Size + payloadSize);
+
+        net::RnvpHeaderV1 header{};
+        header.magic = net::kRnvpMagic;
+        header.version = net::kRnvpVersion;
+        header.packetType = static_cast<uint8_t>(net::PacketType::Fec);
+        header.headerSize = static_cast<uint16_t>(net::kRnvpHeaderV1Size);
+        header.sequence = NextRNVPSequence();
+        header.streamId = streamId;
+        header.frameId = frameId;
+        header.chunkIndex = groupStart;
+        header.chunkCount = chunkCount;
+        header.sendTimeUs = sendTimeUs;
+        header.payloadSize = static_cast<uint32_t>(payloadSize);
+        header.flags = net::PacketFlag_DroppedAllowed;
+        if (keyFrame) {
+            header.flags = net::AddPacketFlag(
+                header.flags,
+                net::PacketFlag_KeyFrame
+            );
+        }
+        header.codecType = static_cast<uint8_t>(codecType);
+
+        net::FecPayloadHeader fecHeader{};
+        fecHeader.framePayloadBytes = static_cast<uint32_t>(totalSize);
+        fecHeader.parityPayloadBytes =
+            static_cast<uint16_t>(parityPayloadSize);
+        fecHeader.protectedChunkCount = chunksInGroup;
+
+        net::EncodeRnvpHeaderV1(packet.data(), header);
+        net::EncodeFecPayloadHeader(
+            packet.data() + net::kRnvpHeaderV1Size,
+            fecHeader
+        );
+        std::memcpy(
+            packet.data() + net::kRnvpHeaderV1Size + net::kFecPayloadHeaderSize,
+            parity.data(),
+            parity.size()
+        );
+
+        SendPacedPacketWithSimulation(
+            std::move(packet),
+            context,
+            net::PacketPacingPriority::Normal,
+            sendTimeUs + 150000ull
+        );
+        sentAnyParity = true;
+    }
+
+    return sentAnyParity;
 }
 
 uint32_t NetworkManager::SendRNVPSelectedChunks(
@@ -1210,6 +1403,261 @@ net::PacketPacerStats NetworkManager::GetPacingStats() const {
     return packetPacer_.GetStats();
 }
 
+void NetworkManager::SetFecEnabled(bool enabled) {
+    fecEnabled_.store(enabled, std::memory_order_relaxed);
+}
+
+bool NetworkManager::IsFecEnabled() const {
+    return fecEnabled_.load(std::memory_order_relaxed);
+}
+
+void NetworkManager::SetAdaptiveFecEnabled(bool enabled) {
+    const bool previous =
+        adaptiveFecEnabled_.exchange(enabled, std::memory_order_relaxed);
+    if (previous == enabled) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(adaptiveFecMutex_);
+    adaptiveFecLastDeadlineNackSentFrames_ = 0;
+    adaptiveFecLastDeadlineNackExpiredDroppedFrames_ = 0;
+    adaptiveFecLastParityPackets_ = 0;
+    adaptiveFecLastRecoveredFrames_ = 0;
+    adaptiveFecLossPressureEma_ = 0.0;
+    adaptiveFecStableSamples_ = 0;
+    adaptiveFecHoldSamples_ = 0;
+    adaptiveFecHoldGroupChunkCount_ = 8;
+    adaptiveFecWasteSamples_ = 0;
+}
+
+bool NetworkManager::IsAdaptiveFecEnabled() const {
+    return adaptiveFecEnabled_.load(std::memory_order_relaxed);
+}
+
+void NetworkManager::SetFecGroupChunkCount(uint16_t groupChunkCount) {
+    fecGroupChunkCount_.store(
+        ClampRnvpFecGroupChunkCount(groupChunkCount),
+        std::memory_order_relaxed
+    );
+}
+
+uint16_t NetworkManager::GetFecGroupChunkCount() const {
+    return fecGroupChunkCount_.load(std::memory_order_relaxed);
+}
+
+void NetworkManager::UpdateAdaptiveFec(
+    double packetLossRate,
+    double ackMissingRate,
+    uint64_t deadlineNackSentFrames,
+    uint64_t deadlineNackExpiredDroppedFrames,
+    uint64_t fecParityPackets,
+    uint64_t fecRecoveredFrames,
+    uint32_t estimatedBandwidthBps,
+    uint32_t targetBitrateKbps,
+    double queueDelayMs
+) {
+    if (!IsAdaptiveFecEnabled()) {
+        return;
+    }
+
+    const auto sanitizeRate = [](double value) {
+        if (!std::isfinite(value)) {
+            return 0.0;
+        }
+        return (std::max)(0.0, (std::min)(1.0, value));
+    };
+    const auto subtractCounter =
+        [](uint64_t current, uint64_t previous) -> uint64_t {
+        return current >= previous
+            ? current - previous
+            : current;
+    };
+
+    const double instantLossPressure =
+        (std::max)(
+            sanitizeRate(packetLossRate),
+            sanitizeRate(ackMissingRate));
+    uint64_t deadlineNackDelta = 0;
+    uint64_t deadlineExpiredDelta = 0;
+    uint64_t fecParityDelta = 0;
+    uint64_t fecRecoveredDelta = 0;
+    double lossPressure = instantLossPressure;
+
+    {
+        std::lock_guard<std::mutex> lock(adaptiveFecMutex_);
+        deadlineNackDelta = subtractCounter(
+            deadlineNackSentFrames,
+            adaptiveFecLastDeadlineNackSentFrames_);
+        deadlineExpiredDelta = subtractCounter(
+            deadlineNackExpiredDroppedFrames,
+            adaptiveFecLastDeadlineNackExpiredDroppedFrames_);
+        fecParityDelta = subtractCounter(
+            fecParityPackets,
+            adaptiveFecLastParityPackets_);
+        fecRecoveredDelta = subtractCounter(
+            fecRecoveredFrames,
+            adaptiveFecLastRecoveredFrames_);
+        adaptiveFecLastDeadlineNackSentFrames_ =
+            deadlineNackSentFrames;
+        adaptiveFecLastDeadlineNackExpiredDroppedFrames_ =
+            deadlineNackExpiredDroppedFrames;
+        adaptiveFecLastParityPackets_ = fecParityPackets;
+        adaptiveFecLastRecoveredFrames_ = fecRecoveredFrames;
+
+        adaptiveFecLossPressureEma_ =
+            adaptiveFecLossPressureEma_ <= 0.0
+            ? instantLossPressure
+            : adaptiveFecLossPressureEma_ * 0.70 +
+                instantLossPressure * 0.30;
+        lossPressure =
+            (std::max)(instantLossPressure, adaptiveFecLossPressureEma_);
+    }
+
+    const bool burstMissingSignal = ackMissingRate >= 0.20;
+    const bool recoveryDeadlinePressure =
+        deadlineExpiredDelta > 0 ||
+        deadlineNackDelta >= 2;
+    const bool fecWasUseful = fecRecoveredDelta > 0;
+    const bool fecWasWasteful =
+        fecParityDelta > 0 &&
+        fecRecoveredDelta == 0 &&
+        !recoveryDeadlinePressure;
+    const bool bandwidthTight =
+        estimatedBandwidthBps > 0 &&
+        targetBitrateKbps > 0 &&
+        estimatedBandwidthBps <
+        static_cast<uint32_t>(
+            static_cast<uint64_t>(targetBitrateKbps) * 1100ull);
+    const bool pacingBacklog = queueDelayMs >= 35.0;
+    const bool highBitrateMode = targetBitrateKbps >= 4500;
+    const bool strongFecBudgetAvailable =
+        targetBitrateKbps == 0 ||
+        targetBitrateKbps <= 3200 ||
+        (estimatedBandwidthBps > 0 &&
+            estimatedBandwidthBps >
+            static_cast<uint32_t>(
+                static_cast<uint64_t>(targetBitrateKbps) * 1800ull));
+    const bool highPressure =
+        deadlineExpiredDelta >= 2 ||
+        (deadlineExpiredDelta > 0 && burstMissingSignal) ||
+        (burstMissingSignal && instantLossPressure >= 0.16);
+    const bool mediumPressure =
+        recoveryDeadlinePressure ||
+        burstMissingSignal ||
+        (fecWasUseful && lossPressure >= 0.04);
+    const bool lowPressure =
+        recoveryDeadlinePressure ||
+        burstMissingSignal ||
+        fecWasUseful;
+
+    bool enableFec = false;
+    uint16_t groupChunkCount = 8;
+
+    if (highPressure) {
+        groupChunkCount = 2;
+        enableFec = true;
+    }
+    else if (mediumPressure) {
+        groupChunkCount = 4;
+        enableFec = true;
+    }
+    else if (lowPressure) {
+        groupChunkCount = 8;
+        enableFec = true;
+    }
+
+    if ((bandwidthTight || pacingBacklog) && !highPressure) {
+        if (recoveryDeadlinePressure) {
+            groupChunkCount = 4;
+        }
+        else if (burstMissingSignal) {
+            groupChunkCount = 8;
+        }
+        else {
+            enableFec = false;
+            groupChunkCount = 8;
+        }
+    }
+    else if (groupChunkCount == 2 && !strongFecBudgetAvailable) {
+        groupChunkCount = 4;
+    }
+    else if ((bandwidthTight || pacingBacklog) &&
+        groupChunkCount == 2 &&
+        deadlineExpiredDelta == 0 &&
+        instantLossPressure < 0.14) {
+        groupChunkCount = 4;
+    }
+
+    if (groupChunkCount == 4 &&
+        highBitrateMode &&
+        !recoveryDeadlinePressure &&
+        (instantLossPressure >= 0.18 || lossPressure >= 0.14)) {
+        groupChunkCount = 8;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(adaptiveFecMutex_);
+        if (deadlineExpiredDelta > 0) {
+            adaptiveFecHoldSamples_ = 5;
+            adaptiveFecHoldGroupChunkCount_ =
+                (std::min)(adaptiveFecHoldGroupChunkCount_, groupChunkCount);
+            adaptiveFecHoldGroupChunkCount_ =
+                (std::min)(adaptiveFecHoldGroupChunkCount_, uint16_t{ 4 });
+        }
+        else if (burstMissingSignal || deadlineNackDelta >= 2) {
+            adaptiveFecHoldSamples_ =
+                (std::max)(adaptiveFecHoldSamples_, uint32_t{ 4 });
+            adaptiveFecHoldGroupChunkCount_ =
+                (std::min)(adaptiveFecHoldGroupChunkCount_, groupChunkCount);
+            adaptiveFecHoldGroupChunkCount_ =
+                (std::min)(adaptiveFecHoldGroupChunkCount_, uint16_t{ 4 });
+        }
+        else if (fecWasUseful) {
+            adaptiveFecHoldSamples_ =
+                (std::max)(adaptiveFecHoldSamples_, uint32_t{ 2 });
+            adaptiveFecHoldGroupChunkCount_ =
+                (std::min)(adaptiveFecHoldGroupChunkCount_, groupChunkCount);
+        }
+        else if (adaptiveFecHoldSamples_ > 0) {
+            adaptiveFecHoldSamples_--;
+            if (adaptiveFecHoldSamples_ == 0) {
+                adaptiveFecHoldGroupChunkCount_ = 8;
+            }
+        }
+
+        if (fecWasWasteful) {
+            adaptiveFecWasteSamples_++;
+        }
+        else {
+            adaptiveFecWasteSamples_ = 0;
+        }
+
+        if (adaptiveFecHoldSamples_ > 0) {
+            enableFec = true;
+            groupChunkCount =
+                (std::min)(groupChunkCount, adaptiveFecHoldGroupChunkCount_);
+        }
+        if (adaptiveFecWasteSamples_ >= 2 &&
+            !recoveryDeadlinePressure &&
+            !burstMissingSignal) {
+            enableFec = false;
+            groupChunkCount = 8;
+            adaptiveFecHoldSamples_ = 0;
+            adaptiveFecHoldGroupChunkCount_ = 8;
+        }
+
+        if (!enableFec) {
+            adaptiveFecStableSamples_++;
+        }
+        else {
+            adaptiveFecStableSamples_ = 0;
+        }
+    }
+
+    SetFecEnabled(enableFec);
+    SetFecGroupChunkCount(groupChunkCount);
+}
+
 NetworkManager::TransportFeedbackStats
 NetworkManager::GetTransportFeedbackStats() const {
     std::lock_guard<std::mutex> lock(transportFeedbackMutex_);
@@ -1255,6 +1703,19 @@ void NetworkManager::ResetStats() {
         lastAckMissingChunks_ = 0;
         lastAckMissingRate_ = 0.0;
         ackCount_ = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(adaptiveFecMutex_);
+        adaptiveFecLastDeadlineNackSentFrames_ = 0;
+        adaptiveFecLastDeadlineNackExpiredDroppedFrames_ = 0;
+        adaptiveFecLastParityPackets_ = 0;
+        adaptiveFecLastRecoveredFrames_ = 0;
+        adaptiveFecLossPressureEma_ = 0.0;
+        adaptiveFecStableSamples_ = 0;
+        adaptiveFecHoldSamples_ = 0;
+        adaptiveFecHoldGroupChunkCount_ = 8;
+        adaptiveFecWasteSamples_ = 0;
     }
 
     {
@@ -1412,8 +1873,8 @@ void NetworkManager::TrackSentRnvpDataPacket(
         return;
     }
 
-    if (static_cast<net::PacketType>(header.packetType) !=
-        net::PacketType::Data) {
+    if (!net::IsMediaPacket(
+        static_cast<net::PacketType>(header.packetType))) {
         return;
     }
 

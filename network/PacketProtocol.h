@@ -76,6 +76,7 @@ namespace net {
         Pong = 3, // RTT計測応答
         Control = 4, // 品質/FPS/bitrate調整指示
         TransportFeedback = 5,
+        Fec = 6,
     };
 
     enum class CodecType : uint8_t {
@@ -227,6 +228,14 @@ namespace net {
     static constexpr size_t kTransportFeedbackPayloadBaseSize = 16;
     static constexpr size_t kTransportFeedbackEntrySize = 8;
     static constexpr size_t kMaxTransportFeedbackEntries = 128;
+
+    struct FecPayloadHeader {
+        uint32_t framePayloadBytes = 0;
+        uint16_t parityPayloadBytes = 0;
+        uint16_t protectedChunkCount = 0;
+    };
+
+    static constexpr size_t kFecPayloadHeaderSize = 8;
 
     // ============================================================
     // Big Endian Utility
@@ -634,6 +643,38 @@ namespace net {
         return true;
     }
 
+    inline void EncodeFecPayloadHeader(
+        uint8_t* dst,
+        const FecPayloadHeader& header
+    ) {
+        WriteU32BE(dst + 0, header.framePayloadBytes);
+        WriteU16BE(dst + 4, header.parityPayloadBytes);
+        WriteU16BE(dst + 6, header.protectedChunkCount);
+    }
+
+    inline bool DecodeFecPayloadHeader(
+        const uint8_t* src,
+        size_t size,
+        FecPayloadHeader& outHeader
+    ) {
+        if (!src || size < kFecPayloadHeaderSize) {
+            return false;
+        }
+
+        outHeader.framePayloadBytes = ReadU32BE(src + 0);
+        outHeader.parityPayloadBytes = ReadU16BE(src + 4);
+        outHeader.protectedChunkCount = ReadU16BE(src + 6);
+
+        if (outHeader.framePayloadBytes == 0 ||
+            outHeader.parityPayloadBytes == 0 ||
+            outHeader.parityPayloadBytes > kMaxUdpPayloadSize ||
+            outHeader.protectedChunkCount == 0) {
+            return false;
+        }
+
+        return kFecPayloadHeaderSize + outHeader.parityPayloadBytes <= size;
+    }
+
     // ============================================================
     // Utility
     // ============================================================
@@ -652,6 +693,11 @@ namespace net {
 
     inline bool IsDataPacket(PacketType type) {
         return type == PacketType::Data;
+    }
+
+    inline bool IsMediaPacket(PacketType type) {
+        return type == PacketType::Data ||
+            type == PacketType::Fec;
     }
 
     inline bool IsControlPacket(PacketType type) {

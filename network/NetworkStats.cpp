@@ -297,6 +297,25 @@ namespace net {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
+    void NetworkStats::OnFecParityPacket() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.fecParityPackets++;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnFecRecoveredFrame(uint32_t recoveredChunkCount) {
+        if (recoveredChunkCount == 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.fecRecoveredFrames++;
+        snapshot_.fecRecoveredChunks += recoveredChunkCount;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
     void NetworkStats::OnDuplicatePacket() {
         std::lock_guard<std::mutex> lock(mutex_);
 

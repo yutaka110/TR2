@@ -96,6 +96,7 @@ namespace net {
     private:
         struct ParsedDataPacket {
             bool isRnvp = false;
+            bool isFec = false;
 
             uint32_t sequence = 0;
             uint32_t streamId = 0;
@@ -112,6 +113,17 @@ namespace net {
             CodecType codecType = CodecType::Unknown;
 
             const uint8_t* payload = nullptr;
+
+            uint32_t fecFramePayloadBytes = 0;
+            uint16_t fecParityPayloadBytes = 0;
+            uint16_t fecProtectedChunkCount = 0;
+        };
+
+        struct FecParityGroup {
+            uint16_t startChunkIndex = 0;
+            uint16_t protectedChunkCount = 0;
+            uint16_t parityPayloadBytes = 0;
+            std::vector<uint8_t> parity;
         };
 
         struct PendingFrame {
@@ -136,6 +148,9 @@ namespace net {
 
             std::vector<std::vector<uint8_t>> chunks;
             std::vector<bool> received;
+
+            uint32_t fecFramePayloadBytes = 0;
+            std::vector<FecParityGroup> fecParityGroups;
         };
 
     private:
@@ -149,6 +164,16 @@ namespace net {
             PendingFrame& frame,
             uint64_t receiveTimeUs
         );
+
+        uint32_t TryRecoverMissingChunksWithFec(PendingFrame& frame);
+        bool StoreFecParity(
+            PendingFrame& frame,
+            const ParsedDataPacket& packet
+        );
+        size_t ExpectedChunkSize(
+            const PendingFrame& frame,
+            uint16_t chunkIndex
+        ) const;
 
         FrameAckInfo BuildAckInfoFromPendingFrame(const PendingFrame& frame) const;
 

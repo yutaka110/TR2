@@ -211,6 +211,12 @@ namespace {
             << stats.deadlineNackExpiredDroppedFrames << ','
             << stats.deadlineNackExpiredAfterNackFrames << ','
             << stats.deadlineNackExpiredMissingChunks << ','
+            << (stats.fecEnabled ? 1 : 0) << ','
+            << (stats.adaptiveFecEnabled ? 1 : 0) << ','
+            << stats.fecGroupChunkCount << ','
+            << stats.fecParityPackets << ','
+            << stats.fecRecoveredFrames << ','
+            << stats.fecRecoveredChunks << ','
             << (stats.adaptiveEnabled ? 1 : 0) << ','
             << EscapeCsv(stats.adaptiveControlMode) << ','
             << EscapeCsv(stats.adaptiveCongestionControlMode) << ','
@@ -369,6 +375,12 @@ namespace {
             << "deadlineNackExpiredDroppedFrames,"
             << "deadlineNackExpiredAfterNackFrames,"
             << "deadlineNackExpiredMissingChunks,"
+            << "fecEnabled,"
+            << "adaptiveFecEnabled,"
+            << "fecGroupChunkCount,"
+            << "fecParityPackets,"
+            << "fecRecoveredFrames,"
+            << "fecRecoveredChunks,"
             << "adaptiveEnabled,"
             << "adaptiveControlMode,"
             << "adaptiveCongestionControlMode,"

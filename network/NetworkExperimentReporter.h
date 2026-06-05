@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NetworkExperimentRunner.h"
 #include "NetworkStats.h"
 
 #include <array>
@@ -18,7 +19,9 @@ namespace net {
         void RecordSample(
             const std::string& scenarioName,
             const NetworkStatsSnapshot& stats,
-            double appTimeSec
+            double appTimeSec,
+            double scenarioElapsedSec,
+            double warmupSec
         );
 
         bool IsRunning() const;
@@ -26,6 +29,16 @@ namespace net {
         const std::string& TextFilePath() const;
         const std::string& MarkdownFilePath() const;
         const std::string& BeforeAfterFilePath() const;
+        const std::string& RepeatReportFilePath() const;
+        const std::string& ManifestFilePath() const;
+        void WriteManifest(
+            const std::vector<NetworkExperimentScenario>& scenarios,
+            const std::string& rawCsvPath,
+            NetworkRuntimeMode runtimeMode,
+            bool autoExperiment,
+            bool stopAfterOnePass,
+            double warmupSec
+        ) const;
 
     private:
         struct TimeSeriesSample {
@@ -49,6 +62,9 @@ namespace net {
             uint64_t deadlineNackRecoveredFrames = 0;
             uint64_t deadlineNackExpiredDroppedFrames = 0;
             uint64_t ackRetransmittedChunks = 0;
+            uint64_t fecParityPackets = 0;
+            uint64_t fecRecoveredFrames = 0;
+            uint64_t fecRecoveredChunks = 0;
             double packetLossRate = 0.0;
             double currentJitterMs = 0.0;
         };
@@ -56,8 +72,11 @@ namespace net {
         struct ScenarioAccumulator {
             std::string name;
             double startTimeSec = 0.0;
+            double measurementStartTimeSec = 0.0;
             double endTimeSec = 0.0;
             uint32_t sampleCount = 0;
+            uint32_t warmupSampleCount = 0;
+            double warmupSec = 0.0;
 
             double latencySumMs = 0.0;
             double maxLatencyMs = 0.0;
@@ -80,18 +99,25 @@ namespace net {
             std::string networkRuntimeMode;
             std::string adaptiveControlMode;
             std::string adaptiveCongestionControlMode;
-            std::array<uint32_t, 7> adaptiveCauseSamples{};
+            std::array<uint32_t, 10> adaptiveCauseSamples{};
             std::vector<TimeSeriesSample> timeSeriesSamples;
 
             NetworkStatsSnapshot lastStats{};
+            NetworkStatsSnapshot measurementBaselineStats{};
+            bool hasMeasurementBaselineStats = false;
         };
 
         struct ScenarioSummary {
             std::string name;
             uint32_t sampleCount = 0;
             double startTimeSec = 0.0;
+            double measurementStartTimeSec = 0.0;
             double endTimeSec = 0.0;
             double durationSec = 0.0;
+            double warmupSec = 0.0;
+            double measurementSec = 0.0;
+            uint32_t warmupSampleCount = 0;
+            uint32_t measuredSampleCount = 0;
 
             double avgLatencyMs = 0.0;
             double p95LatencyMs = 0.0;
@@ -124,6 +150,12 @@ namespace net {
             uint64_t deadlineNackExpiredDroppedFrames = 0;
             uint64_t deadlineNackExpiredAfterNackFrames = 0;
             uint64_t deadlineNackExpiredMissingChunks = 0;
+            bool fecEnabled = false;
+            bool adaptiveFecEnabled = false;
+            uint32_t fecGroupChunkCount = 0;
+            uint64_t fecParityPackets = 0;
+            uint64_t fecRecoveredFrames = 0;
+            uint64_t fecRecoveredChunks = 0;
             uint64_t simDroppedPackets = 0;
 
             int minTargetFps = 0;
@@ -139,16 +171,56 @@ namespace net {
             std::string notes;
         };
 
+        struct ScoreBreakdown {
+            double latencyScore = 0.0;
+            double frameDropPenalty = 0.0;
+            double outputQueuePenalty = 0.0;
+            double nackExpirePenalty = 0.0;
+            double fecOverheadPenalty = 0.0;
+            double fecInefficiencyPenalty = 0.0;
+            double fecRecoveryBonus = 0.0;
+            double fpsBonus = 0.0;
+            double qoeBonus = 0.0;
+            double qualityPenalty = 0.0;
+            double finalScore = 0.0;
+        };
+
+        struct RepeatMetricStats {
+            uint32_t count = 0;
+            double mean = 0.0;
+            double stddev = 0.0;
+            double min = 0.0;
+            double max = 0.0;
+        };
+
         void ResetCurrent();
         void FinalizeCurrent();
         void WriteHeader();
         void WriteSummary(const ScenarioSummary& summary);
         void WriteMarkdownReport() const;
         void WriteBeforeAfterReport() const;
+        void WriteRepeatReport() const;
 
         static ScenarioSummary BuildSummary(const ScenarioAccumulator& current);
         static double Percentile(std::vector<double> values, double percentile);
         static std::string BuildVerdictNotes(const ScenarioSummary& summary);
+        static double FrameDropRate(const ScenarioSummary& summary);
+        static double AverageQoeScore(const ScenarioSummary& summary);
+        static double FecRecoveryEfficiency(const ScenarioSummary& summary);
+        static double QualityFloorPenalty(const ScenarioSummary& summary);
+        static ScoreBreakdown BuildScoreBreakdown(
+            const ScenarioSummary& summary,
+            bool includeQoeBonus,
+            bool includeFrameDropRatePenalty
+        );
+        static RepeatMetricStats ComputeRepeatMetricStats(
+            const std::vector<double>& values
+        );
+        static std::string ModeLabel(const ScenarioSummary& summary);
+        static std::vector<std::string> FindLatestSummaryCsvs(
+            const std::string& directory,
+            size_t count
+        );
         static std::string FindPreviousSummaryCsv(
             const std::string& directory,
             const std::string& currentCsvPath
@@ -164,6 +236,8 @@ namespace net {
         std::string textFilePath_;
         std::string markdownFilePath_;
         std::string beforeAfterFilePath_;
+        std::string repeatReportFilePath_;
+        std::string manifestFilePath_;
         std::string previousSummaryCsvPath_;
         std::string generatedTimestamp_;
         std::vector<ScenarioSummary> summaries_;
