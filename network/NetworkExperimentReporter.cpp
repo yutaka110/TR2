@@ -853,6 +853,20 @@ namespace {
 
         current_.adaptiveCauseSamples[
             AdaptiveCauseIndex(stats.adaptiveDegradationCause)]++;
+        if (stats.adaptiveFecRecoveryWorking) {
+            current_.adaptiveFecRecoveryWorkingSamples++;
+        }
+        if (stats.adaptiveFecGuardActive) {
+            current_.adaptiveFecGuardActiveSamples++;
+        }
+        current_.adaptiveFecRecoveryEfficiencySum +=
+            stats.adaptiveFecRecoveryEfficiency;
+        current_.adaptiveFecParityPacketDeltas +=
+            stats.adaptiveFecParityPacketDelta;
+        current_.adaptiveFecRecoveredFrameDeltas +=
+            stats.adaptiveFecRecoveredFrameDelta;
+        current_.adaptiveFecRecoveredChunkDeltas +=
+            stats.adaptiveFecRecoveredChunkDelta;
 
         TimeSeriesSample timeSeriesSample{};
         timeSeriesSample.relativeTimeSec =
@@ -917,6 +931,18 @@ namespace {
             SubtractCounter(
                 stats.fecRecoveredChunks,
                 baseline.fecRecoveredChunks);
+        timeSeriesSample.adaptiveFecRecoveryWorking =
+            stats.adaptiveFecRecoveryWorking;
+        timeSeriesSample.adaptiveFecGuardActive =
+            stats.adaptiveFecGuardActive;
+        timeSeriesSample.adaptiveFecRecoveryEfficiency =
+            stats.adaptiveFecRecoveryEfficiency;
+        timeSeriesSample.adaptiveFecParityPacketDelta =
+            stats.adaptiveFecParityPacketDelta;
+        timeSeriesSample.adaptiveFecRecoveredFrameDelta =
+            stats.adaptiveFecRecoveredFrameDelta;
+        timeSeriesSample.adaptiveFecRecoveredChunkDelta =
+            stats.adaptiveFecRecoveredChunkDelta;
         timeSeriesSample.packetLossRate = stats.packetLossRate;
         timeSeriesSample.currentJitterMs = stats.currentJitterMs;
         current_.timeSeriesSamples.push_back(timeSeriesSample);
@@ -1211,6 +1237,14 @@ namespace {
             << "fecParityPackets,"
             << "fecRecoveredFrames,"
             << "fecRecoveredChunks,"
+            << "adaptiveFecRecoveryWorkingSamples,"
+            << "adaptiveFecGuardActiveSamples,"
+            << "adaptiveFecRecoveryWorkingRatio,"
+            << "adaptiveFecGuardActiveRatio,"
+            << "avgAdaptiveFecRecoveryEfficiency,"
+            << "adaptiveFecParityPacketDeltas,"
+            << "adaptiveFecRecoveredFrameDeltas,"
+            << "adaptiveFecRecoveredChunkDeltas,"
             << "simDroppedPackets,"
             << "minTargetFps,"
             << "minTargetJpegQuality,"
@@ -1275,6 +1309,14 @@ namespace {
                 << summary.fecParityPackets << ','
                 << summary.fecRecoveredFrames << ','
                 << summary.fecRecoveredChunks << ','
+                << summary.adaptiveFecRecoveryWorkingSamples << ','
+                << summary.adaptiveFecGuardActiveSamples << ','
+                << summary.adaptiveFecRecoveryWorkingRatio << ','
+                << summary.adaptiveFecGuardActiveRatio << ','
+                << summary.avgAdaptiveFecRecoveryEfficiency << ','
+                << summary.adaptiveFecParityPacketDeltas << ','
+                << summary.adaptiveFecRecoveredFrameDeltas << ','
+                << summary.adaptiveFecRecoveredChunkDeltas << ','
                 << summary.simDroppedPackets << ','
                 << summary.minTargetFps << ','
                 << summary.minTargetJpegQuality << ','
@@ -1360,6 +1402,14 @@ namespace {
                 << summary.fecParityPackets << " / "
                 << summary.fecRecoveredFrames << " / "
                 << summary.fecRecoveredChunks << "\n";
+            textFile_ << "  adaptive fec guard working/active/avgEff/delta parity/recoveredFrames/recoveredChunks: "
+                << summary.adaptiveFecRecoveryWorkingSamples << " / "
+                << summary.adaptiveFecGuardActiveSamples << " / "
+                << FormatPercent(summary.avgAdaptiveFecRecoveryEfficiency)
+                << " / "
+                << summary.adaptiveFecParityPacketDeltas << " / "
+                << summary.adaptiveFecRecoveredFrameDeltas << " / "
+                << summary.adaptiveFecRecoveredChunkDeltas << "\n";
             textFile_ << "  verdict: " << summary.verdict;
             if (!summary.notes.empty()) {
                 textFile_ << " (" << summary.notes << ")";
@@ -1389,6 +1439,8 @@ namespace {
         uint64_t totalFecParityPackets = 0;
         uint64_t totalFecRecoveredFrames = 0;
         uint64_t totalFecRecoveredChunks = 0;
+        uint32_t totalAdaptiveFecGuardActiveSamples = 0;
+        uint32_t totalAdaptiveFecRecoveryWorkingSamples = 0;
         double worstP95LatencyMs = 0.0;
 
         for (const ScenarioSummary& summary : summaries_) {
@@ -1405,6 +1457,10 @@ namespace {
             totalFecParityPackets += summary.fecParityPackets;
             totalFecRecoveredFrames += summary.fecRecoveredFrames;
             totalFecRecoveredChunks += summary.fecRecoveredChunks;
+            totalAdaptiveFecGuardActiveSamples +=
+                summary.adaptiveFecGuardActiveSamples;
+            totalAdaptiveFecRecoveryWorkingSamples +=
+                summary.adaptiveFecRecoveryWorkingSamples;
             worstP95LatencyMs =
                 (std::max)(worstP95LatencyMs, summary.p95LatencyMs);
         }
@@ -1454,6 +1510,11 @@ namespace {
                 << totalFecRecoveredFrames << " frames / "
                 << totalFecRecoveredChunks
                 << " chunks across completed scenarios.\n";
+            file << "- Adaptive FEC guard was active for "
+                << totalAdaptiveFecGuardActiveSamples
+                << " measured samples, with recovery-working evidence in "
+                << totalAdaptiveFecRecoveryWorkingSamples
+                << " samples.\n";
             file << "- Evaluation window: the first "
                 << FormatDouble(summaries_.front().warmupSec)
                 << " sec of each scenario is warmup and excluded from "
@@ -1463,8 +1524,8 @@ namespace {
 
         file << "## Scenario Results\n\n";
         file
-            << "| Scenario | Verdict | Runtime | Adaptive Mode | Congestion Mode | FEC | Cause | Warmup s | Measured Samples | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | FEC Recovered | NACK Expired | Notes |\n"
-            << "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+            << "| Scenario | Verdict | Runtime | Adaptive Mode | Congestion Mode | FEC | Cause | Warmup s | Measured Samples | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | FEC Recovered | FEC Guard | NACK Expired | Notes |\n"
+            << "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
         for (const ScenarioSummary& summary : summaries_) {
             file << "| "
@@ -1503,6 +1564,8 @@ namespace {
                 << summary.deadlineNackSentFrames << " | "
                 << summary.deadlineNackRecoveredFrames << " | "
                 << summary.fecRecoveredFrames << " | "
+                << FormatPercent(summary.adaptiveFecGuardActiveRatio)
+                << " | "
                 << summary.deadlineNackExpiredDroppedFrames << " | "
                 << EscapeMarkdownTable(
                     summary.notes.empty() ? "none" : summary.notes)
@@ -1556,8 +1619,8 @@ namespace {
             };
 
             file
-                << "| Network Scenario | Controller | Frame Drop | Drop vs Fixed | Avg Latency ms | Latency vs Fixed | Display FPS | FPS vs Fixed | Avg QoE | FEC Eff | FEC Rec | FEC Parity | Quality Penalty | Final Score | NACK Recovered | NACK Expired | Target FPS | Target JPEG | Target Bitrate kbps | Verdict |\n"
-                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+                << "| Network Scenario | Controller | Frame Drop | Drop vs Fixed | Avg Latency ms | Latency vs Fixed | Display FPS | FPS vs Fixed | Avg QoE | FEC Eff | FEC Guard | FEC Guard Eff | FEC Rec | FEC Parity | Quality Penalty | Final Score | NACK Recovered | NACK Expired | Target FPS | Target JPEG | Target Bitrate kbps | Verdict |\n"
+                << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
             for (const std::string& networkScenario : networkScenarioOrder) {
                 const auto it =
@@ -1609,6 +1672,11 @@ namespace {
                         << fpsVsFixed << " | "
                         << FormatDouble(avgQoeScore) << " | "
                         << FormatPercent(FecRecoveryEfficiency(*summary))
+                        << " | "
+                        << FormatPercent(summary->adaptiveFecGuardActiveRatio)
+                        << " | "
+                        << FormatPercent(
+                            summary->avgAdaptiveFecRecoveryEfficiency)
                         << " | "
                         << summary->fecRecoveredFrames << " | "
                         << summary->fecParityPackets << " | "
@@ -1974,6 +2042,9 @@ namespace {
                 std::vector<double> nackRecovered;
                 std::vector<double> nackExpired;
                 std::vector<double> retransmittedChunks;
+                std::vector<double> fecGuardActive;
+                std::vector<double> fecRecoveryWorking;
+                std::vector<double> fecRecoveryEfficiencyPercent;
                 std::vector<double> packetLossPercent;
                 std::vector<double> jitterMs;
 
@@ -2016,6 +2087,12 @@ namespace {
                         static_cast<double>(sample->deadlineNackExpiredDroppedFrames));
                     retransmittedChunks.push_back(
                         static_cast<double>(sample->ackRetransmittedChunks));
+                    fecGuardActive.push_back(
+                        sample->adaptiveFecGuardActive ? 100.0 : 0.0);
+                    fecRecoveryWorking.push_back(
+                        sample->adaptiveFecRecoveryWorking ? 100.0 : 0.0);
+                    fecRecoveryEfficiencyPercent.push_back(
+                        sample->adaptiveFecRecoveryEfficiency * 100.0);
                     packetLossPercent.push_back(sample->packetLossRate * 100.0);
                     jitterMs.push_back(sample->currentJitterMs);
 
@@ -2103,6 +2180,17 @@ namespace {
                         { "NACK recovered", nackRecovered },
                         { "NACK expired", nackExpired },
                         { "Retransmitted chunks", retransmittedChunks },
+                    });
+
+                writeChart(
+                    summary->name + " - Adaptive FEC Guard",
+                    "Percent / on-off",
+                    100.0,
+                    x,
+                    {
+                        { "FEC guard active", fecGuardActive },
+                        { "FEC recovery working", fecRecoveryWorking },
+                        { "FEC recovery efficiency %", fecRecoveryEfficiencyPercent },
                     });
 
                 writeChart(
@@ -3473,6 +3561,30 @@ namespace {
                 ParseUint64OrDefault(getCell(row, "fecRecoveredFrames"));
             summary.fecRecoveredChunks =
                 ParseUint64OrDefault(getCell(row, "fecRecoveredChunks"));
+            summary.adaptiveFecRecoveryWorkingSamples =
+                static_cast<uint32_t>(ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecRecoveryWorkingSamples")));
+            summary.adaptiveFecGuardActiveSamples =
+                static_cast<uint32_t>(ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecGuardActiveSamples")));
+            summary.adaptiveFecRecoveryWorkingRatio =
+                ParseDoubleOrDefault(
+                    getCell(row, "adaptiveFecRecoveryWorkingRatio"));
+            summary.adaptiveFecGuardActiveRatio =
+                ParseDoubleOrDefault(
+                    getCell(row, "adaptiveFecGuardActiveRatio"));
+            summary.avgAdaptiveFecRecoveryEfficiency =
+                ParseDoubleOrDefault(
+                    getCell(row, "avgAdaptiveFecRecoveryEfficiency"));
+            summary.adaptiveFecParityPacketDeltas =
+                ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecParityPacketDeltas"));
+            summary.adaptiveFecRecoveredFrameDeltas =
+                ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecRecoveredFrameDeltas"));
+            summary.adaptiveFecRecoveredChunkDeltas =
+                ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecRecoveredChunkDeltas"));
             summary.simDroppedPackets =
                 ParseUint64OrDefault(getCell(row, "simDroppedPackets"));
             summary.minTargetFps =
@@ -3669,6 +3781,34 @@ namespace {
             SubtractCounter(
                 current.lastStats.fecRecoveredChunks,
                 baseline.fecRecoveredChunks);
+        summary.adaptiveFecRecoveryWorkingSamples =
+            current.adaptiveFecRecoveryWorkingSamples;
+        summary.adaptiveFecGuardActiveSamples =
+            current.adaptiveFecGuardActiveSamples;
+        summary.adaptiveFecRecoveryWorkingRatio =
+            sampleCount == 0
+            ? 0.0
+            : static_cast<double>(
+                current.adaptiveFecRecoveryWorkingSamples) /
+                static_cast<double>(sampleCount);
+        summary.adaptiveFecGuardActiveRatio =
+            sampleCount == 0
+            ? 0.0
+            : static_cast<double>(
+                current.adaptiveFecGuardActiveSamples) /
+                static_cast<double>(sampleCount);
+        summary.avgAdaptiveFecRecoveryEfficiency =
+            current.adaptiveFecRecoveryEfficiencySum / sampleCount;
+        summary.adaptiveFecParityPacketDeltas = summary.fecParityPackets;
+        summary.adaptiveFecRecoveredFrameDeltas = summary.fecRecoveredFrames;
+        summary.adaptiveFecRecoveredChunkDeltas = summary.fecRecoveredChunks;
+        summary.avgAdaptiveFecRecoveryEfficiency =
+            summary.adaptiveFecParityPacketDeltas == 0
+            ? 0.0
+            : static_cast<double>(
+                summary.adaptiveFecRecoveredFrameDeltas) /
+                static_cast<double>(
+                    summary.adaptiveFecParityPacketDeltas);
         summary.simDroppedPackets =
             SubtractCounter(
                 current.lastStats.networkSimulation.droppedPackets,

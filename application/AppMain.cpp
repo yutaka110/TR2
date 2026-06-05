@@ -1208,6 +1208,22 @@ int AppMain::Run() {
 
 			stats.adaptiveDegradationCause =
 				net::ToString(adaptiveState.lastDegradationCause);
+
+			stats.adaptiveFecRecoveryWorking =
+				adaptiveState.lastFecRecoveryWorking;
+			stats.adaptiveFecGuardActive =
+				adaptiveState.lastFecRecoveryGuardActive &&
+				adaptive->IsEnabled() &&
+				adaptiveState.controlMode ==
+				net::AdaptiveControlMode::QoeDeadlineAdaptive;
+			stats.adaptiveFecRecoveryEfficiency =
+				adaptiveState.lastFecRecoveryEfficiency;
+			stats.adaptiveFecParityPacketDelta =
+				adaptiveState.lastFecParityPacketDelta;
+			stats.adaptiveFecRecoveredFrameDelta =
+				adaptiveState.lastFecRecoveredFrameDelta;
+			stats.adaptiveFecRecoveredChunkDelta =
+				adaptiveState.lastFecRecoveredChunkDelta;
 		}
 
 		if (experiment) {

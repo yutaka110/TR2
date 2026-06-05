@@ -178,6 +178,12 @@ namespace net {
 		double adaptiveLastDisplayFps = 0.0;
 		double adaptiveLastQoeScore = 0.0;
 		std::string adaptiveDegradationCause;
+		bool adaptiveFecRecoveryWorking = false;
+		bool adaptiveFecGuardActive = false;
+		double adaptiveFecRecoveryEfficiency = 0.0;
+		uint64_t adaptiveFecParityPacketDelta = 0;
+		uint64_t adaptiveFecRecoveredFrameDelta = 0;
+		uint64_t adaptiveFecRecoveredChunkDelta = 0;
 
 		// ============================================================
 		// Jitter

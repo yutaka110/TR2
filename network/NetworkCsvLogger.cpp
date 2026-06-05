@@ -263,6 +263,12 @@ namespace {
             << stats.adaptiveLastDisplayFps << ','
             << stats.adaptiveLastQoeScore << ','
             << EscapeCsv(stats.adaptiveDegradationCause) << ','
+            << (stats.adaptiveFecRecoveryWorking ? 1 : 0) << ','
+            << (stats.adaptiveFecGuardActive ? 1 : 0) << ','
+            << stats.adaptiveFecRecoveryEfficiency << ','
+            << stats.adaptiveFecParityPacketDelta << ','
+            << stats.adaptiveFecRecoveredFrameDelta << ','
+            << stats.adaptiveFecRecoveredChunkDelta << ','
             << (stats.networkCondition.enabled ? 1 : 0) << ','
             << stats.networkCondition.lossRate << ','
             << stats.networkCondition.duplicateRate << ','
@@ -427,6 +433,12 @@ namespace {
             << "adaptiveInputDisplayFps,"
             << "adaptiveQoeScore,"
             << "adaptiveDegradationCause,"
+            << "adaptiveFecRecoveryWorking,"
+            << "adaptiveFecGuardActive,"
+            << "adaptiveFecRecoveryEfficiency,"
+            << "adaptiveFecParityPacketDelta,"
+            << "adaptiveFecRecoveredFrameDelta,"
+            << "adaptiveFecRecoveredChunkDelta,"
             << "simEnabled,"
             << "simLossRate,"
             << "simDuplicateRate,"

@@ -1427,7 +1427,18 @@ void NetworkManager::SetAdaptiveFecEnabled(bool enabled) {
     adaptiveFecStableSamples_ = 0;
     adaptiveFecHoldSamples_ = 0;
     adaptiveFecHoldGroupChunkCount_ = 8;
+    adaptiveFecHoldUntilUs_ = 0;
+    adaptiveFecG2UntilUs_ = 0;
+    adaptiveFecG2CooldownUntilUs_ = 0;
+    adaptiveFecIneffectiveOffUntilUs_ = 0;
+    adaptiveFecIneffectiveOffStartExpiredFrames_ = 0;
+    adaptiveFecIneffectiveOffRearmGroupChunkCount_ = 8;
+    adaptiveFecPostOffRearmSamples_ = 0;
+    adaptiveFecPostOffRearmGroupChunkCount_ = 8;
     adaptiveFecWasteSamples_ = 0;
+    adaptiveFecIneffectiveSamples_ = 0;
+    adaptiveFecUncoveredDeadlineSamples_ = 0;
+    adaptiveFecCoveredRecoverySamples_ = 0;
 }
 
 bool NetworkManager::IsAdaptiveFecEnabled() const {
@@ -1460,6 +1471,7 @@ void NetworkManager::UpdateAdaptiveFec(
         return;
     }
 
+    const uint64_t nowUs = NowMicroseconds();
     const auto sanitizeRate = [](double value) {
         if (!std::isfinite(value)) {
             return 0.0;
@@ -1518,10 +1530,35 @@ void NetworkManager::UpdateAdaptiveFec(
         deadlineExpiredDelta > 0 ||
         deadlineNackDelta >= 2;
     const bool fecWasUseful = fecRecoveredDelta > 0;
+    const bool fecCoveredDeadlineMiss =
+        fecWasUseful &&
+        (deadlineExpiredDelta == 0 ||
+            fecRecoveredDelta >= deadlineExpiredDelta);
+    const bool nackNeedsFecFallback =
+        deadlineNackDelta > 0 &&
+        !fecCoveredDeadlineMiss;
+    const bool recoveryDeadlineUncovered =
+        deadlineExpiredDelta > 0 &&
+        !fecCoveredDeadlineMiss;
+    const bool deadlineExpiryStillRising = deadlineExpiredDelta > 0;
+    const bool severeDeadlineExpired = deadlineExpiredDelta >= 4;
+    const bool deadlineRiskForStrongerFec =
+        severeDeadlineExpired ||
+        recoveryDeadlineUncovered ||
+        deadlineExpiryStillRising;
     const bool fecWasWasteful =
         fecParityDelta > 0 &&
         fecRecoveredDelta == 0 &&
         !recoveryDeadlinePressure;
+    const bool fecWasIneffective =
+        fecParityDelta > 0 &&
+        fecRecoveredDelta == 0 &&
+        deadlineExpiredDelta == 0 &&
+        !nackNeedsFecFallback;
+    const bool fecWasDeadlineIneffective =
+        fecParityDelta > 0 &&
+        deadlineExpiredDelta > 0 &&
+        fecRecoveredDelta < deadlineExpiredDelta;
     const bool bandwidthTight =
         estimatedBandwidthBps > 0 &&
         targetBitrateKbps > 0 &&
@@ -1530,6 +1567,10 @@ void NetworkManager::UpdateAdaptiveFec(
             static_cast<uint64_t>(targetBitrateKbps) * 1100ull);
     const bool pacingBacklog = queueDelayMs >= 35.0;
     const bool highBitrateMode = targetBitrateKbps >= 4500;
+    constexpr uint32_t kEmergencyFecUncoveredDeadlineSamples = 2;
+    constexpr uint64_t kAdaptiveFecG2EmergencyWindowUs = 600000;
+    constexpr uint64_t kAdaptiveFecG2CooldownUs = 2000000;
+    constexpr uint64_t kAdaptiveFecIneffectiveOffWindowUs = 1200000;
     const bool strongFecBudgetAvailable =
         targetBitrateKbps == 0 ||
         targetBitrateKbps <= 3200 ||
@@ -1538,13 +1579,12 @@ void NetworkManager::UpdateAdaptiveFec(
             static_cast<uint32_t>(
                 static_cast<uint64_t>(targetBitrateKbps) * 1800ull));
     const bool highPressure =
-        deadlineExpiredDelta >= 2 ||
-        (deadlineExpiredDelta > 0 && burstMissingSignal) ||
-        (burstMissingSignal && instantLossPressure >= 0.16);
+        severeDeadlineExpired ||
+        (recoveryDeadlineUncovered && deadlineExpiredDelta >= 2) ||
+        (deadlineExpiredDelta > 0 && burstMissingSignal);
     const bool mediumPressure =
-        recoveryDeadlinePressure ||
-        burstMissingSignal ||
-        (fecWasUseful && lossPressure >= 0.04);
+        deadlineRiskForStrongerFec ||
+        (nackNeedsFecFallback && deadlineExpiredDelta > 0);
     const bool lowPressure =
         recoveryDeadlinePressure ||
         burstMissingSignal ||
@@ -1554,7 +1594,7 @@ void NetworkManager::UpdateAdaptiveFec(
     uint16_t groupChunkCount = 8;
 
     if (highPressure) {
-        groupChunkCount = 2;
+        groupChunkCount = 4;
         enableFec = true;
     }
     else if (mediumPressure) {
@@ -1567,10 +1607,10 @@ void NetworkManager::UpdateAdaptiveFec(
     }
 
     if ((bandwidthTight || pacingBacklog) && !highPressure) {
-        if (recoveryDeadlinePressure) {
+        if (deadlineRiskForStrongerFec) {
             groupChunkCount = 4;
         }
-        else if (burstMissingSignal) {
+        else if (recoveryDeadlinePressure || burstMissingSignal) {
             groupChunkCount = 8;
         }
         else {
@@ -1590,37 +1630,165 @@ void NetworkManager::UpdateAdaptiveFec(
 
     if (groupChunkCount == 4 &&
         highBitrateMode &&
-        !recoveryDeadlinePressure &&
+        !deadlineRiskForStrongerFec &&
         (instantLossPressure >= 0.18 || lossPressure >= 0.14)) {
         groupChunkCount = 8;
     }
 
     {
         std::lock_guard<std::mutex> lock(adaptiveFecMutex_);
-        if (deadlineExpiredDelta > 0) {
-            adaptiveFecHoldSamples_ = 5;
+        const auto holdRecoveryRole =
+            [&](double seconds, uint16_t group) {
+            const uint64_t holdUs =
+                nowUs + static_cast<uint64_t>(seconds * 1000000.0);
+            adaptiveFecHoldUntilUs_ =
+                (std::max)(adaptiveFecHoldUntilUs_, holdUs);
             adaptiveFecHoldGroupChunkCount_ =
-                (std::min)(adaptiveFecHoldGroupChunkCount_, groupChunkCount);
-            adaptiveFecHoldGroupChunkCount_ =
-                (std::min)(adaptiveFecHoldGroupChunkCount_, uint16_t{ 4 });
+                (std::min)(adaptiveFecHoldGroupChunkCount_, group);
+        };
+        const auto beginIneffectiveOff =
+            [&](bool deadlineRisk) {
+            adaptiveFecIneffectiveOffUntilUs_ =
+                nowUs + kAdaptiveFecIneffectiveOffWindowUs;
+            adaptiveFecIneffectiveOffStartExpiredFrames_ =
+                deadlineNackExpiredDroppedFrames;
+            adaptiveFecIneffectiveOffRearmGroupChunkCount_ =
+                deadlineRisk ? uint16_t{ 4 } : uint16_t{ 8 };
+        };
+
+        if (recoveryDeadlineUncovered ||
+            deadlineExpiryStillRising ||
+            severeDeadlineExpired) {
+            adaptiveFecUncoveredDeadlineSamples_++;
+            adaptiveFecCoveredRecoverySamples_ = 0;
         }
-        else if (burstMissingSignal || deadlineNackDelta >= 2) {
-            adaptiveFecHoldSamples_ =
-                (std::max)(adaptiveFecHoldSamples_, uint32_t{ 4 });
-            adaptiveFecHoldGroupChunkCount_ =
-                (std::min)(adaptiveFecHoldGroupChunkCount_, groupChunkCount);
-            adaptiveFecHoldGroupChunkCount_ =
-                (std::min)(adaptiveFecHoldGroupChunkCount_, uint16_t{ 4 });
+        else if (fecCoveredDeadlineMiss) {
+            adaptiveFecCoveredRecoverySamples_++;
+            adaptiveFecUncoveredDeadlineSamples_ = 0;
+            if (adaptiveFecCoveredRecoverySamples_ >= 2 &&
+                adaptiveFecHoldGroupChunkCount_ == 4) {
+                adaptiveFecHoldGroupChunkCount_ = 8;
+                adaptiveFecHoldSamples_ =
+                    (std::min)(adaptiveFecHoldSamples_, uint32_t{ 1 });
+                adaptiveFecHoldUntilUs_ =
+                    (std::min)(adaptiveFecHoldUntilUs_, nowUs + 600000ull);
+            }
         }
-        else if (fecWasUseful) {
+        else if (!recoveryDeadlinePressure && !burstMissingSignal) {
+            adaptiveFecUncoveredDeadlineSamples_ = 0;
+            adaptiveFecCoveredRecoverySamples_ = 0;
+        }
+
+        if (adaptiveFecG2UntilUs_ != 0 &&
+            adaptiveFecG2UntilUs_ <= nowUs) {
+            adaptiveFecG2UntilUs_ = 0;
+            adaptiveFecG2CooldownUntilUs_ =
+                (std::max)(
+                    adaptiveFecG2CooldownUntilUs_,
+                    nowUs + kAdaptiveFecG2CooldownUs);
+            if (adaptiveFecHoldGroupChunkCount_ == 2) {
+                adaptiveFecHoldGroupChunkCount_ = 4;
+            }
+        }
+
+        const bool g2CooldownActive = adaptiveFecG2CooldownUntilUs_ > nowUs;
+        const bool ineffectiveOffExpired =
+            adaptiveFecIneffectiveOffUntilUs_ != 0 &&
+            adaptiveFecIneffectiveOffUntilUs_ <= nowUs;
+        if (ineffectiveOffExpired) {
+            const uint64_t nackExpiredDuringOffDelta =
+                subtractCounter(
+                    deadlineNackExpiredDroppedFrames,
+                    adaptiveFecIneffectiveOffStartExpiredFrames_);
+            const bool nackExpiredIncreasedAfterOff =
+                deadlineExpiredDelta > 0;
+            const bool rearmAsRecoveryDefense =
+                nackExpiredDuringOffDelta >= 2 ||
+                deadlineExpiredDelta >= 2 ||
+                (nackExpiredIncreasedAfterOff &&
+                    adaptiveFecIneffectiveOffRearmGroupChunkCount_ <= 4);
+            adaptiveFecPostOffRearmSamples_ = 2u;
+            adaptiveFecPostOffRearmGroupChunkCount_ =
+                rearmAsRecoveryDefense ? uint16_t{ 4 } : uint16_t{ 8 };
+            adaptiveFecIneffectiveOffUntilUs_ = 0;
+            adaptiveFecIneffectiveOffStartExpiredFrames_ = 0;
+            adaptiveFecIneffectiveOffRearmGroupChunkCount_ = 8;
             adaptiveFecHoldSamples_ =
-                (std::max)(adaptiveFecHoldSamples_, uint32_t{ 2 });
+                (std::max)(
+                    adaptiveFecHoldSamples_,
+                    adaptiveFecPostOffRearmSamples_);
             adaptiveFecHoldGroupChunkCount_ =
-                (std::min)(adaptiveFecHoldGroupChunkCount_, groupChunkCount);
+                (std::min)(
+                    adaptiveFecHoldGroupChunkCount_,
+                    adaptiveFecPostOffRearmGroupChunkCount_);
+            const uint64_t rearmHoldUs =
+                nowUs +
+                (rearmAsRecoveryDefense ? 1000000ull : 800000ull);
+            adaptiveFecHoldUntilUs_ =
+                (std::max)(adaptiveFecHoldUntilUs_, rearmHoldUs);
+        }
+
+        if (recoveryDeadlineUncovered ||
+            deadlineExpiryStillRising ||
+            severeDeadlineExpired) {
+            adaptiveFecHoldSamples_ =
+                (std::max)(adaptiveFecHoldSamples_, uint32_t{ 5 });
+            const bool emergencyFecTrigger =
+                adaptiveFecUncoveredDeadlineSamples_ >=
+                kEmergencyFecUncoveredDeadlineSamples &&
+                deadlineExpiredDelta > 0 &&
+                !g2CooldownActive;
+            if (emergencyFecTrigger && adaptiveFecG2UntilUs_ == 0) {
+                adaptiveFecG2UntilUs_ =
+                    nowUs + kAdaptiveFecG2EmergencyWindowUs;
+            }
+            const bool g2EmergencyActive =
+                adaptiveFecG2UntilUs_ > nowUs;
+            groupChunkCount =
+                g2EmergencyActive
+                ? uint16_t{ 2 }
+                : uint16_t{ 4 };
+            holdRecoveryRole(
+                g2EmergencyActive ? 0.6 : 1.2,
+                groupChunkCount);
+        }
+        else if (nackNeedsFecFallback ||
+            burstMissingSignal ||
+            deadlineNackDelta >= 2) {
+            const bool nackOrBurstDeadlineRisk =
+                deadlineRiskForStrongerFec ||
+                fecWasDeadlineIneffective;
+            const uint16_t fallbackGroup =
+                nackOrBurstDeadlineRisk ? uint16_t{ 4 } : uint16_t{ 8 };
+            adaptiveFecHoldSamples_ =
+                (std::max)(
+                    adaptiveFecHoldSamples_,
+                    nackOrBurstDeadlineRisk ? uint32_t{ 4 } : uint32_t{ 2 });
+            holdRecoveryRole(
+                nackOrBurstDeadlineRisk ? 1.2 : 0.8,
+                fallbackGroup);
+        }
+        else if (fecCoveredDeadlineMiss || fecWasUseful) {
+            adaptiveFecHoldSamples_ =
+                (std::max)(
+                    adaptiveFecHoldSamples_,
+                    fecCoveredDeadlineMiss ? uint32_t{ 3 } : uint32_t{ 2 });
+            holdRecoveryRole(
+                fecCoveredDeadlineMiss ? 0.8 : 1.0,
+                groupChunkCount);
+        }
+        else if (adaptiveFecPostOffRearmSamples_ > 0) {
+            enableFec = true;
+            groupChunkCount = adaptiveFecPostOffRearmGroupChunkCount_;
+            adaptiveFecPostOffRearmSamples_--;
+            if (adaptiveFecPostOffRearmSamples_ == 0) {
+                adaptiveFecPostOffRearmGroupChunkCount_ = 8;
+            }
         }
         else if (adaptiveFecHoldSamples_ > 0) {
             adaptiveFecHoldSamples_--;
-            if (adaptiveFecHoldSamples_ == 0) {
+            if (adaptiveFecHoldSamples_ == 0 &&
+                adaptiveFecHoldUntilUs_ <= nowUs) {
                 adaptiveFecHoldGroupChunkCount_ = 8;
             }
         }
@@ -1631,11 +1799,53 @@ void NetworkManager::UpdateAdaptiveFec(
         else {
             adaptiveFecWasteSamples_ = 0;
         }
+        if (fecWasIneffective || fecWasDeadlineIneffective) {
+            adaptiveFecIneffectiveSamples_++;
+        }
+        else if (fecCoveredDeadlineMiss || !recoveryDeadlinePressure) {
+            adaptiveFecIneffectiveSamples_ = 0;
+        }
 
-        if (adaptiveFecHoldSamples_ > 0) {
+        const bool g2EmergencyActiveNow = adaptiveFecG2UntilUs_ > nowUs;
+        if (!g2EmergencyActiveNow &&
+            adaptiveFecHoldGroupChunkCount_ == 2) {
+            adaptiveFecHoldGroupChunkCount_ = 4;
+        }
+
+        const bool recoveryHoldActive =
+            adaptiveFecHoldSamples_ > 0 ||
+            adaptiveFecHoldUntilUs_ > nowUs;
+        if (recoveryHoldActive) {
             enableFec = true;
             groupChunkCount =
                 (std::min)(groupChunkCount, adaptiveFecHoldGroupChunkCount_);
+        }
+        else {
+            adaptiveFecHoldGroupChunkCount_ = 8;
+        }
+        if (adaptiveFecIneffectiveSamples_ >= 2 &&
+            (!recoveryDeadlinePressure || fecWasDeadlineIneffective) &&
+            (!burstMissingSignal || fecWasDeadlineIneffective)) {
+            enableFec = false;
+            groupChunkCount = 8;
+            adaptiveFecHoldSamples_ = 0;
+            adaptiveFecHoldGroupChunkCount_ = 8;
+            adaptiveFecHoldUntilUs_ = 0;
+            adaptiveFecPostOffRearmSamples_ = 0;
+            adaptiveFecPostOffRearmGroupChunkCount_ = 8;
+            beginIneffectiveOff(
+                fecWasDeadlineIneffective ||
+                recoveryDeadlineUncovered ||
+                nackNeedsFecFallback ||
+                deadlineExpiredDelta > 0);
+            if (adaptiveFecG2UntilUs_ > nowUs) {
+                adaptiveFecG2CooldownUntilUs_ =
+                    (std::max)(
+                        adaptiveFecG2CooldownUntilUs_,
+                        nowUs + kAdaptiveFecG2CooldownUs);
+            }
+            adaptiveFecG2UntilUs_ = 0;
+            adaptiveFecIneffectiveSamples_ = 0;
         }
         if (adaptiveFecWasteSamples_ >= 2 &&
             !recoveryDeadlinePressure &&
@@ -1644,6 +1854,34 @@ void NetworkManager::UpdateAdaptiveFec(
             groupChunkCount = 8;
             adaptiveFecHoldSamples_ = 0;
             adaptiveFecHoldGroupChunkCount_ = 8;
+            adaptiveFecHoldUntilUs_ = 0;
+            adaptiveFecPostOffRearmSamples_ = 0;
+            adaptiveFecPostOffRearmGroupChunkCount_ = 8;
+            beginIneffectiveOff(false);
+            if (adaptiveFecG2UntilUs_ > nowUs) {
+                adaptiveFecG2CooldownUntilUs_ =
+                    (std::max)(
+                        adaptiveFecG2CooldownUntilUs_,
+                        nowUs + kAdaptiveFecG2CooldownUs);
+            }
+            adaptiveFecG2UntilUs_ = 0;
+            adaptiveFecIneffectiveSamples_ = 0;
+            adaptiveFecUncoveredDeadlineSamples_ = 0;
+        }
+
+        if (adaptiveFecIneffectiveOffUntilUs_ > nowUs &&
+            !severeDeadlineExpired) {
+            enableFec = false;
+            groupChunkCount = 8;
+            adaptiveFecHoldSamples_ = 0;
+            adaptiveFecHoldGroupChunkCount_ = 8;
+            adaptiveFecHoldUntilUs_ = 0;
+            adaptiveFecPostOffRearmSamples_ = 0;
+            adaptiveFecPostOffRearmGroupChunkCount_ = 8;
+        }
+
+        if (groupChunkCount == 2 && adaptiveFecG2UntilUs_ <= nowUs) {
+            groupChunkCount = 4;
         }
 
         if (!enableFec) {
@@ -1715,7 +1953,18 @@ void NetworkManager::ResetStats() {
         adaptiveFecStableSamples_ = 0;
         adaptiveFecHoldSamples_ = 0;
         adaptiveFecHoldGroupChunkCount_ = 8;
+        adaptiveFecHoldUntilUs_ = 0;
+        adaptiveFecG2UntilUs_ = 0;
+        adaptiveFecG2CooldownUntilUs_ = 0;
+        adaptiveFecIneffectiveOffUntilUs_ = 0;
+        adaptiveFecIneffectiveOffStartExpiredFrames_ = 0;
+        adaptiveFecIneffectiveOffRearmGroupChunkCount_ = 8;
+        adaptiveFecPostOffRearmSamples_ = 0;
+        adaptiveFecPostOffRearmGroupChunkCount_ = 8;
         adaptiveFecWasteSamples_ = 0;
+        adaptiveFecIneffectiveSamples_ = 0;
+        adaptiveFecUncoveredDeadlineSamples_ = 0;
+        adaptiveFecCoveredRecoverySamples_ = 0;
     }
 
     {

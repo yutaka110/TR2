@@ -98,6 +98,14 @@ namespace net {
         lastFecRecoveredFrames_ = 0;
         lastFecRecoveredChunks_ = 0;
         fecRecoveryGuardSec_ = 0.0;
+        lastEffectiveFecRecoveryEfficiency_ = 0.0;
+        fecRecoveryEvidenceSec_ = 0.0;
+        recoveryDeadlineFallbackSamples_ = 0;
+        nackExpiredRisingSamples_ = 0;
+        nackExpiredGuardReleaseSec_ = 0.0;
+        postNackExpiredGuardRearmSec_ = 0.0;
+        nackExpiredBitrateOnlyDecreaseSamples_ = 0;
+        nackExpiredBitrateOnlyDecreaseBudget_ = 2;
         activeBandwidthCeilingKbps_ = kMaxBitrateKbps;
         state_.bandwidthCeilingKbps = activeBandwidthCeilingKbps_;
     }
@@ -316,14 +324,42 @@ namespace net {
             (fecParityPacketDelta == 0 || fecRecoveryEfficiency >= 0.25);
         if (fecRecoveryWorkingNow) {
             fecRecoveryGuardSec_ = (std::max)(fecRecoveryGuardSec_, 2.5);
+            fecRecoveryEvidenceSec_ =
+                (std::max)(fecRecoveryEvidenceSec_, 3.5);
+            lastEffectiveFecRecoveryEfficiency_ =
+                (std::max)(
+                    lastEffectiveFecRecoveryEfficiency_,
+                    fecRecoveryEfficiency);
         }
-        else if (fecRecoveryGuardSec_ > 0.0) {
-            fecRecoveryGuardSec_ =
-                (std::max)(0.0, fecRecoveryGuardSec_ - deltaTimeSec);
+        else {
+            if (fecRecoveryGuardSec_ > 0.0) {
+                fecRecoveryGuardSec_ =
+                    (std::max)(0.0, fecRecoveryGuardSec_ - deltaTimeSec);
+            }
+            if (fecRecoveryEvidenceSec_ > 0.0) {
+                fecRecoveryEvidenceSec_ =
+                    (std::max)(0.0, fecRecoveryEvidenceSec_ - deltaTimeSec);
+                if (fecRecoveryEvidenceSec_ <= 0.0) {
+                    lastEffectiveFecRecoveryEfficiency_ = 0.0;
+                }
+            }
+        }
+        if (fecRecoveryWorkingNow) {
+            state_.lastFecParityPacketDelta = fecParityPacketDelta;
+            state_.lastFecRecoveredFrameDelta = fecRecoveredFrameDelta;
+            state_.lastFecRecoveredChunkDelta = fecRecoveredChunkDelta;
+        }
+        else if (fecRecoveryGuardSec_ <= 0.0) {
+            state_.lastFecParityPacketDelta = 0;
+            state_.lastFecRecoveredFrameDelta = 0;
+            state_.lastFecRecoveredChunkDelta = 0;
         }
         state_.lastFecRecoveryEfficiency = fecRecoveryEfficiency;
+        const bool fecRecoveryGuardTimerActive = fecRecoveryGuardSec_ > 0.0;
+        const bool fecRecoveryEvidenceActive = fecRecoveryEvidenceSec_ > 0.0;
+        state_.lastFecRecoveryGuardActive = false;
         state_.lastFecRecoveryWorking =
-            fecRecoveryWorkingNow || fecRecoveryGuardSec_ > 0.0;
+            fecRecoveryWorkingNow || fecRecoveryGuardTimerActive;
 
         const uint64_t qualityDeadlineDropDelta =
             suppressPacingDropForQuality ? 0 : deadlineDropDelta;
@@ -425,21 +461,109 @@ namespace net {
             recoveryDeadlineDropDelta == 0 ||
             (fecRecoveredFrameDelta >= recoveryDeadlineDropDelta &&
                 recoveryDeadlineDropDelta <= 5);
+        const bool recoveryDeadlineMiss =
+            recoveryDeadlineDropDelta > 0 ||
+            retransmitStaleDropDelta > 0;
+        if (recoveryDeadlineDropDelta > 0) {
+            nackExpiredRisingSamples_++;
+            postNackExpiredGuardRearmSec_ = 0.0;
+            const uint32_t bitrateOnlyBudget =
+                recoveryDeadlineDropDelta >= 4 ||
+                nackExpiredRisingSamples_ >= 2
+                ? 1u
+                : 2u;
+            nackExpiredBitrateOnlyDecreaseBudget_ =
+                (std::min)(
+                    nackExpiredBitrateOnlyDecreaseBudget_,
+                    bitrateOnlyBudget);
+            const double releaseSec =
+                recoveryDeadlineDropDelta >= 4 ||
+                nackExpiredRisingSamples_ >= 2
+                ? 2.0
+                : 1.25;
+            nackExpiredGuardReleaseSec_ =
+                (std::max)(nackExpiredGuardReleaseSec_, releaseSec);
+        }
+        else if (nackExpiredGuardReleaseSec_ > 0.0) {
+            nackExpiredGuardReleaseSec_ =
+                (std::max)(0.0, nackExpiredGuardReleaseSec_ - deltaTimeSec);
+            if (nackExpiredGuardReleaseSec_ <= 0.0) {
+                nackExpiredRisingSamples_ = 0;
+                nackExpiredBitrateOnlyDecreaseSamples_ = 0;
+                nackExpiredBitrateOnlyDecreaseBudget_ = 2;
+                const bool efficientRecentFecRecovery =
+                    fecRecoveryEvidenceActive &&
+                    lastEffectiveFecRecoveryEfficiency_ >= 0.30;
+                if (input.adaptiveFecEnabled &&
+                    efficientRecentFecRecovery) {
+                    postNackExpiredGuardRearmSec_ =
+                        (std::max)(postNackExpiredGuardRearmSec_, 0.6);
+                }
+            }
+        }
+        else if (postNackExpiredGuardRearmSec_ > 0.0) {
+            postNackExpiredGuardRearmSec_ =
+                (std::max)(
+                    0.0,
+                    postNackExpiredGuardRearmSec_ - deltaTimeSec);
+        }
+        else {
+            nackExpiredRisingSamples_ = 0;
+            nackExpiredBitrateOnlyDecreaseSamples_ = 0;
+            nackExpiredBitrateOnlyDecreaseBudget_ = 2;
+        }
+        const bool nackExpiredStillRising =
+            nackExpiredRisingSamples_ >= 2;
+        const bool nackExpiredBurst =
+            recoveryDeadlineDropDelta >= 4;
+        const bool nackExpiredGuardReleaseActive =
+            nackExpiredGuardReleaseSec_ > 0.0;
+        const bool postNackExpiredGuardRearmActive =
+            postNackExpiredGuardRearmSec_ > 0.0;
+        const bool fecGuardDeadlineHealthy =
+            !nackExpiredGuardReleaseActive &&
+            !nackExpiredStillRising &&
+            !nackExpiredBurst;
+        if (recoveryDeadlineMiss && !fecRecoveryCoversDeadline) {
+            recoveryDeadlineFallbackSamples_++;
+        }
+        else if (!recoveryDeadlineMiss || fecRecoveryCoversDeadline) {
+            recoveryDeadlineFallbackSamples_ = 0;
+        }
+        const bool recoveryFallbackPending =
+            input.adaptiveFecEnabled &&
+            recoveryDeadlineMiss &&
+            !fecRecoveryCoversDeadline &&
+            fecGuardDeadlineHealthy &&
+            recoveryDeadlineFallbackSamples_ < 2 &&
+            qualityDeadlineDropDelta == 0 &&
+            outputQueueDropDelta == 0 &&
+            freshnessDropDelta == 0;
         const bool fecQualityGuard =
-            state_.lastFecRecoveryWorking &&
+            (state_.lastFecRecoveryWorking ||
+                postNackExpiredGuardRearmActive) &&
             fecRecoveryCoversDeadline &&
+            fecGuardDeadlineHealthy &&
             qualityDeadlineDropDelta == 0 &&
             outputQueueDropDelta == 0 &&
             retransmitStaleDropDelta == 0 &&
             freshnessDropDelta == 0 &&
             input.latencyMs < 90.0 &&
             fecGuardDisplayHealthy;
+        state_.lastFecRecoveryGuardActive = fecQualityGuard;
+        const bool smoothGuardReleaseDecrease =
+            nackExpiredGuardReleaseActive &&
+            input.adaptiveFecEnabled &&
+            nackExpiredBitrateOnlyDecreaseSamples_ <
+                nackExpiredBitrateOnlyDecreaseBudget_;
 
         const bool hardQoeProblem =
             qoeScore >= 2.0 &&
+            !recoveryFallbackPending &&
             !(fecQualityGuard && qoeScore < 3.0);
         const bool moderateQoeProblem =
             qoeScore >= 1.0 &&
+            !recoveryFallbackPending &&
             !fecQualityGuard;
         const bool congestionPressure =
             HasCongestionPressure(
@@ -448,9 +572,13 @@ namespace net {
                 qualityDeadlineNackMissingChunkDelta);
         const bool bandwidthPressure = HasBandwidthPressure(input);
         const bool guardedCongestionPressure =
-            congestionPressure && !fecQualityGuard;
+            congestionPressure &&
+            !recoveryFallbackPending &&
+            !fecQualityGuard;
         const bool guardedBandwidthPressure =
-            bandwidthPressure && !fecQualityGuard;
+            bandwidthPressure &&
+            !recoveryFallbackPending &&
+            !fecQualityGuard;
         const bool lossOnlyPressure =
             !moderateQoeProblem &&
             guardedCongestionPressure;
@@ -489,14 +617,32 @@ namespace net {
         }
 
         if (hardQoeProblem && badTimeSec_ >= 0.6) {
-            ApplyAimdDecrease(input, state_.lastDegradationCause, true);
+            if (smoothGuardReleaseDecrease) {
+                ApplyAimdBitrateOnlyDecrease(
+                    input,
+                    state_.lastDegradationCause,
+                    true);
+                nackExpiredBitrateOnlyDecreaseSamples_++;
+            }
+            else {
+                ApplyAimdDecrease(input, state_.lastDegradationCause, true);
+            }
             badTimeSec_ = 0.0;
-            cooldownSec_ = 1.2;
+            cooldownSec_ = smoothGuardReleaseDecrease ? 0.9 : 1.2;
         }
         else if (moderateQoeProblem && badTimeSec_ >= 1.8) {
-            ApplyAimdDecrease(input, state_.lastDegradationCause, false);
+            if (smoothGuardReleaseDecrease) {
+                ApplyAimdBitrateOnlyDecrease(
+                    input,
+                    state_.lastDegradationCause,
+                    false);
+                nackExpiredBitrateOnlyDecreaseSamples_++;
+            }
+            else {
+                ApplyAimdDecrease(input, state_.lastDegradationCause, false);
+            }
             badTimeSec_ = 0.0;
-            cooldownSec_ = 1.6;
+            cooldownSec_ = smoothGuardReleaseDecrease ? 1.1 : 1.6;
         }
         else if (guardedBandwidthPressure && lossOnlyBadTimeSec_ >= 2.0) {
             ApplyAimdDecrease(
@@ -680,6 +826,36 @@ namespace net {
             state_.targetFps = ClampFps(state_.targetFps - fpsStep);
             state_.fpsChanged = state_.fpsChanged || oldFps != state_.targetFps;
         }
+    }
+
+    void AdaptiveStreamingController::ApplyAimdBitrateOnlyDecrease(
+        const AdaptiveStreamingInput& input,
+        AdaptiveDegradationCause cause,
+        bool hardProblem
+    ) {
+        const int oldQuality = state_.targetJpegQuality;
+        const int oldFps = state_.targetFps;
+        const int oldBitrate = state_.targetBitrateKbps;
+        const int oldWidth = state_.targetWidth;
+        const int oldHeight = state_.targetHeight;
+
+        const double rawFactor =
+            CalculateAimdDecreaseFactor(input, cause, hardProblem);
+        const double smoothFactor =
+            (std::max)(rawFactor, hardProblem ? 0.84 : 0.90);
+        const int nextBitrate = static_cast<int>(
+            std::lround(
+                static_cast<double>(state_.targetBitrateKbps) *
+                smoothFactor)
+        );
+
+        state_.targetBitrateKbps = ClampBitrate(nextBitrate);
+        state_.qualityChanged = oldQuality != state_.targetJpegQuality;
+        state_.fpsChanged = oldFps != state_.targetFps;
+        state_.bitrateChanged = oldBitrate != state_.targetBitrateKbps;
+        state_.resolutionChanged =
+            oldWidth != state_.targetWidth ||
+            oldHeight != state_.targetHeight;
     }
 
     void AdaptiveStreamingController::ApplyAimdIncrease(int bitrateKbps) {
