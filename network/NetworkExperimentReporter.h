@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace net {
@@ -65,6 +66,13 @@ namespace net {
             uint64_t fecParityPackets = 0;
             uint64_t fecRecoveredFrames = 0;
             uint64_t fecRecoveredChunks = 0;
+            std::string adaptiveFecDecisionReason;
+            std::string adaptiveFecHoldReason;
+            bool adaptiveFecG8ToG4Recovery = false;
+            bool adaptiveFecQualityHoldActive = false;
+            bool adaptiveFecQualityHoldCanceled = false;
+            bool adaptiveFecEmergencyG2Active = false;
+            std::string adaptiveFecEarlyOffReason;
             bool adaptiveFecRecoveryWorking = false;
             bool adaptiveFecGuardActive = false;
             double adaptiveFecRecoveryEfficiency = 0.0;
@@ -112,6 +120,13 @@ namespace net {
             uint64_t adaptiveFecParityPacketDeltas = 0;
             uint64_t adaptiveFecRecoveredFrameDeltas = 0;
             uint64_t adaptiveFecRecoveredChunkDeltas = 0;
+            std::unordered_map<std::string, uint32_t> adaptiveFecDecisionSamples;
+            std::unordered_map<std::string, uint32_t> adaptiveFecHoldSamples;
+            std::unordered_map<std::string, uint32_t> adaptiveFecEarlyOffSamples;
+            uint32_t adaptiveFecG8ToG4RecoverySamples = 0;
+            uint32_t adaptiveFecQualityHoldActiveSamples = 0;
+            uint32_t adaptiveFecQualityHoldCanceledSamples = 0;
+            uint32_t adaptiveFecEmergencyG2ActiveSamples = 0;
             std::vector<TimeSeriesSample> timeSeriesSamples;
 
             NetworkStatsSnapshot lastStats{};
@@ -176,6 +191,13 @@ namespace net {
             uint64_t adaptiveFecParityPacketDeltas = 0;
             uint64_t adaptiveFecRecoveredFrameDeltas = 0;
             uint64_t adaptiveFecRecoveredChunkDeltas = 0;
+            std::string dominantAdaptiveFecDecisionReason;
+            std::string dominantAdaptiveFecHoldReason;
+            std::string dominantAdaptiveFecEarlyOffReason;
+            uint32_t adaptiveFecG8ToG4RecoverySamples = 0;
+            uint32_t adaptiveFecQualityHoldActiveSamples = 0;
+            uint32_t adaptiveFecQualityHoldCanceledSamples = 0;
+            uint32_t adaptiveFecEmergencyG2ActiveSamples = 0;
             uint64_t simDroppedPackets = 0;
 
             int minTargetFps = 0;

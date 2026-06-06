@@ -20,6 +20,14 @@
 
 class NetworkManager {
 public:
+    struct AdaptiveFecDecisionTelemetry {
+        std::string decisionReason = "disabled";
+        std::string holdReason;
+        bool g8ToG4Recovery = false;
+        bool emergencyG2Active = false;
+        std::string earlyOffReason;
+    };
+
     NetworkManager(const std::string& ip, uint16_t port);
     ~NetworkManager();
 
@@ -85,6 +93,7 @@ public:
     bool IsAdaptiveFecEnabled() const;
     void SetFecGroupChunkCount(uint16_t groupChunkCount);
     uint16_t GetFecGroupChunkCount() const;
+    AdaptiveFecDecisionTelemetry GetAdaptiveFecDecisionTelemetry() const;
     void UpdateAdaptiveFec(
         double packetLossRate,
         double ackMissingRate,
@@ -284,8 +293,11 @@ private:
     uint16_t adaptiveFecPostOffRearmGroupChunkCount_ = 8;
     uint32_t adaptiveFecWasteSamples_ = 0;
     uint32_t adaptiveFecIneffectiveSamples_ = 0;
+    uint32_t adaptiveFecG8NackExpiredSamples_ = 0;
+    uint32_t adaptiveFecG4DefenseExpiredSamples_ = 0;
     uint32_t adaptiveFecUncoveredDeadlineSamples_ = 0;
     uint32_t adaptiveFecCoveredRecoverySamples_ = 0;
+    AdaptiveFecDecisionTelemetry adaptiveFecDecisionTelemetry_{};
 
     std::atomic<uint32_t> rnvpSequence_{ 1 };
 

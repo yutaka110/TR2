@@ -297,6 +297,9 @@
     <ClCompile Include="network\NetworkExperimentReporter.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
+    <ClCompile Include="network\NetworkExperimentReplay.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
     <ClCompile Include="network\NetworkExperimentRunner.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
@@ -619,6 +622,9 @@
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\NetworkExperimentReporter.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="network\NetworkExperimentReplay.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="network\NetworkExperimentRunner.h">

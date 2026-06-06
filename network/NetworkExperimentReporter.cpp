@@ -121,6 +121,86 @@ namespace {
         return escaped;
     }
 
+    std::string DominantKey(
+        const std::unordered_map<std::string, uint32_t>& samples
+    ) {
+        std::string bestKey;
+        uint32_t bestCount = 0;
+        for (const auto& [key, count] : samples) {
+            if (key.empty()) {
+                continue;
+            }
+            if (count > bestCount ||
+                (count == bestCount && key < bestKey)) {
+                bestKey = key;
+                bestCount = count;
+            }
+        }
+        return bestKey;
+    }
+
+    struct BurstPhaseAggregate {
+        const char* name = "";
+        uint32_t samples = 0;
+        uint64_t nackSentDelta = 0;
+        uint64_t nackExpiredDelta = 0;
+        uint64_t fecRecoveredDelta = 0;
+        uint64_t fecParityDelta = 0;
+        uint32_t qualityHoldSamples = 0;
+        uint32_t g8ToG4Samples = 0;
+        uint32_t g2EmergencySamples = 0;
+        int finalTargetFps = 0;
+        int finalTargetJpegQuality = 0;
+        int finalTargetBitrateKbps = 0;
+        std::unordered_map<std::string, uint32_t> decisionSamples;
+    };
+
+    enum class BurstPhaseIndex : size_t {
+        PreBurst = 0,
+        BurstOnset = 1,
+        BurstDefense = 2,
+        BurstRecovery = 3
+    };
+
+    bool ContainsToken(const std::string& value, const char* token) {
+        return value.find(token) != std::string::npos;
+    }
+
+    const char* BurstPhaseName(BurstPhaseIndex phase) {
+        switch (phase) {
+        case BurstPhaseIndex::PreBurst:
+            return "pre_burst";
+        case BurstPhaseIndex::BurstOnset:
+            return "burst_onset";
+        case BurstPhaseIndex::BurstDefense:
+            return "burst_defense";
+        case BurstPhaseIndex::BurstRecovery:
+        default:
+            return "burst_recovery";
+        }
+    }
+
+    std::string BurstPhaseVerdict(const BurstPhaseAggregate& phase) {
+        if (phase.samples == 0) {
+            return "n/a";
+        }
+        if (std::string(phase.name) == "pre_burst") {
+            return phase.nackExpiredDelta == 0 ? "quiet" : "leaky";
+        }
+        if (phase.nackExpiredDelta == 0) {
+            return phase.fecRecoveredDelta > 0 ? "win" : "stable";
+        }
+        if (phase.fecRecoveredDelta >= phase.nackExpiredDelta &&
+            phase.nackExpiredDelta <= 2) {
+            return "mixed";
+        }
+        if (phase.fecRecoveredDelta >= phase.nackExpiredDelta * 2 &&
+            phase.fecParityDelta > 0) {
+            return "rescued";
+        }
+        return "loss";
+    }
+
     std::string EscapeJson(std::string value) {
         std::string escaped;
         escaped.reserve(value.size() + 8);
@@ -867,6 +947,30 @@ namespace {
             stats.adaptiveFecRecoveredFrameDelta;
         current_.adaptiveFecRecoveredChunkDeltas +=
             stats.adaptiveFecRecoveredChunkDelta;
+        if (!stats.adaptiveFecDecisionReason.empty()) {
+            current_.adaptiveFecDecisionSamples[
+                stats.adaptiveFecDecisionReason]++;
+        }
+        if (!stats.adaptiveFecHoldReason.empty()) {
+            current_.adaptiveFecHoldSamples[
+                stats.adaptiveFecHoldReason]++;
+        }
+        if (!stats.adaptiveFecEarlyOffReason.empty()) {
+            current_.adaptiveFecEarlyOffSamples[
+                stats.adaptiveFecEarlyOffReason]++;
+        }
+        if (stats.adaptiveFecG8ToG4Recovery) {
+            current_.adaptiveFecG8ToG4RecoverySamples++;
+        }
+        if (stats.adaptiveFecQualityHoldActive) {
+            current_.adaptiveFecQualityHoldActiveSamples++;
+        }
+        if (stats.adaptiveFecQualityHoldCanceled) {
+            current_.adaptiveFecQualityHoldCanceledSamples++;
+        }
+        if (stats.adaptiveFecEmergencyG2Active) {
+            current_.adaptiveFecEmergencyG2ActiveSamples++;
+        }
 
         TimeSeriesSample timeSeriesSample{};
         timeSeriesSample.relativeTimeSec =
@@ -931,6 +1035,20 @@ namespace {
             SubtractCounter(
                 stats.fecRecoveredChunks,
                 baseline.fecRecoveredChunks);
+        timeSeriesSample.adaptiveFecDecisionReason =
+            stats.adaptiveFecDecisionReason;
+        timeSeriesSample.adaptiveFecHoldReason =
+            stats.adaptiveFecHoldReason;
+        timeSeriesSample.adaptiveFecG8ToG4Recovery =
+            stats.adaptiveFecG8ToG4Recovery;
+        timeSeriesSample.adaptiveFecQualityHoldActive =
+            stats.adaptiveFecQualityHoldActive;
+        timeSeriesSample.adaptiveFecQualityHoldCanceled =
+            stats.adaptiveFecQualityHoldCanceled;
+        timeSeriesSample.adaptiveFecEmergencyG2Active =
+            stats.adaptiveFecEmergencyG2Active;
+        timeSeriesSample.adaptiveFecEarlyOffReason =
+            stats.adaptiveFecEarlyOffReason;
         timeSeriesSample.adaptiveFecRecoveryWorking =
             stats.adaptiveFecRecoveryWorking;
         timeSeriesSample.adaptiveFecGuardActive =
@@ -1245,6 +1363,13 @@ namespace {
             << "adaptiveFecParityPacketDeltas,"
             << "adaptiveFecRecoveredFrameDeltas,"
             << "adaptiveFecRecoveredChunkDeltas,"
+            << "dominantAdaptiveFecDecisionReason,"
+            << "dominantAdaptiveFecHoldReason,"
+            << "dominantAdaptiveFecEarlyOffReason,"
+            << "adaptiveFecG8ToG4RecoverySamples,"
+            << "adaptiveFecQualityHoldActiveSamples,"
+            << "adaptiveFecQualityHoldCanceledSamples,"
+            << "adaptiveFecEmergencyG2ActiveSamples,"
             << "simDroppedPackets,"
             << "minTargetFps,"
             << "minTargetJpegQuality,"
@@ -1317,6 +1442,13 @@ namespace {
                 << summary.adaptiveFecParityPacketDeltas << ','
                 << summary.adaptiveFecRecoveredFrameDeltas << ','
                 << summary.adaptiveFecRecoveredChunkDeltas << ','
+                << EscapeCsv(summary.dominantAdaptiveFecDecisionReason) << ','
+                << EscapeCsv(summary.dominantAdaptiveFecHoldReason) << ','
+                << EscapeCsv(summary.dominantAdaptiveFecEarlyOffReason) << ','
+                << summary.adaptiveFecG8ToG4RecoverySamples << ','
+                << summary.adaptiveFecQualityHoldActiveSamples << ','
+                << summary.adaptiveFecQualityHoldCanceledSamples << ','
+                << summary.adaptiveFecEmergencyG2ActiveSamples << ','
                 << summary.simDroppedPackets << ','
                 << summary.minTargetFps << ','
                 << summary.minTargetJpegQuality << ','
@@ -1410,6 +1542,23 @@ namespace {
                 << summary.adaptiveFecParityPacketDeltas << " / "
                 << summary.adaptiveFecRecoveredFrameDeltas << " / "
                 << summary.adaptiveFecRecoveredChunkDeltas << "\n";
+            textFile_ << "  adaptive fec decision/hold/earlyOff/g8ToG4/qualityHold/canceled/g2: "
+                << (summary.dominantAdaptiveFecDecisionReason.empty()
+                    ? "none"
+                    : summary.dominantAdaptiveFecDecisionReason)
+                << " / "
+                << (summary.dominantAdaptiveFecHoldReason.empty()
+                    ? "none"
+                    : summary.dominantAdaptiveFecHoldReason)
+                << " / "
+                << (summary.dominantAdaptiveFecEarlyOffReason.empty()
+                    ? "none"
+                    : summary.dominantAdaptiveFecEarlyOffReason)
+                << " / "
+                << summary.adaptiveFecG8ToG4RecoverySamples << " / "
+                << summary.adaptiveFecQualityHoldActiveSamples << " / "
+                << summary.adaptiveFecQualityHoldCanceledSamples << " / "
+                << summary.adaptiveFecEmergencyG2ActiveSamples << "\n";
             textFile_ << "  verdict: " << summary.verdict;
             if (!summary.notes.empty()) {
                 textFile_ << " (" << summary.notes << ")";
@@ -1570,6 +1719,185 @@ namespace {
                 << EscapeMarkdownTable(
                     summary.notes.empty() ? "none" : summary.notes)
                 << " |\n";
+        }
+        file << "\n";
+
+        file << "## Adaptive FEC Decision Telemetry\n\n";
+        file
+            << "| Scenario | FEC | Decision | Hold | Early OFF | g8->g4 | Quality Hold | Hold Canceled | g2 Emergency |\n"
+            << "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |\n";
+        for (const ScenarioSummary& summary : summaries_) {
+            file << "| "
+                << EscapeMarkdownTable(summary.name) << " | "
+                << EscapeMarkdownTable(
+                    summary.adaptiveFecEnabled
+                    ? "adaptive"
+                    : (summary.fecEnabled
+                        ? "g" + std::to_string(summary.fecGroupChunkCount)
+                        : "off")) << " | "
+                << EscapeMarkdownTable(
+                    summary.dominantAdaptiveFecDecisionReason.empty()
+                    ? "none"
+                    : summary.dominantAdaptiveFecDecisionReason) << " | "
+                << EscapeMarkdownTable(
+                    summary.dominantAdaptiveFecHoldReason.empty()
+                    ? "none"
+                    : summary.dominantAdaptiveFecHoldReason) << " | "
+                << EscapeMarkdownTable(
+                    summary.dominantAdaptiveFecEarlyOffReason.empty()
+                    ? "none"
+                    : summary.dominantAdaptiveFecEarlyOffReason) << " | "
+                << summary.adaptiveFecG8ToG4RecoverySamples << " | "
+                << summary.adaptiveFecQualityHoldActiveSamples << " | "
+                << summary.adaptiveFecQualityHoldCanceledSamples << " | "
+                << summary.adaptiveFecEmergencyG2ActiveSamples << " |\n";
+        }
+        file << "\n";
+
+        file << "## Burst Phase Analysis\n\n";
+        file << "Burst phase analysis splits the measured burst-loss window by observed NACK/FEC behavior so Adaptive FEC can be judged by timing, not only by scenario averages.\n\n";
+        file
+            << "| Scenario | Phase | Samples | NACK Sent d | NACK Expired d | FEC Rec d | FEC Parity d | FEC Eff | Decision | Quality Hold | g8->g4 | g2 Emergency | Final Target | Verdict |\n"
+            << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |\n";
+        bool wroteBurstPhase = false;
+        for (const ScenarioSummary& summary : summaries_) {
+            if (summary.name.find("Burst loss") == std::string::npos ||
+                summary.timeSeriesSamples.empty()) {
+                continue;
+            }
+
+            std::array<BurstPhaseAggregate, 4> phases{};
+            for (size_t i = 0; i < phases.size(); ++i) {
+                phases[i].name =
+                    BurstPhaseName(static_cast<BurstPhaseIndex>(i));
+            }
+
+            bool burstObserved = false;
+            uint64_t prevNackSent = 0;
+            uint64_t prevNackExpired = 0;
+            uint64_t prevFecRecovered = 0;
+            uint64_t prevFecParity = 0;
+
+            for (const TimeSeriesSample& sample : summary.timeSeriesSamples) {
+                const uint64_t nackSentDelta =
+                    SubtractCounter(sample.deadlineNackSentFrames, prevNackSent);
+                const uint64_t nackExpiredDelta =
+                    SubtractCounter(
+                        sample.deadlineNackExpiredDroppedFrames,
+                        prevNackExpired);
+                const uint64_t fecRecoveredDelta =
+                    SubtractCounter(
+                        sample.fecRecoveredFrames,
+                        prevFecRecovered);
+                const uint64_t fecParityDelta =
+                    SubtractCounter(sample.fecParityPackets, prevFecParity);
+
+                prevNackSent = sample.deadlineNackSentFrames;
+                prevNackExpired =
+                    sample.deadlineNackExpiredDroppedFrames;
+                prevFecRecovered = sample.fecRecoveredFrames;
+                prevFecParity = sample.fecParityPackets;
+
+                const bool nackActivity =
+                    nackSentDelta > 0 ||
+                    nackExpiredDelta > 0 ||
+                    sample.deadlineNackSentFrames > 0 ||
+                    sample.deadlineNackExpiredDroppedFrames > 0;
+                const bool defenseDecision =
+                    ContainsToken(sample.adaptiveFecDecisionReason, "_g4") ||
+                    ContainsToken(sample.adaptiveFecDecisionReason, "_g2") ||
+                    ContainsToken(sample.adaptiveFecDecisionReason, "g8_to_g4") ||
+                    ContainsToken(sample.adaptiveFecHoldReason, "_g4") ||
+                    sample.adaptiveFecEmergencyG2Active ||
+                    sample.adaptiveFecQualityHoldActive;
+                const bool recoveryDecision =
+                    ContainsToken(sample.adaptiveFecDecisionReason, "covered") ||
+                    ContainsToken(sample.adaptiveFecDecisionReason, "recent") ||
+                    ContainsToken(sample.adaptiveFecDecisionReason, "recovery_hold_g8") ||
+                    ContainsToken(sample.adaptiveFecHoldReason, "_g8");
+
+                BurstPhaseIndex phase = BurstPhaseIndex::PreBurst;
+                if (!burstObserved && !nackActivity) {
+                    phase = BurstPhaseIndex::PreBurst;
+                }
+                else {
+                    burstObserved = true;
+                    if (defenseDecision) {
+                        phase = BurstPhaseIndex::BurstDefense;
+                    }
+                    else if (nackExpiredDelta == 0 &&
+                        (fecRecoveredDelta > 0 || recoveryDecision)) {
+                        phase = BurstPhaseIndex::BurstRecovery;
+                    }
+                    else {
+                        phase = BurstPhaseIndex::BurstOnset;
+                    }
+                }
+
+                BurstPhaseAggregate& aggregate =
+                    phases[static_cast<size_t>(phase)];
+                aggregate.samples++;
+                aggregate.nackSentDelta += nackSentDelta;
+                aggregate.nackExpiredDelta += nackExpiredDelta;
+                aggregate.fecRecoveredDelta += fecRecoveredDelta;
+                aggregate.fecParityDelta += fecParityDelta;
+                if (sample.adaptiveFecQualityHoldActive) {
+                    aggregate.qualityHoldSamples++;
+                }
+                if (sample.adaptiveFecG8ToG4Recovery) {
+                    aggregate.g8ToG4Samples++;
+                }
+                if (sample.adaptiveFecEmergencyG2Active) {
+                    aggregate.g2EmergencySamples++;
+                }
+                aggregate.finalTargetFps = sample.targetFps;
+                aggregate.finalTargetJpegQuality =
+                    sample.targetJpegQuality;
+                aggregate.finalTargetBitrateKbps =
+                    sample.targetBitrateKbps;
+                if (!sample.adaptiveFecDecisionReason.empty()) {
+                    aggregate.decisionSamples[
+                        sample.adaptiveFecDecisionReason]++;
+                }
+            }
+
+            for (const BurstPhaseAggregate& phase : phases) {
+                if (phase.samples == 0) {
+                    continue;
+                }
+                const double fecEfficiency =
+                    phase.fecParityDelta == 0
+                    ? 0.0
+                    : static_cast<double>(phase.fecRecoveredDelta) /
+                        static_cast<double>(phase.fecParityDelta);
+                std::ostringstream finalTarget;
+                finalTarget << phase.finalTargetFps << "fps/"
+                    << "q" << phase.finalTargetJpegQuality << "/"
+                    << phase.finalTargetBitrateKbps << "kbps";
+
+                file << "| "
+                    << EscapeMarkdownTable(summary.name) << " | "
+                    << phase.name << " | "
+                    << phase.samples << " | "
+                    << phase.nackSentDelta << " | "
+                    << phase.nackExpiredDelta << " | "
+                    << phase.fecRecoveredDelta << " | "
+                    << phase.fecParityDelta << " | "
+                    << FormatPercent(fecEfficiency) << " | "
+                    << EscapeMarkdownTable(
+                        DominantKey(phase.decisionSamples).empty()
+                        ? "none"
+                        : DominantKey(phase.decisionSamples)) << " | "
+                    << phase.qualityHoldSamples << " | "
+                    << phase.g8ToG4Samples << " | "
+                    << phase.g2EmergencySamples << " | "
+                    << EscapeMarkdownTable(finalTarget.str()) << " | "
+                    << BurstPhaseVerdict(phase) << " |\n";
+                wroteBurstPhase = true;
+            }
+        }
+        if (!wroteBurstPhase) {
+            file << "| none | n/a | 0 | 0 | 0 | 0 | 0 | 0.0% | none | 0 | 0 | 0 | n/a | n/a |\n";
         }
         file << "\n";
 
@@ -3585,6 +3913,24 @@ namespace {
             summary.adaptiveFecRecoveredChunkDeltas =
                 ParseUint64OrDefault(
                     getCell(row, "adaptiveFecRecoveredChunkDeltas"));
+            summary.dominantAdaptiveFecDecisionReason =
+                getCell(row, "dominantAdaptiveFecDecisionReason");
+            summary.dominantAdaptiveFecHoldReason =
+                getCell(row, "dominantAdaptiveFecHoldReason");
+            summary.dominantAdaptiveFecEarlyOffReason =
+                getCell(row, "dominantAdaptiveFecEarlyOffReason");
+            summary.adaptiveFecG8ToG4RecoverySamples =
+                static_cast<uint32_t>(ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecG8ToG4RecoverySamples")));
+            summary.adaptiveFecQualityHoldActiveSamples =
+                static_cast<uint32_t>(ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecQualityHoldActiveSamples")));
+            summary.adaptiveFecQualityHoldCanceledSamples =
+                static_cast<uint32_t>(ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecQualityHoldCanceledSamples")));
+            summary.adaptiveFecEmergencyG2ActiveSamples =
+                static_cast<uint32_t>(ParseUint64OrDefault(
+                    getCell(row, "adaptiveFecEmergencyG2ActiveSamples")));
             summary.simDroppedPackets =
                 ParseUint64OrDefault(getCell(row, "simDroppedPackets"));
             summary.minTargetFps =
@@ -3809,6 +4155,20 @@ namespace {
                 summary.adaptiveFecRecoveredFrameDeltas) /
                 static_cast<double>(
                     summary.adaptiveFecParityPacketDeltas);
+        summary.dominantAdaptiveFecDecisionReason =
+            DominantKey(current.adaptiveFecDecisionSamples);
+        summary.dominantAdaptiveFecHoldReason =
+            DominantKey(current.adaptiveFecHoldSamples);
+        summary.dominantAdaptiveFecEarlyOffReason =
+            DominantKey(current.adaptiveFecEarlyOffSamples);
+        summary.adaptiveFecG8ToG4RecoverySamples =
+            current.adaptiveFecG8ToG4RecoverySamples;
+        summary.adaptiveFecQualityHoldActiveSamples =
+            current.adaptiveFecQualityHoldActiveSamples;
+        summary.adaptiveFecQualityHoldCanceledSamples =
+            current.adaptiveFecQualityHoldCanceledSamples;
+        summary.adaptiveFecEmergencyG2ActiveSamples =
+            current.adaptiveFecEmergencyG2ActiveSamples;
         summary.simDroppedPackets =
             SubtractCounter(
                 current.lastStats.networkSimulation.droppedPackets,

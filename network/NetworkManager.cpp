@@ -1437,8 +1437,11 @@ void NetworkManager::SetAdaptiveFecEnabled(bool enabled) {
     adaptiveFecPostOffRearmGroupChunkCount_ = 8;
     adaptiveFecWasteSamples_ = 0;
     adaptiveFecIneffectiveSamples_ = 0;
+    adaptiveFecG8NackExpiredSamples_ = 0;
+    adaptiveFecG4DefenseExpiredSamples_ = 0;
     adaptiveFecUncoveredDeadlineSamples_ = 0;
     adaptiveFecCoveredRecoverySamples_ = 0;
+    adaptiveFecDecisionTelemetry_ = AdaptiveFecDecisionTelemetry{};
 }
 
 bool NetworkManager::IsAdaptiveFecEnabled() const {
@@ -1454,6 +1457,19 @@ void NetworkManager::SetFecGroupChunkCount(uint16_t groupChunkCount) {
 
 uint16_t NetworkManager::GetFecGroupChunkCount() const {
     return fecGroupChunkCount_.load(std::memory_order_relaxed);
+}
+
+NetworkManager::AdaptiveFecDecisionTelemetry
+NetworkManager::GetAdaptiveFecDecisionTelemetry() const {
+    std::lock_guard<std::mutex> lock(adaptiveFecMutex_);
+    AdaptiveFecDecisionTelemetry telemetry = adaptiveFecDecisionTelemetry_;
+    telemetry.g8ToG4Recovery =
+        telemetry.decisionReason == "g8_to_g4_nack_rising";
+    telemetry.emergencyG2Active =
+        telemetry.emergencyG2Active ||
+        telemetry.decisionReason == "emergency_g2" ||
+        telemetry.decisionReason == "defense_expired_g2";
+    return telemetry;
 }
 
 void NetworkManager::UpdateAdaptiveFec(
@@ -1592,40 +1608,57 @@ void NetworkManager::UpdateAdaptiveFec(
 
     bool enableFec = false;
     uint16_t groupChunkCount = 8;
+    std::string decisionReason = "idle_off";
+    std::string holdReason;
+    std::string earlyOffReason;
+    bool g8ToG4Recovery = false;
+    bool emergencyG2ActiveForTelemetry = false;
 
     if (highPressure) {
         groupChunkCount = 4;
         enableFec = true;
+        decisionReason = "deadline_high_g4";
     }
     else if (mediumPressure) {
         groupChunkCount = 4;
         enableFec = true;
+        decisionReason = "deadline_risk_g4";
     }
     else if (lowPressure) {
         groupChunkCount = 8;
         enableFec = true;
+        decisionReason = fecWasUseful
+            ? "recent_recovery_g8"
+            : "loss_or_nack_g8";
     }
 
     if ((bandwidthTight || pacingBacklog) && !highPressure) {
         if (deadlineRiskForStrongerFec) {
             groupChunkCount = 4;
+            decisionReason = "bandwidth_tight_deadline_g4";
         }
         else if (recoveryDeadlinePressure || burstMissingSignal) {
             groupChunkCount = 8;
+            decisionReason = "bandwidth_tight_g8";
         }
         else {
             enableFec = false;
             groupChunkCount = 8;
+            decisionReason = pacingBacklog
+                ? "pacing_backlog_off"
+                : "bandwidth_tight_off";
         }
     }
     else if (groupChunkCount == 2 && !strongFecBudgetAvailable) {
         groupChunkCount = 4;
+        decisionReason = "g2_budget_limited_g4";
     }
     else if ((bandwidthTight || pacingBacklog) &&
         groupChunkCount == 2 &&
         deadlineExpiredDelta == 0 &&
         instantLossPressure < 0.14) {
         groupChunkCount = 4;
+        decisionReason = "g2_bandwidth_limited_g4";
     }
 
     if (groupChunkCount == 4 &&
@@ -1633,6 +1666,7 @@ void NetworkManager::UpdateAdaptiveFec(
         !deadlineRiskForStrongerFec &&
         (instantLossPressure >= 0.18 || lossPressure >= 0.14)) {
         groupChunkCount = 8;
+        decisionReason = "high_bitrate_g8";
     }
 
     {
@@ -1645,6 +1679,9 @@ void NetworkManager::UpdateAdaptiveFec(
                 (std::max)(adaptiveFecHoldUntilUs_, holdUs);
             adaptiveFecHoldGroupChunkCount_ =
                 (std::min)(adaptiveFecHoldGroupChunkCount_, group);
+            holdReason = group <= 4
+                ? "deadline_hold_g4"
+                : "recovery_hold_g8";
         };
         const auto beginIneffectiveOff =
             [&](bool deadlineRisk) {
@@ -1654,6 +1691,9 @@ void NetworkManager::UpdateAdaptiveFec(
                 deadlineNackExpiredDroppedFrames;
             adaptiveFecIneffectiveOffRearmGroupChunkCount_ =
                 deadlineRisk ? uint16_t{ 4 } : uint16_t{ 8 };
+            earlyOffReason = deadlineRisk
+                ? "deadline_ineffective"
+                : "ineffective_or_wasteful";
         };
 
         if (recoveryDeadlineUncovered ||
@@ -1726,6 +1766,10 @@ void NetworkManager::UpdateAdaptiveFec(
                 (rearmAsRecoveryDefense ? 1000000ull : 800000ull);
             adaptiveFecHoldUntilUs_ =
                 (std::max)(adaptiveFecHoldUntilUs_, rearmHoldUs);
+            decisionReason = rearmAsRecoveryDefense
+                ? "post_off_rearm_g4"
+                : "post_off_rearm_g8";
+            holdReason = decisionReason;
         }
 
         if (recoveryDeadlineUncovered ||
@@ -1744,10 +1788,17 @@ void NetworkManager::UpdateAdaptiveFec(
             }
             const bool g2EmergencyActive =
                 adaptiveFecG2UntilUs_ > nowUs;
+            emergencyG2ActiveForTelemetry = g2EmergencyActive;
             groupChunkCount =
                 g2EmergencyActive
                 ? uint16_t{ 2 }
                 : uint16_t{ 4 };
+            decisionReason = g2EmergencyActive
+                ? "emergency_g2"
+                : "deadline_uncovered_g4";
+            holdReason = g2EmergencyActive
+                ? "emergency_g2_window"
+                : "deadline_uncovered_hold";
             holdRecoveryRole(
                 g2EmergencyActive ? 0.6 : 1.2,
                 groupChunkCount);
@@ -1764,6 +1815,10 @@ void NetworkManager::UpdateAdaptiveFec(
                 (std::max)(
                     adaptiveFecHoldSamples_,
                     nackOrBurstDeadlineRisk ? uint32_t{ 4 } : uint32_t{ 2 });
+            decisionReason = nackOrBurstDeadlineRisk
+                ? "nack_fallback_g4"
+                : "burst_or_nack_g8";
+            holdReason = decisionReason;
             holdRecoveryRole(
                 nackOrBurstDeadlineRisk ? 1.2 : 0.8,
                 fallbackGroup);
@@ -1773,6 +1828,10 @@ void NetworkManager::UpdateAdaptiveFec(
                 (std::max)(
                     adaptiveFecHoldSamples_,
                     fecCoveredDeadlineMiss ? uint32_t{ 3 } : uint32_t{ 2 });
+            decisionReason = fecCoveredDeadlineMiss
+                ? "fec_covered_deadline"
+                : "fec_recent_recovery";
+            holdReason = decisionReason;
             holdRecoveryRole(
                 fecCoveredDeadlineMiss ? 0.8 : 1.0,
                 groupChunkCount);
@@ -1780,6 +1839,10 @@ void NetworkManager::UpdateAdaptiveFec(
         else if (adaptiveFecPostOffRearmSamples_ > 0) {
             enableFec = true;
             groupChunkCount = adaptiveFecPostOffRearmGroupChunkCount_;
+            decisionReason = groupChunkCount <= 4
+                ? "post_off_rearm_g4"
+                : "post_off_rearm_g8";
+            holdReason = decisionReason;
             adaptiveFecPostOffRearmSamples_--;
             if (adaptiveFecPostOffRearmSamples_ == 0) {
                 adaptiveFecPostOffRearmGroupChunkCount_ = 8;
@@ -1819,9 +1882,58 @@ void NetworkManager::UpdateAdaptiveFec(
             enableFec = true;
             groupChunkCount =
                 (std::min)(groupChunkCount, adaptiveFecHoldGroupChunkCount_);
+            if (g2EmergencyActiveNow && groupChunkCount == 2) {
+                emergencyG2ActiveForTelemetry = true;
+                if (decisionReason == "idle_off" ||
+                    decisionReason == "recovery_hold_g4" ||
+                    decisionReason == "recovery_hold_g8" ||
+                    decisionReason.find("_off") != std::string::npos) {
+                    decisionReason = "emergency_g2";
+                }
+                if (holdReason.empty() ||
+                    holdReason == "recovery_hold_g4" ||
+                    holdReason == "recovery_hold_g8") {
+                    holdReason = "emergency_g2_window";
+                }
+            }
+            if (decisionReason == "idle_off" ||
+                decisionReason.find("_off") != std::string::npos) {
+                decisionReason = groupChunkCount <= 4
+                    ? "recovery_hold_g4"
+                    : "recovery_hold_g8";
+            }
+            if (holdReason.empty()) {
+                holdReason = groupChunkCount <= 4
+                    ? "recovery_hold_g4"
+                    : "recovery_hold_g8";
+            }
         }
         else {
             adaptiveFecHoldGroupChunkCount_ = 8;
+        }
+        if (enableFec &&
+            groupChunkCount == 8 &&
+            deadlineExpiredDelta > 0) {
+            adaptiveFecG8NackExpiredSamples_++;
+        }
+        else if (!enableFec ||
+            groupChunkCount != 8 ||
+            deadlineExpiredDelta == 0) {
+            adaptiveFecG8NackExpiredSamples_ = 0;
+        }
+        if (adaptiveFecG8NackExpiredSamples_ >= 2) {
+            enableFec = true;
+            groupChunkCount = 4;
+            adaptiveFecHoldSamples_ =
+                (std::max)(adaptiveFecHoldSamples_, uint32_t{ 3 });
+            adaptiveFecHoldGroupChunkCount_ = 4;
+            adaptiveFecHoldUntilUs_ =
+                (std::max)(adaptiveFecHoldUntilUs_, nowUs + 1200000ull);
+            adaptiveFecIneffectiveSamples_ = 0;
+            adaptiveFecG8NackExpiredSamples_ = 0;
+            g8ToG4Recovery = true;
+            decisionReason = "g8_to_g4_nack_rising";
+            holdReason = "g8_to_g4_recovery_hold";
         }
         if (adaptiveFecIneffectiveSamples_ >= 2 &&
             (!recoveryDeadlinePressure || fecWasDeadlineIneffective) &&
@@ -1833,11 +1945,17 @@ void NetworkManager::UpdateAdaptiveFec(
             adaptiveFecHoldUntilUs_ = 0;
             adaptiveFecPostOffRearmSamples_ = 0;
             adaptiveFecPostOffRearmGroupChunkCount_ = 8;
+            adaptiveFecG8NackExpiredSamples_ = 0;
+            adaptiveFecG4DefenseExpiredSamples_ = 0;
             beginIneffectiveOff(
                 fecWasDeadlineIneffective ||
                 recoveryDeadlineUncovered ||
                 nackNeedsFecFallback ||
                 deadlineExpiredDelta > 0);
+            decisionReason = "ineffective_off";
+            if (earlyOffReason.empty()) {
+                earlyOffReason = "ineffective";
+            }
             if (adaptiveFecG2UntilUs_ > nowUs) {
                 adaptiveFecG2CooldownUntilUs_ =
                     (std::max)(
@@ -1857,7 +1975,13 @@ void NetworkManager::UpdateAdaptiveFec(
             adaptiveFecHoldUntilUs_ = 0;
             adaptiveFecPostOffRearmSamples_ = 0;
             adaptiveFecPostOffRearmGroupChunkCount_ = 8;
+            adaptiveFecG8NackExpiredSamples_ = 0;
+            adaptiveFecG4DefenseExpiredSamples_ = 0;
             beginIneffectiveOff(false);
+            decisionReason = "wasteful_off";
+            if (earlyOffReason.empty()) {
+                earlyOffReason = "wasteful";
+            }
             if (adaptiveFecG2UntilUs_ > nowUs) {
                 adaptiveFecG2CooldownUntilUs_ =
                     (std::max)(
@@ -1878,10 +2002,68 @@ void NetworkManager::UpdateAdaptiveFec(
             adaptiveFecHoldUntilUs_ = 0;
             adaptiveFecPostOffRearmSamples_ = 0;
             adaptiveFecPostOffRearmGroupChunkCount_ = 8;
+            adaptiveFecG8NackExpiredSamples_ = 0;
+            adaptiveFecG4DefenseExpiredSamples_ = 0;
+            decisionReason = "early_off_active";
+            if (earlyOffReason.empty()) {
+                earlyOffReason = "ineffective_off_window";
+            }
+        }
+
+        const bool g4DefenseExpiredPressure =
+            enableFec &&
+            groupChunkCount == 4 &&
+            deadlineExpiredDelta >= 2 &&
+            (decisionReason == "recovery_hold_g4" ||
+                decisionReason == "deadline_uncovered_g4" ||
+                decisionReason == "nack_fallback_g4" ||
+                holdReason == "recovery_hold_g4" ||
+                holdReason == "deadline_uncovered_hold");
+        if (g4DefenseExpiredPressure) {
+            adaptiveFecG4DefenseExpiredSamples_++;
+        }
+        else if (!enableFec ||
+            groupChunkCount != 4 ||
+            deadlineExpiredDelta == 0) {
+            adaptiveFecG4DefenseExpiredSamples_ = 0;
+        }
+
+        if (adaptiveFecG4DefenseExpiredSamples_ >= 2) {
+            enableFec = true;
+            if (!g2CooldownActive && adaptiveFecG2UntilUs_ == 0) {
+                adaptiveFecG2UntilUs_ =
+                    nowUs + kAdaptiveFecG2EmergencyWindowUs;
+            }
+
+            if (adaptiveFecG2UntilUs_ > nowUs) {
+                groupChunkCount = 2;
+                adaptiveFecHoldSamples_ =
+                    (std::max)(adaptiveFecHoldSamples_, uint32_t{ 2 });
+                adaptiveFecHoldGroupChunkCount_ = 2;
+                adaptiveFecHoldUntilUs_ =
+                    (std::max)(adaptiveFecHoldUntilUs_, adaptiveFecG2UntilUs_);
+                decisionReason = "defense_expired_g2";
+                holdReason = "defense_expired_g2_window";
+                emergencyG2ActiveForTelemetry = true;
+            }
+            else {
+                groupChunkCount = 4;
+                adaptiveFecHoldSamples_ =
+                    (std::max)(adaptiveFecHoldSamples_, uint32_t{ 4 });
+                adaptiveFecHoldGroupChunkCount_ = 4;
+                adaptiveFecHoldUntilUs_ =
+                    (std::max)(adaptiveFecHoldUntilUs_, nowUs + 1500000ull);
+                decisionReason = "defense_expired_g4_hold";
+                holdReason = "defense_expired_g4_hold";
+            }
+
+            adaptiveFecIneffectiveSamples_ = 0;
+            adaptiveFecG4DefenseExpiredSamples_ = 0;
         }
 
         if (groupChunkCount == 2 && adaptiveFecG2UntilUs_ <= nowUs) {
             groupChunkCount = 4;
+            decisionReason = "g2_window_expired_g4";
         }
 
         if (!enableFec) {
@@ -1890,6 +2072,17 @@ void NetworkManager::UpdateAdaptiveFec(
         else {
             adaptiveFecStableSamples_ = 0;
         }
+
+        emergencyG2ActiveForTelemetry =
+            emergencyG2ActiveForTelemetry ||
+            (enableFec && groupChunkCount == 2);
+        adaptiveFecDecisionTelemetry_.decisionReason =
+            enableFec ? decisionReason : decisionReason;
+        adaptiveFecDecisionTelemetry_.holdReason = holdReason;
+        adaptiveFecDecisionTelemetry_.g8ToG4Recovery = g8ToG4Recovery;
+        adaptiveFecDecisionTelemetry_.emergencyG2Active =
+            emergencyG2ActiveForTelemetry;
+        adaptiveFecDecisionTelemetry_.earlyOffReason = earlyOffReason;
     }
 
     SetFecEnabled(enableFec);
@@ -1963,8 +2156,11 @@ void NetworkManager::ResetStats() {
         adaptiveFecPostOffRearmGroupChunkCount_ = 8;
         adaptiveFecWasteSamples_ = 0;
         adaptiveFecIneffectiveSamples_ = 0;
+        adaptiveFecG8NackExpiredSamples_ = 0;
+        adaptiveFecG4DefenseExpiredSamples_ = 0;
         adaptiveFecUncoveredDeadlineSamples_ = 0;
         adaptiveFecCoveredRecoverySamples_ = 0;
+        adaptiveFecDecisionTelemetry_ = AdaptiveFecDecisionTelemetry{};
     }
 
     {

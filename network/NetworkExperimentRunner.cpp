@@ -1,9 +1,51 @@
 #include "NetworkExperimentRunner.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <string>
+#include <utility>
 
 namespace net {
 namespace {
+
+    std::string ToLowerAscii(std::string value) {
+        std::transform(
+            value.begin(),
+            value.end(),
+            value.begin(),
+            [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+        return value;
+    }
+
+    std::string ReadEnvString(const char* name) {
+        char* buffer = nullptr;
+        size_t size = 0;
+        if (_dupenv_s(&buffer, &size, name) != 0 || buffer == nullptr) {
+            return {};
+        }
+
+        std::string value(buffer);
+        std::free(buffer);
+        return value;
+    }
+
+    double ReadEnvDouble(const char* name, double fallback) {
+        const std::string value = ReadEnvString(name);
+        if (value.empty()) {
+            return fallback;
+        }
+
+        char* end = nullptr;
+        const double parsed = std::strtod(value.c_str(), &end);
+        return end != value.c_str() ? parsed : fallback;
+    }
+
+    bool ContainsLower(const std::string& haystack, const std::string& needle) {
+        return ToLowerAscii(haystack).find(needle) != std::string::npos;
+    }
 
     NetworkCondition MakeCondition(
         bool enabled,
@@ -85,10 +127,90 @@ namespace {
         );
     }
 
+    bool MatchesSlice(
+        const NetworkExperimentScenario& scenario,
+        const std::string& slice) {
+        if (slice.empty() || slice == "all") {
+            return true;
+        }
+
+        if (slice == "burst") {
+            return scenario.networkScenarioName == "Burst loss";
+        }
+
+        if (slice == "adaptive_fec" || slice == "adaptive-fec") {
+            return scenario.adaptiveFecEnabled;
+        }
+
+        if (slice == "burst_adaptive" || slice == "burst-adaptive") {
+            return scenario.networkScenarioName == "Burst loss" &&
+                scenario.adaptiveFecEnabled;
+        }
+
+        if (slice == "burst_fec" || slice == "burst-fec") {
+            return scenario.networkScenarioName == "Burst loss" &&
+                (scenario.fecEnabled || scenario.adaptiveFecEnabled);
+        }
+
+        return ContainsLower(scenario.name, slice) ||
+            ContainsLower(scenario.networkScenarioName, slice);
+    }
+
+    void ApplyExperimentEnvironmentOverrides(
+        std::vector<NetworkExperimentScenario>& scenarios) {
+        const std::string slice =
+            ToLowerAscii(ReadEnvString("TR2_NETWORK_EXPERIMENT_SLICE"));
+        if (!slice.empty() && slice != "all") {
+            std::vector<NetworkExperimentScenario> filtered;
+            filtered.reserve(scenarios.size());
+
+            for (const NetworkExperimentScenario& scenario : scenarios) {
+                if (MatchesSlice(scenario, slice)) {
+                    filtered.push_back(scenario);
+                }
+            }
+
+            if (!filtered.empty()) {
+                scenarios = std::move(filtered);
+            }
+        }
+
+        const std::string scenarioMatch =
+            ToLowerAscii(ReadEnvString("TR2_NETWORK_EXPERIMENT_SCENARIO"));
+        if (!scenarioMatch.empty()) {
+            std::vector<NetworkExperimentScenario> filtered;
+            filtered.reserve(scenarios.size());
+
+            for (const NetworkExperimentScenario& scenario : scenarios) {
+                if (ContainsLower(scenario.name, scenarioMatch) ||
+                    ContainsLower(scenario.networkScenarioName, scenarioMatch)) {
+                    filtered.push_back(scenario);
+                }
+            }
+
+            if (!filtered.empty()) {
+                scenarios = std::move(filtered);
+            }
+        }
+
+        const double durationOverride =
+            ReadEnvDouble("TR2_NETWORK_EXPERIMENT_DURATION_SEC", 0.0);
+        if (durationOverride > 0.0) {
+            for (NetworkExperimentScenario& scenario : scenarios) {
+                scenario.durationSec = (std::max)(0.5, durationOverride);
+            }
+        }
+    }
+
 } // namespace
 
     NetworkExperimentRunner::NetworkExperimentRunner()
         : scenarios_(CreateDefaultScenarios()) {
+        ApplyExperimentEnvironmentOverrides(scenarios_);
+
+        const double warmupOverride =
+            ReadEnvDouble("TR2_NETWORK_EXPERIMENT_WARMUP_SEC", warmupSec_);
+        warmupSec_ = (std::max)(0.0, warmupOverride);
     }
 
     bool NetworkExperimentRunner::Update(bool enabled, double deltaTimeSec) {

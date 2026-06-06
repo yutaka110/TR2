@@ -115,6 +115,13 @@ namespace net {
 		uint64_t fecParityPackets = 0;
 		uint64_t fecRecoveredFrames = 0;
 		uint64_t fecRecoveredChunks = 0;
+		std::string adaptiveFecDecisionReason;
+		std::string adaptiveFecHoldReason;
+		bool adaptiveFecG8ToG4Recovery = false;
+		bool adaptiveFecQualityHoldActive = false;
+		bool adaptiveFecQualityHoldCanceled = false;
+		bool adaptiveFecEmergencyG2Active = false;
+		std::string adaptiveFecEarlyOffReason;
 
 		// ============================================================
         // Adaptive Streaming

@@ -217,6 +217,13 @@ namespace {
             << stats.fecParityPackets << ','
             << stats.fecRecoveredFrames << ','
             << stats.fecRecoveredChunks << ','
+            << EscapeCsv(stats.adaptiveFecDecisionReason) << ','
+            << EscapeCsv(stats.adaptiveFecHoldReason) << ','
+            << (stats.adaptiveFecG8ToG4Recovery ? 1 : 0) << ','
+            << (stats.adaptiveFecQualityHoldActive ? 1 : 0) << ','
+            << (stats.adaptiveFecQualityHoldCanceled ? 1 : 0) << ','
+            << (stats.adaptiveFecEmergencyG2Active ? 1 : 0) << ','
+            << EscapeCsv(stats.adaptiveFecEarlyOffReason) << ','
             << (stats.adaptiveEnabled ? 1 : 0) << ','
             << EscapeCsv(stats.adaptiveControlMode) << ','
             << EscapeCsv(stats.adaptiveCongestionControlMode) << ','
@@ -387,6 +394,13 @@ namespace {
             << "fecParityPackets,"
             << "fecRecoveredFrames,"
             << "fecRecoveredChunks,"
+            << "adaptiveFecDecisionReason,"
+            << "adaptiveFecHoldReason,"
+            << "adaptiveFecG8ToG4Recovery,"
+            << "adaptiveFecQualityHoldActive,"
+            << "adaptiveFecQualityHoldCanceled,"
+            << "adaptiveFecEmergencyG2Active,"
+            << "adaptiveFecEarlyOffReason,"
             << "adaptiveEnabled,"
             << "adaptiveControlMode,"
             << "adaptiveCongestionControlMode,"
