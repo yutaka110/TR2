@@ -125,6 +125,9 @@ namespace net {
         double lastFecRecoveryEfficiency = 0.0;
         bool lastFecRecoveryWorking = false;
         bool lastFecRecoveryGuardActive = false;
+        bool lastAdaptiveFecG8ToG4Recovery = false;
+        bool lastAdaptiveFecQualityHoldActive = false;
+        bool lastAdaptiveFecQualityHoldCanceled = false;
         uint64_t lastDeadlineNackExpiredDroppedFrames = 0;
         uint64_t lastDeadlineNackExpiredAfterNackFrames = 0;
         uint64_t lastAckStaleDroppedFrames = 0;
@@ -182,6 +185,9 @@ namespace net {
             const AdaptiveStreamingInput& input,
             AdaptiveDegradationCause cause,
             bool hardProblem
+        );
+        void ApplyAdaptiveFecRecoveryQualityFloor(
+            const AdaptiveStreamingInput& input
         );
         void ApplyAimdIncrease(int bitrateKbps);
         void DeriveTargetsFromBitrate();
@@ -306,6 +312,11 @@ namespace net {
         uint32_t nackExpiredRisingSamples_ = 0;
         double nackExpiredGuardReleaseSec_ = 0.0;
         double postNackExpiredGuardRearmSec_ = 0.0;
+        bool hasAdaptiveFecGroupSample_ = false;
+        bool lastAdaptiveFecSampleEnabled_ = false;
+        uint32_t lastAdaptiveFecSampleGroupChunkCount_ = 0;
+        double postG8ToG4QualityHoldSec_ = 0.0;
+        double fecBurstTailRecoverySec_ = 0.0;
         uint32_t nackExpiredBitrateOnlyDecreaseSamples_ = 0;
         uint32_t nackExpiredBitrateOnlyDecreaseBudget_ = 2;
         int activeBandwidthCeilingKbps_ = 12000;

@@ -243,6 +243,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="network\NetworkConditionSimulator.cpp" />
     <ClCompile Include="network\NetworkCsvLogger.cpp" />
     <ClCompile Include="network\NetworkExperimentReporter.cpp" />
+    <ClCompile Include="network\NetworkExperimentReplay.cpp" />
     <ClCompile Include="network\NetworkExperimentRunner.cpp" />
     <ClCompile Include="network\NetworkManager.cpp" />
     <ClCompile Include="network\NetworkVideoReceiver.cpp" />
@@ -443,6 +444,7 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="network\NetworkConditionSimulator.h" />
     <ClInclude Include="network\NetworkCsvLogger.h" />
     <ClInclude Include="network\NetworkExperimentReporter.h" />
+    <ClInclude Include="network\NetworkExperimentReplay.h" />
     <ClInclude Include="network\NetworkExperimentRunner.h" />
     <ClInclude Include="network\NetworkManager.h" />
     <ClInclude Include="network\NetworkVideoReceiver.h" />

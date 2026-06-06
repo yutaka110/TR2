@@ -77,6 +77,7 @@
 #include "../network/AdaptiveStreamingController.h"
 #include "../network/NetworkCsvLogger.h"
 #include "../network/NetworkExperimentReporter.h"
+#include "../network/NetworkExperimentReplay.h"
 #include "../network/NetworkExperimentRunner.h"
 #include "../network/NetworkRuntimeMode.h"
 #include "../network/NetworkVideoReceiver.h"
@@ -545,6 +546,10 @@ void AppMain::Finalize() {
 
 int AppMain::Run() {
 	D3DResourceLeakChecker leakCheck;
+
+	if (net::RunNetworkExperimentReplayFromEnv("logs")) {
+		return 0;
+	}
 
 	AppBootstrap bootstrap;
 	if (!bootstrap.Initialize(hInstance_)) {
@@ -1049,6 +1054,18 @@ int AppMain::Run() {
 			stats.fecEnabled = sender->IsFecEnabled();
 			stats.adaptiveFecEnabled = sender->IsAdaptiveFecEnabled();
 			stats.fecGroupChunkCount = sender->GetFecGroupChunkCount();
+			const NetworkManager::AdaptiveFecDecisionTelemetry fecDecision =
+				sender->GetAdaptiveFecDecisionTelemetry();
+			stats.adaptiveFecDecisionReason =
+				fecDecision.decisionReason;
+			stats.adaptiveFecHoldReason =
+				fecDecision.holdReason;
+			stats.adaptiveFecG8ToG4Recovery =
+				fecDecision.g8ToG4Recovery;
+			stats.adaptiveFecEmergencyG2Active =
+				fecDecision.emergencyG2Active;
+			stats.adaptiveFecEarlyOffReason =
+				fecDecision.earlyOffReason;
 
 			const net::PacketPacerStats pacingStats =
 				sender->GetPacingStats();
@@ -1224,6 +1241,10 @@ int AppMain::Run() {
 				adaptiveState.lastFecRecoveredFrameDelta;
 			stats.adaptiveFecRecoveredChunkDelta =
 				adaptiveState.lastFecRecoveredChunkDelta;
+			stats.adaptiveFecQualityHoldActive =
+				adaptiveState.lastAdaptiveFecQualityHoldActive;
+			stats.adaptiveFecQualityHoldCanceled =
+				adaptiveState.lastAdaptiveFecQualityHoldCanceled;
 		}
 
 		if (experiment) {
