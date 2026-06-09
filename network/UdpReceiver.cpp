@@ -12,8 +12,28 @@ namespace net {
 namespace {
 
     constexpr uint64_t kDefaultFreshnessDropThresholdUs = 120000;
-    constexpr uint64_t kRecoveryFreshnessSlackUs = 25000;
+    constexpr uint64_t kRecoveryFreshnessSlackUs = 10000;
     constexpr uint64_t kMinimumRecoveryExpireUs = 40000;
+    constexpr uint32_t kDefaultJitterBufferTargetDelayMs = 0;
+
+    uint32_t DefaultJitterBufferTargetDelayMs() {
+        char text[64]{};
+        const DWORD length = GetEnvironmentVariableA(
+            "RNVP_JITTER_TARGET_DELAY_MS",
+            text,
+            static_cast<DWORD>(sizeof(text)));
+        if (length == 0 || length >= sizeof(text)) {
+            return kDefaultJitterBufferTargetDelayMs;
+        }
+
+        char* end = nullptr;
+        const long value = strtol(text, &end, 10);
+        if (end == text || value < 0) {
+            return kDefaultJitterBufferTargetDelayMs;
+        }
+
+        return static_cast<uint32_t>((std::min<long>)(value, 200));
+    }
 
     uint64_t FreshnessDropThresholdUs() {
         static const uint64_t thresholdUs = []() {
@@ -57,11 +77,27 @@ namespace {
             recoveryExpireUs - kRecoveryFreshnessSlackUs);
     }
 
+    bool DynamicNackDeadlineEnabled() {
+        static const bool enabled = []() {
+            char text[16]{};
+            const DWORD length = GetEnvironmentVariableA(
+                "RNVP_DYNAMIC_NACK_DEADLINE",
+                text,
+                static_cast<DWORD>(sizeof(text)));
+            if (length == 0 || length >= sizeof(text)) {
+                return true;
+            }
+
+            return text[0] != '0';
+        }();
+        return enabled;
+    }
+
 } // namespace
 
     UdpReceiver::UdpReceiver()
         : reassembler_(&stats_)
-        , jitterBuffer_(30, 8) {
+        , jitterBuffer_(DefaultJitterBufferTargetDelayMs(), 8) {
     }
 
     UdpReceiver::~UdpReceiver() {
@@ -233,6 +269,25 @@ namespace {
 
     void UdpReceiver::NotifyDisplayFrame() {
         stats_.OnDisplayFrame();
+    }
+
+    void UdpReceiver::RequestKeyFrame(uint32_t frameId) {
+        const uint64_t nowUs = NowMicroseconds();
+        if (!hasLastRnvpDataAddr_ ||
+            (lastKeyFrameRequestUs_ != 0 &&
+                nowUs <= lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs)) {
+            return;
+        }
+
+        RnvpHeaderV1 header{};
+        header.streamId = 1;
+        header.frameId = frameId;
+        SendRnvpControl(
+            header,
+            ControlCommand::RequestKeyFrame,
+            frameId,
+            lastRnvpDataAddr_);
+        lastKeyFrameRequestUs_ = nowUs;
     }
 
     void UdpReceiver::PushCompletedFrameToJitterBuffer(
@@ -587,8 +642,10 @@ namespace {
                 packetType == PacketType::Data &&
                 (header.flags & PacketFlag_LastChunk) != 0;
 
+            bool ackSentForPacket = false;
             if (ackInfo.valid && isLastChunk) {
                 SendRnvpAck(header, ackInfo, fromAddr);
+                ackSentForPacket = true;
 
                 if (ackInfo.missingChunkCount > 0) {
                     consecutiveIncompleteFrames_++;
@@ -617,6 +674,11 @@ namespace {
 
             if (completed) {
                 consecutiveIncompleteFrames_ = 0;
+                if (ackInfo.valid &&
+                    ackInfo.missingChunkCount == 0 &&
+                    !ackSentForPacket) {
+                    SendRnvpAck(header, ackInfo, fromAddr);
+                }
 
                 PushCompletedFrameToJitterBuffer(
                     std::move(*completed),
@@ -871,6 +933,169 @@ namespace {
         }
     }
 
+    uint64_t UdpReceiver::CalculateDynamicNackDeadlineUs(
+        uint64_t nowUs,
+        uint64_t baseDeadlineUs
+    ) {
+        if (!DynamicNackDeadlineEnabled()) {
+            dynamicNackDeadlineUs_ = baseDeadlineUs;
+            stats_.OnDynamicNackDeadlineUpdated(
+                dynamicNackDeadlineUs_,
+                0.0,
+                0.0,
+                0.0,
+                "fixed-disabled");
+            return dynamicNackDeadlineUs_;
+        }
+
+        constexpr uint64_t kUpdateIntervalUs = 250000;
+        constexpr uint64_t kStepUs = 5000;
+        constexpr uint64_t kRecoverStepUs = 1000;
+        constexpr uint64_t kMinDeadlineUs = 15000;
+        constexpr uint64_t kMaxDeadlineUs = 45000;
+
+        if (dynamicNackDeadlineUs_ == 0) {
+            dynamicNackDeadlineUs_ = baseDeadlineUs;
+        }
+
+        const uint64_t recoveryExpireUs = NackRecoveryExpireUs();
+        const uint64_t maxDeadlineWithSlack =
+            recoveryExpireUs > kFrameNackMinRecoverySlackUs + kRecoverStepUs
+            ? recoveryExpireUs - kFrameNackMinRecoverySlackUs - kRecoverStepUs
+            : baseDeadlineUs;
+        const uint64_t maxAllowedDeadlineUs =
+            (std::min)(kMaxDeadlineUs, maxDeadlineWithSlack);
+        const uint64_t minAllowedDeadlineUs =
+            (std::min)(kMinDeadlineUs, maxAllowedDeadlineUs);
+
+        dynamicNackDeadlineUs_ = std::clamp(
+            dynamicNackDeadlineUs_,
+            minAllowedDeadlineUs,
+            maxAllowedDeadlineUs);
+
+        if (lastDynamicNackUpdateUs_ != 0 &&
+            nowUs >= lastDynamicNackUpdateUs_ &&
+            nowUs - lastDynamicNackUpdateUs_ < kUpdateIntervalUs) {
+            return dynamicNackDeadlineUs_;
+        }
+
+        const NetworkStatsSnapshot snapshot = stats_.GetSnapshot();
+        const auto subtractCounter = [](uint64_t current, uint64_t previous) {
+            return current >= previous ? current - previous : uint64_t{ 0 };
+        };
+
+        const uint64_t usefulDelta = subtractCounter(
+            snapshot.retransmitUsefulChunks,
+            lastRetransmitUsefulChunks_);
+        const uint64_t duplicateDelta = subtractCounter(
+            snapshot.retransmitDuplicatePackets,
+            lastRetransmitDuplicatePackets_);
+        const uint64_t lateAfterCompletedDelta = subtractCounter(
+            snapshot.retransmitLateAfterCompletedPackets,
+            lastRetransmitLateAfterCompletedPackets_);
+        const uint64_t lateAfterExpiredDelta = subtractCounter(
+            snapshot.retransmitLateAfterExpiredPackets,
+            lastRetransmitLateAfterExpiredPackets_);
+        const uint64_t completedDelta = subtractCounter(
+            snapshot.retransmitCompletedFrames,
+            lastRetransmitCompletedFrames_);
+        const uint64_t expiredDelta = subtractCounter(
+            snapshot.retransmitExpiredFrames,
+            lastRetransmitExpiredFrames_);
+
+        lastRetransmitUsefulChunks_ = snapshot.retransmitUsefulChunks;
+        lastRetransmitDuplicatePackets_ = snapshot.retransmitDuplicatePackets;
+        lastRetransmitLateAfterCompletedPackets_ =
+            snapshot.retransmitLateAfterCompletedPackets;
+        lastRetransmitLateAfterExpiredPackets_ =
+            snapshot.retransmitLateAfterExpiredPackets;
+        lastRetransmitCompletedFrames_ = snapshot.retransmitCompletedFrames;
+        lastRetransmitExpiredFrames_ = snapshot.retransmitExpiredFrames;
+        lastDynamicNackUpdateUs_ = nowUs;
+
+        const uint64_t duplicatePressureDelta =
+            duplicateDelta + lateAfterCompletedDelta;
+        const uint64_t expiredPressureDelta =
+            expiredDelta + lateAfterExpiredDelta;
+        const uint64_t arrivalDelta =
+            usefulDelta + duplicatePressureDelta + lateAfterExpiredDelta;
+        const uint64_t outcomeDelta =
+            completedDelta + expiredPressureDelta;
+        const double usefulnessRatio =
+            arrivalDelta > 0
+            ? static_cast<double>(usefulDelta) /
+                static_cast<double>(arrivalDelta)
+            : 0.0;
+        const double duplicateRatio =
+            arrivalDelta > 0
+            ? static_cast<double>(duplicatePressureDelta) /
+                static_cast<double>(arrivalDelta)
+            : 0.0;
+        const double expiredAfterRetransmitRatio =
+            outcomeDelta > 0
+            ? static_cast<double>(expiredPressureDelta) /
+                static_cast<double>(outcomeDelta)
+            : 0.0;
+
+        const char* reason = "stable";
+        if (arrivalDelta < 4 && outcomeDelta < 2) {
+            reason = "insufficient-sample";
+            if (dynamicNackDeadlineUs_ > baseDeadlineUs) {
+                dynamicNackDeadlineUs_ =
+                    (std::max)(baseDeadlineUs,
+                        dynamicNackDeadlineUs_ - kRecoverStepUs);
+            }
+            else if (dynamicNackDeadlineUs_ < baseDeadlineUs) {
+                dynamicNackDeadlineUs_ =
+                    (std::min)(baseDeadlineUs,
+                        dynamicNackDeadlineUs_ + kRecoverStepUs);
+            }
+        }
+        else if (expiredPressureDelta > 0 &&
+            expiredAfterRetransmitRatio >= 0.25) {
+            reason = "retransmit-late";
+            dynamicNackDeadlineUs_ =
+                dynamicNackDeadlineUs_ > minAllowedDeadlineUs + kStepUs
+                ? dynamicNackDeadlineUs_ - kStepUs
+                : minAllowedDeadlineUs;
+        }
+        else if (duplicatePressureDelta >= 3 && duplicateRatio >= 0.18) {
+            reason = "duplicate-guard";
+            dynamicNackDeadlineUs_ =
+                (std::min)(maxAllowedDeadlineUs,
+                    dynamicNackDeadlineUs_ + kStepUs);
+        }
+        else if (usefulnessRatio >= 0.80 &&
+            duplicateRatio <= 0.12 &&
+            expiredDelta == 0) {
+            reason = "useful-stable";
+            if (dynamicNackDeadlineUs_ > baseDeadlineUs) {
+                dynamicNackDeadlineUs_ =
+                    (std::max)(baseDeadlineUs,
+                        dynamicNackDeadlineUs_ - kRecoverStepUs);
+            }
+            else if (dynamicNackDeadlineUs_ < baseDeadlineUs) {
+                dynamicNackDeadlineUs_ =
+                    (std::min)(baseDeadlineUs,
+                        dynamicNackDeadlineUs_ + kRecoverStepUs);
+            }
+        }
+
+        dynamicNackDeadlineUs_ = std::clamp(
+            dynamicNackDeadlineUs_,
+            minAllowedDeadlineUs,
+            maxAllowedDeadlineUs);
+
+        stats_.OnDynamicNackDeadlineUpdated(
+            dynamicNackDeadlineUs_,
+            usefulnessRatio,
+            duplicateRatio,
+            expiredAfterRetransmitRatio,
+            reason);
+
+        return dynamicNackDeadlineUs_;
+    }
+
     void UdpReceiver::SendDeadlineNacks(uint64_t nowUs) {
         if (!hasLastRnvpDataAddr_) {
             return;
@@ -878,7 +1103,9 @@ namespace {
 
         const uint64_t recoveryExpireUs = NackRecoveryExpireUs();
         const uint64_t nackDeadlineUs =
-            NackInitialDeadlineUs(kFrameNackDeadlineUs);
+            CalculateDynamicNackDeadlineUs(
+                nowUs,
+                NackInitialDeadlineUs(kFrameNackDeadlineUs));
 
         FrameRecoveryActions recoveryActions =
             reassembler_.CollectRecoveryActions(
@@ -922,7 +1149,15 @@ namespace {
             }
         }
 
-        for (const FrameAckInfo& ackInfo : recoveryActions.nackAckInfos) {
+        for (const FrameAckInfo& candidateAckInfo : recoveryActions.nackAckInfos) {
+            FrameAckInfo ackInfo{};
+            if (!reassembler_.RefreshNackAckInfo(
+                    candidateAckInfo,
+                    NowMicroseconds(),
+                    ackInfo)) {
+                continue;
+            }
+
             RnvpHeaderV1 syntheticHeader{};
             syntheticHeader.streamId = ackInfo.streamId;
             syntheticHeader.frameId = ackInfo.frameId;
@@ -933,7 +1168,11 @@ namespace {
                 lastRnvpDataAddr_
             );
 
-            stats_.OnDeadlineNackSent(ackInfo.missingChunkCount);
+            stats_.OnDeadlineNackSent(
+                ackInfo.missingChunkCount,
+                ackInfo.codecType,
+                ackInfo.keyFrame,
+                ackInfo.largeFrame);
 
             consecutiveIncompleteFrames_++;
 

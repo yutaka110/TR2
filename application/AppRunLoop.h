@@ -89,9 +89,17 @@ public:
     void SetReceivedVideoTexture(
         Microsoft::WRL::ComPtr<ID3D12Resource> texture,
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uploadBuffers,
+        D3D12_GPU_DESCRIPTOR_HANDLE uavGpuHandle,
         D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle,
         uint32_t width,
         uint32_t height);
+    void SetReceivedVideoNv12Textures(
+        Microsoft::WRL::ComPtr<ID3D12Resource> yTexture,
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> yUploadBuffers,
+        D3D12_GPU_DESCRIPTOR_HANDLE ySrvGpuHandle,
+        Microsoft::WRL::ComPtr<ID3D12Resource> uvTexture,
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uvUploadBuffers,
+        D3D12_GPU_DESCRIPTOR_HANDLE uvSrvGpuHandle);
     void PopulateNetworkRenderTimings(net::NetworkStatsSnapshot& stats) const;
 private:
     void BeginFrameSystems();
@@ -164,7 +172,14 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Resource> receivedVideoTexture_;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> receivedVideoUploadBuffers_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> receivedVideoNv12YTexture_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> receivedVideoNv12UVTexture_;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> receivedVideoNv12YUploadBuffers_;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> receivedVideoNv12UVUploadBuffers_;
+    D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoUavGpuHandle_{};
     D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoSrvGpuHandle_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoNv12YSrvGpuHandle_{};
+    D3D12_GPU_DESCRIPTOR_HANDLE receivedVideoNv12UVSrvGpuHandle_{};
     uint32_t receivedVideoWidth_ = 0;
     uint32_t receivedVideoHeight_ = 0;
     uint32_t receivedVideoUploadCursor_ = 0;

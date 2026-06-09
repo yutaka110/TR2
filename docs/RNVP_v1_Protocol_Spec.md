@@ -98,8 +98,8 @@ Validation rules:
 | ---: | --- | --- |
 | 0 | `Unknown` | Codec unspecified. |
 | 1 | `Raw` | Raw frame payload. |
-| 2 | `MJPEG` | JPEG-compressed frame payload. |
-| 3 | `H264` | H.264 payload. Present in the protocol; MJPEG is the current main realtime path. |
+| 2 | `MJPEG` | JPEG-compressed independent-frame payload. Kept as the debug and A/B baseline path. |
+| 3 | `H264` | H.264 Annex-B access-unit payload. This is the default realtime codec path, with MJPEG still available for comparison. |
 
 ## 8. Data Packet
 
@@ -625,20 +625,35 @@ RNVP exports telemetry to CSV and Markdown reports. Important fields include:
 
 The experiment reporter can compare Fixed Quality, Loss Reactive, and QoE/Deadline Adaptive under the same network scenario.
 
-## 24. Current Limitations
+## 24. H.264 Mainline Codec Path
+
+RNVP now carries H.264 as the main realtime codec while preserving MJPEG as a switchable baseline. Each RNVP frame with `codecType = H264` contains exactly one H.264 access unit prefixed by a small access-unit payload header. New senders write the `HAU2` header, while receivers still accept the older `HAU1` header for compatibility. The header records frame id, PTS, codec-config generation, width, height, NAL count, payload size, and flags for IDR, SPS/PPS, decoder sync, and discardability. `HAU2` additionally carries a CRC32 over the Annex-B access-unit bytes.
+
+The transport policy changes slightly for H.264:
+
+- IDR and SPS/PPS access units are treated as decoder synchronization points.
+- The reassembler validates H.264 frame id, exact payload size, and `HAU2` CRC before the frame enters the jitter buffer.
+- The receiver validates Annex-B NAL structure, NAL count, IDR/SPS/PPS flag consistency, and requires SPS/PPS/IDR in the same decoder-sync AU before passing bytes to the decoder.
+- P-frames may be dropped when stale instead of being recovered after their display deadline.
+- If the receiver loses decoder sync or decode fails, it requests a keyframe rather than chasing an old reference chain.
+- MJPEG remains useful for validating RNVP packet recovery because each frame is independently decodable.
+
+This keeps RNVP's existing FEC, deadline NACK, packet pacing, jitter buffer, transport feedback, and QoE adaptive control while making the media layer closer to commercial realtime video systems.
+
+## 25. Current Limitations
 
 - RNVP v1 has no encryption or authentication.
 - There is no congestion-control interoperability with TCP-friendly algorithms.
 - ACK/NACK packets are not themselves retransmitted.
 - Selective retransmission is intentionally limited to one retransmit per frame.
 - Current XOR FEC can recover only one missing chunk per protected group.
-- `H264` is represented in the protocol but MJPEG is the main active realtime path.
+- H.264 is now the default codec path, but its first implementation uses Media Foundation MFTs and does not yet expose every encoder knob through the UI.
 - Packet sequence tracking is used for diagnostics; it is not a full reorder/recovery protocol.
 - Packet pacing is local sender-side smoothing; it is not yet a full congestion-control algorithm.
 - BandwidthEstimator caps adaptive recovery, but it is not yet a full congestion-control algorithm with probing state, fairness, or congestion window modeling.
 - The current implementation targets local and controlled-network experiments, not internet-scale NAT traversal.
 
-## 25. Future Extensions
+## 26. Future Extensions
 
 - Add protocol capability negotiation.
 - Add sender and receiver session ids.
@@ -647,11 +662,11 @@ The experiment reporter can compare Fixed Quality, Loss Reactive, and QoE/Deadli
 - Add congestion window or pacing model.
 - Add explicit probe-up/probe-down states for BandwidthEstimator-driven congestion control.
 - Add authenticated control packets.
-- Add codec-specific metadata extension headers.
+- Add richer codec-specific metadata extension headers for profile, level, color space, and encoder features.
 - Add multi-stream synchronization for audio/video.
 
-## 26. Interview Summary
+## 27. Interview Summary
 
-RNVP v1 is a UDP-based realtime video protocol with explicit frame/chunk headers, lightweight XOR FEC, deadline-based NACK, bounded selective retransmission, packet-level TransportFeedback, packet pacing, jitter buffering, display-deadline dropping, RTT measurement, control commands, and QoE-driven adaptive streaming.
+RNVP v1 is a UDP-based realtime video protocol with explicit frame/chunk headers, H.264 and MJPEG codec modes, lightweight XOR FEC, deadline-based NACK, bounded selective retransmission, packet-level TransportFeedback, packet pacing, jitter buffering, display-deadline dropping, RTT measurement, control commands, and QoE-driven adaptive streaming.
 
 The core design choice is that RNVP does not try to recover every byte or burst every chunk immediately. It paces useful media packets, recovers only missing chunks that can still contribute to a useful frame, and drops stale video to protect interactive latency.

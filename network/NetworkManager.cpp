@@ -5,21 +5,147 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <ctime>
 #include <vector>
 
 namespace {
 
     constexpr uint64_t kDefaultFreshnessDropThresholdUs = 120000;
     constexpr uint64_t kRetransmitFreshnessSlackUs = 15000;
+    constexpr uint16_t kH264LargeRepairChunkThreshold = 8;
+    constexpr uint64_t kDeltaRepairMaxTtlUs = 105000;
+    constexpr uint64_t kLargeH264RepairMaxTtlUs = 150000;
+    constexpr uint64_t kKeyH264RepairMaxTtlUs = 180000;
+    constexpr uint64_t kLargeH264RepairExtraTtlUs = 20000;
+    constexpr uint64_t kKeyH264RepairExtraTtlUs = 40000;
+    constexpr uint64_t kMinRepairTtlUs = 45000;
+    constexpr uint64_t kUrgentRepairRemainingUs = 30000;
+    constexpr uint64_t kFecRescueMinRemainingUs = 22000;
+    constexpr uint64_t kFecRescueLargeLatestRemainingUs = 75000;
+    constexpr uint64_t kFecRescueLargeSingletonLatestRemainingUs = 50000;
+    constexpr uint64_t kFecRescueDeltaLatestRemainingUs = 50000;
+    constexpr uint64_t kFecRescueSingletonLatestRemainingUs = 35000;
+    constexpr uint64_t kFecRescueMinObservationUs = 8000;
+    constexpr uint64_t kFecRescueLargeSingletonObservationUs = 12000;
+    constexpr uint64_t kFecRescueSingletonObservationUs = 12000;
 
     void NetworkDebugLog(const std::string& message) {
         OutputDebugStringA(message.c_str());
         OutputDebugStringA("\n");
 
         std::cout << message << "\n";
+    }
+
+    std::string MakeTraceTimestamp() {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t time = std::chrono::system_clock::to_time_t(now);
+        std::tm localTime{};
+        localtime_s(&localTime, &time);
+
+        std::ostringstream oss;
+        oss << std::put_time(&localTime, "%Y%m%d_%H%M%S");
+        return oss.str();
+    }
+
+    std::ofstream& RetransmitTraceFile() {
+        static std::ofstream file;
+        static bool initialized = false;
+        if (initialized) {
+            return file;
+        }
+
+        initialized = true;
+        std::error_code ec;
+        std::filesystem::create_directories("logs", ec);
+        const std::filesystem::path path =
+            std::filesystem::path("logs") /
+            ("retransmit_trace_" + MakeTraceTimestamp() + ".csv");
+        file.open(path, std::ios::out | std::ios::trunc);
+        if (file) {
+            file
+                << "eventTimeUs,"
+                << "eventName,"
+                << "retransmitSequence,"
+                << "frameId,"
+                << "streamId,"
+                << "codec,"
+                << "keyFrame,"
+                << "chunkIndex,"
+                << "chunkCount,"
+                << "payloadBytes,"
+                << "frameSendTimeUs,"
+                << "retransmitSendTimeUs,"
+                << "ackLatestSequence,"
+                << "retransmitAttempt,"
+                << "ackMissingChunks,"
+                << "ackRequestedChunks,"
+                << "repairPriority,"
+                << "repairTtlUs,"
+                << "repairDeadlineUs,"
+                << "repairPolicy,"
+                << "context\n";
+        }
+        return file;
+    }
+
+    void WriteRetransmitTrace(
+        uint64_t eventTimeUs,
+        const char* eventName,
+        uint32_t retransmitSequence,
+        uint32_t frameId,
+        uint32_t streamId,
+        net::CodecType codecType,
+        bool keyFrame,
+        uint16_t chunkIndex,
+        uint16_t chunkCount,
+        size_t payloadBytes,
+        uint64_t frameSendTimeUs,
+        uint64_t retransmitSendTimeUs,
+        uint32_t ackLatestSequence,
+        uint32_t retransmitAttempt,
+        uint32_t ackMissingChunks,
+        uint32_t ackRequestedChunks,
+        const char* repairPriority,
+        uint64_t repairTtlUs,
+        uint64_t repairDeadlineUs,
+        const char* repairPolicy,
+        const char* context
+    ) {
+        std::ofstream& file = RetransmitTraceFile();
+        if (!file) {
+            return;
+        }
+
+        file
+            << eventTimeUs << ','
+            << (eventName != nullptr ? eventName : "unknown") << ','
+            << retransmitSequence << ','
+            << frameId << ','
+            << streamId << ','
+            << net::ToString(codecType) << ','
+            << (keyFrame ? 1 : 0) << ','
+            << chunkIndex << ','
+            << chunkCount << ','
+            << payloadBytes << ','
+            << frameSendTimeUs << ','
+            << retransmitSendTimeUs << ','
+            << ackLatestSequence << ','
+            << retransmitAttempt << ','
+            << ackMissingChunks << ','
+            << ackRequestedChunks << ','
+            << (repairPriority != nullptr ? repairPriority : "") << ','
+            << repairTtlUs << ','
+            << repairDeadlineUs << ','
+            << (repairPolicy != nullptr ? repairPolicy : "") << ','
+            << (context != nullptr ? context : "")
+            << '\n';
+        file.flush();
     }
 
     uint64_t FreshnessDropThresholdUs() {
@@ -51,6 +177,60 @@ namespace {
         }
 
         return thresholdUs - kRetransmitFreshnessSlackUs;
+    }
+
+    uint64_t FramePacingDeadlineUs(uint64_t sendTimeUs) {
+        char text[64]{};
+        const DWORD length = GetEnvironmentVariableA(
+            "RNVP_FRAME_PACING_DEADLINE_MS",
+            text,
+            static_cast<DWORD>(sizeof(text)));
+        if (length > 0 && length < sizeof(text)) {
+            char* end = nullptr;
+            const double valueMs = strtod(text, &end);
+            if (end != text && valueMs > 0.0) {
+                const double clampedMs = std::clamp(valueMs, 20.0, 300.0);
+                return sendTimeUs +
+                    static_cast<uint64_t>(clampedMs * 1000.0);
+            }
+        }
+
+        constexpr uint64_t kDefaultFramePacingDeadlineUs = 150000;
+        return sendTimeUs + kDefaultFramePacingDeadlineUs;
+    }
+
+    uint64_t RetransmitPacingDeadlineUs(uint64_t sendTimeUs) {
+        char text[64]{};
+        const DWORD length = GetEnvironmentVariableA(
+            "RNVP_RETRANSMIT_PACING_DEADLINE_MS",
+            text,
+            static_cast<DWORD>(sizeof(text)));
+        if (length > 0 && length < sizeof(text)) {
+            char* end = nullptr;
+            const double valueMs = strtod(text, &end);
+            if (end != text && valueMs > 0.0) {
+                const double clampedMs = std::clamp(valueMs, 20.0, 200.0);
+                return sendTimeUs +
+                    static_cast<uint64_t>(clampedMs * 1000.0);
+            }
+        }
+
+        constexpr uint64_t kRetransmitFreshnessSlackUs = 20000;
+        constexpr uint64_t kMinimumRetransmitDeadlineUs = 40000;
+        constexpr uint64_t kMaximumRetransmitDeadlineUs = 120000;
+
+        const uint64_t thresholdUs = FreshnessDropThresholdUs();
+        const uint64_t targetWindowUs =
+            thresholdUs > kRetransmitFreshnessSlackUs
+            ? thresholdUs - kRetransmitFreshnessSlackUs
+            : thresholdUs / 2;
+        const uint64_t urgentWindowUs =
+            std::clamp<uint64_t>(
+                targetWindowUs,
+                kMinimumRetransmitDeadlineUs,
+                kMaximumRetransmitDeadlineUs);
+
+        return sendTimeUs + urgentWindowUs;
     }
 
     bool DefaultRnvpFecEnabled() {
@@ -168,6 +348,10 @@ NetworkManager::NetworkManager(const std::string& ip, uint16_t port) {
     );
 
     packetPacer_.SetTargetBitrateBps(6000000);
+    packetPacer_.SetDropCallback(
+        [this](const std::vector<uint8_t>& packet, const char* context) {
+            return ShouldDropQueuedRepairPacket(packet, context);
+        });
     packetPacer_.Start(
         [this](std::vector<uint8_t>&& packet, const char* context) {
             SendPacketWithSimulation(std::move(packet), context);
@@ -253,10 +437,17 @@ void NetworkManager::SendRNVPFragmented(
     uint32_t frameId,
     net::CodecType codecType,
     uint32_t streamId,
-    bool keyFrame
+    bool keyFrame,
+    const RnvpFrameProtectionOptions& protection
 ) {
     std::vector<uint8_t> bytes(data.begin(), data.end());
-    SendRNVPFragmented(bytes, frameId, codecType, streamId, keyFrame);
+    SendRNVPFragmented(
+        bytes,
+        frameId,
+        codecType,
+        streamId,
+        keyFrame,
+        protection);
 }
 
 void NetworkManager::SendRNVPFragmented(
@@ -264,7 +455,8 @@ void NetworkManager::SendRNVPFragmented(
     uint32_t frameId,
     net::CodecType codecType,
     uint32_t streamId,
-    bool keyFrame
+    bool keyFrame,
+    const RnvpFrameProtectionOptions& protection
 ) {
     SendRNVPFragmentedInternal(
         data,
@@ -273,7 +465,8 @@ void NetworkManager::SendRNVPFragmented(
         streamId,
         keyFrame,
         true,
-        "SendRNVPFragmented"
+        "SendRNVPFragmented",
+        protection
     );
 }
 
@@ -284,7 +477,8 @@ void NetworkManager::SendRNVPFragmentedInternal(
     uint32_t streamId,
     bool keyFrame,
     bool trackFrame,
-    const char* context
+    const char* context,
+    const RnvpFrameProtectionOptions& protection
 ) {
     if (udpSocket_ == INVALID_SOCKET || data.empty()) {
         return;
@@ -302,6 +496,17 @@ void NetworkManager::SendRNVPFragmentedInternal(
 
     const uint16_t chunkCount = static_cast<uint16_t>(chunkCountSizeT);
     const uint64_t sendTimeUs = NowMicroseconds();
+    const bool frameFecEnabled =
+        (IsFecEnabled() || protection.forceFec) &&
+        chunkCount > 1;
+    const uint16_t frameFecGroupChunkCount =
+        frameFecEnabled
+        ? (
+            protection.fecGroupChunkCountOverride > 0
+            ? ClampRnvpFecGroupChunkCount(
+                protection.fecGroupChunkCountOverride)
+            : GetFecGroupChunkCount())
+        : 0;
 
     if (!SendRNVPFramePackets(
         data,
@@ -310,7 +515,8 @@ void NetworkManager::SendRNVPFragmentedInternal(
         streamId,
         keyFrame,
         sendTimeUs,
-        context
+        context,
+        protection
     )) {
         return;
     }
@@ -323,7 +529,9 @@ void NetworkManager::SendRNVPFragmentedInternal(
             streamId,
             keyFrame,
             chunkCount,
-            sendTimeUs
+            sendTimeUs,
+            frameFecEnabled,
+            frameFecGroupChunkCount
         );
     }
 }
@@ -335,7 +543,8 @@ bool NetworkManager::SendRNVPFramePackets(
     uint32_t streamId,
     bool keyFrame,
     uint64_t sendTimeUs,
-    const char* context
+    const char* context,
+    const RnvpFrameProtectionOptions& protection
 ) {
     if (udpSocket_ == INVALID_SOCKET || data.empty()) {
         return false;
@@ -350,6 +559,13 @@ bool NetworkManager::SendRNVPFramePackets(
     }
 
     const uint16_t chunkCount = static_cast<uint16_t>(chunkCountSizeT);
+
+    const net::PacketPacingPriority dataPriority =
+        protection.highPriorityData
+        ? net::PacketPacingPriority::High
+        : net::PacketPacingPriority::Normal;
+    const uint64_t dataDeadlineUs =
+        FramePacingDeadlineUs(sendTimeUs) + protection.extraPacingDeadlineUs;
 
     for (uint16_t i = 0; i < chunkCount; ++i) {
         const size_t offset = static_cast<size_t>(i) * maxPayload;
@@ -392,8 +608,8 @@ bool NetworkManager::SendRNVPFramePackets(
         SendPacedPacketWithSimulation(
             std::move(packet),
             context,
-            net::PacketPacingPriority::Normal,
-            sendTimeUs + 150000ull
+            dataPriority,
+            dataDeadlineUs
         );
     }
 
@@ -405,7 +621,8 @@ bool NetworkManager::SendRNVPFramePackets(
         keyFrame,
         chunkCount,
         sendTimeUs,
-        context
+        context,
+        protection
     );
 
     return true;
@@ -419,9 +636,10 @@ bool NetworkManager::SendRNVPFecParity(
     bool keyFrame,
     uint16_t chunkCount,
     uint64_t sendTimeUs,
-    const char* context
+    const char* context,
+    const RnvpFrameProtectionOptions& protection
 ) {
-    if (!IsFecEnabled() ||
+    if ((!IsFecEnabled() && !protection.forceFec) ||
         udpSocket_ == INVALID_SOCKET ||
         data.empty() ||
         chunkCount <= 1) {
@@ -435,7 +653,16 @@ bool NetworkManager::SendRNVPFecParity(
         return false;
     }
 
-    const uint16_t groupChunkCount = GetFecGroupChunkCount();
+    const uint16_t groupChunkCount =
+        protection.fecGroupChunkCountOverride > 0
+        ? ClampRnvpFecGroupChunkCount(protection.fecGroupChunkCountOverride)
+        : GetFecGroupChunkCount();
+    const net::PacketPacingPriority fecPriority =
+        protection.highPriorityFec
+        ? net::PacketPacingPriority::High
+        : net::PacketPacingPriority::Normal;
+    const uint64_t fecDeadlineUs =
+        FramePacingDeadlineUs(sendTimeUs) + protection.extraPacingDeadlineUs;
     bool sentAnyParity = false;
 
     for (uint32_t groupStartValue = 0;
@@ -541,8 +768,8 @@ bool NetworkManager::SendRNVPFecParity(
         SendPacedPacketWithSimulation(
             std::move(packet),
             context,
-            net::PacketPacingPriority::Normal,
-            sendTimeUs + 150000ull
+            fecPriority,
+            fecDeadlineUs
         );
         sentAnyParity = true;
     }
@@ -558,7 +785,11 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
     bool keyFrame,
     uint64_t sendTimeUs,
     const std::vector<uint16_t>& chunkIndices,
-    const char* context
+    const char* context,
+    uint32_t ackLatestSequence,
+    uint32_t retransmitAttempt,
+    uint32_t ackMissingChunks,
+    uint64_t originalFrameSendTimeUs
 ) {
     if (udpSocket_ == INVALID_SOCKET || data.empty() || chunkIndices.empty()) {
         return 0;
@@ -574,9 +805,76 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
 
     const uint16_t chunkCount = static_cast<uint16_t>(chunkCountSizeT);
     uint32_t sentChunkCount = 0;
+    SentFrameRecord repairRecord{};
+    repairRecord.frameId = frameId;
+    repairRecord.streamId = streamId;
+    repairRecord.codecType = codecType;
+    repairRecord.chunkCount = chunkCount;
+    repairRecord.sendTimeUs =
+        originalFrameSendTimeUs != 0
+        ? originalFrameSendTimeUs
+        : sendTimeUs;
+    repairRecord.keyFrame = keyFrame;
 
     for (uint16_t chunkIndex : chunkIndices) {
         if (chunkIndex >= chunkCount) {
+            continue;
+        }
+
+        bool completedAck = false;
+        bool ttlExpired = false;
+        const uint64_t nowUs = NowMicroseconds();
+        const RepairPacketPolicy repairPolicy =
+            BuildRepairPacketPolicy(
+                repairRecord,
+                nowUs,
+                ackMissingChunks,
+                static_cast<uint32_t>(chunkIndices.size()));
+        {
+            std::lock_guard<std::mutex> lock(sentFramesMutex_);
+            if (ShouldSkipRepairForFrameLocked(
+                    streamId,
+                    frameId,
+                    nowUs,
+                    completedAck,
+                    ttlExpired)) {
+                lateRepairSavedPackets_++;
+                if (completedAck) {
+                    repairCanceledByCompleteAckPackets_++;
+                }
+                else if (ttlExpired) {
+                    repairSkippedByTtlPackets_++;
+                }
+            }
+        }
+        if (completedAck || ttlExpired) {
+            WriteRetransmitTrace(
+                nowUs,
+                completedAck
+                    ? "retransmit-skipped-complete-ack"
+                    : "retransmit-skipped-ttl",
+                0,
+                frameId,
+                streamId,
+                codecType,
+                keyFrame,
+                chunkIndex,
+                chunkCount,
+                0,
+                originalFrameSendTimeUs != 0
+                    ? originalFrameSendTimeUs
+                    : sendTimeUs,
+                nowUs,
+                ackLatestSequence,
+                retransmitAttempt,
+                ackMissingChunks,
+                static_cast<uint32_t>(chunkIndices.size()),
+                ToRepairPriorityString(repairPolicy.priority),
+                repairPolicy.ttlUs,
+                repairPolicy.deadlineUs,
+                repairPolicy.reason,
+                context
+            );
             continue;
         }
 
@@ -603,6 +901,10 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
         header.flags = (chunkIndex == chunkCount - 1)
             ? net::PacketFlag_LastChunk
             : net::PacketFlag_None;
+        header.flags = net::AddPacketFlag(
+            header.flags,
+            net::PacketFlag_Retransmit
+        );
         if (keyFrame) {
             header.flags = net::AddPacketFlag(header.flags, net::PacketFlag_KeyFrame);
         }
@@ -620,8 +922,33 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
         SendPacedPacketWithSimulation(
             std::move(packet),
             context,
-            net::PacketPacingPriority::High,
-            sendTimeUs + 150000ull
+            repairPolicy.priority,
+            repairPolicy.deadlineUs
+        );
+        WriteRetransmitTrace(
+            NowMicroseconds(),
+            "retransmit-sent",
+            header.sequence,
+            frameId,
+            streamId,
+            codecType,
+            keyFrame,
+            chunkIndex,
+            chunkCount,
+            payloadSize,
+            originalFrameSendTimeUs != 0
+                ? originalFrameSendTimeUs
+                : sendTimeUs,
+            header.sendTimeUs,
+            ackLatestSequence,
+            retransmitAttempt,
+            ackMissingChunks,
+            static_cast<uint32_t>(chunkIndices.size()),
+            ToRepairPriorityString(repairPolicy.priority),
+            repairPolicy.ttlUs,
+            repairPolicy.deadlineUs,
+            repairPolicy.reason,
+            context
         );
         sentChunkCount++;
     }
@@ -636,7 +963,9 @@ void NetworkManager::TrackSentFrame(
     uint32_t streamId,
     bool keyFrame,
     uint16_t chunkCount,
-    uint64_t sendTimeUs
+    uint64_t sendTimeUs,
+    bool fecEnabled,
+    uint16_t fecGroupChunkCount
 ) {
     SentFrameRecord record{};
     record.frameId = frameId;
@@ -645,6 +974,8 @@ void NetworkManager::TrackSentFrame(
     record.chunkCount = chunkCount;
     record.sendTimeUs = sendTimeUs;
     record.keyFrame = keyFrame;
+    record.fecEnabled = fecEnabled;
+    record.fecGroupChunkCount = fecGroupChunkCount;
     record.payload = data;
 
     std::lock_guard<std::mutex> lock(sentFramesMutex_);
@@ -671,6 +1002,712 @@ void NetworkManager::TrackSentFrame(
     while (sentFrames_.size() > kSentFrameHistoryLimit) {
         sentFrames_.pop_front();
     }
+}
+
+bool NetworkManager::IsFrameCompleteAckedLocked(
+    uint32_t streamId,
+    uint32_t frameId
+) const {
+    const auto frameIt = std::find_if(
+        sentFrames_.begin(),
+        sentFrames_.end(),
+        [streamId, frameId](const SentFrameRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId &&
+                candidate.acked;
+        });
+    if (frameIt != sentFrames_.end()) {
+        return true;
+    }
+
+    return std::any_of(
+        completedFrameAcks_.begin(),
+        completedFrameAcks_.end(),
+        [streamId, frameId](const CompletedFrameAckRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId;
+        });
+}
+
+void NetworkManager::RememberFrameCompleteAckLocked(
+    uint32_t streamId,
+    uint32_t frameId,
+    uint64_t ackTimeUs
+) {
+    auto existing = std::find_if(
+        completedFrameAcks_.begin(),
+        completedFrameAcks_.end(),
+        [streamId, frameId](const CompletedFrameAckRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId;
+        });
+    if (existing != completedFrameAcks_.end()) {
+        existing->ackTimeUs = ackTimeUs;
+        return;
+    }
+
+    CompletedFrameAckRecord record{};
+    record.streamId = streamId;
+    record.frameId = frameId;
+    record.ackTimeUs = ackTimeUs;
+    completedFrameAcks_.push_back(record);
+    while (completedFrameAcks_.size() > kCompletedFrameAckHistoryLimit) {
+        completedFrameAcks_.pop_front();
+    }
+}
+
+bool NetworkManager::ShouldSkipRepairForFrameLocked(
+    uint32_t streamId,
+    uint32_t frameId,
+    uint64_t nowUs,
+    bool& completedAck,
+    bool& ttlExpired
+) const {
+    completedAck = false;
+    ttlExpired = false;
+
+    if (IsFrameCompleteAckedLocked(streamId, frameId)) {
+        completedAck = true;
+        return true;
+    }
+
+    const auto record = std::find_if(
+        sentFrames_.begin(),
+        sentFrames_.end(),
+        [streamId, frameId](const SentFrameRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId;
+        });
+    if (record == sentFrames_.end()) {
+        ttlExpired = true;
+        return true;
+    }
+
+    const uint64_t retransmitDeadlineUs =
+        CalculateRepairTtlUs(*record);
+    if (nowUs > record->sendTimeUs &&
+        nowUs - record->sendTimeUs > retransmitDeadlineUs) {
+        ttlExpired = true;
+        return true;
+    }
+
+    return false;
+}
+
+bool NetworkManager::IsLargeRepairFrame(
+    const SentFrameRecord& record
+) const {
+    return record.codecType == net::CodecType::H264 &&
+        record.chunkCount >= kH264LargeRepairChunkThreshold;
+}
+
+uint64_t NetworkManager::CalculateRepairTtlUs(
+    const SentFrameRecord& record
+) const {
+    const uint64_t freshnessDeadlineUs = RetransmitFreshnessDeadlineUs();
+    if (record.codecType != net::CodecType::H264) {
+        return std::clamp<uint64_t>(
+            freshnessDeadlineUs,
+            kMinRepairTtlUs,
+            kDeltaRepairMaxTtlUs);
+    }
+
+    if (record.keyFrame) {
+        return std::clamp<uint64_t>(
+            FreshnessDropThresholdUs() + kKeyH264RepairExtraTtlUs,
+            kMinRepairTtlUs,
+            kKeyH264RepairMaxTtlUs);
+    }
+
+    if (IsLargeRepairFrame(record)) {
+        return std::clamp<uint64_t>(
+            FreshnessDropThresholdUs() + kLargeH264RepairExtraTtlUs,
+            kMinRepairTtlUs,
+            kLargeH264RepairMaxTtlUs);
+    }
+
+    return std::clamp<uint64_t>(
+        freshnessDeadlineUs,
+        kMinRepairTtlUs,
+        kDeltaRepairMaxTtlUs);
+}
+
+NetworkManager::RepairPacketPolicy NetworkManager::BuildRepairPacketPolicy(
+    const SentFrameRecord& record,
+    uint64_t nowUs,
+    uint32_t ackMissingChunks,
+    uint32_t requestedChunks
+) const {
+    (void)ackMissingChunks;
+
+    RepairPacketPolicy policy{};
+    policy.ttlUs = CalculateRepairTtlUs(record);
+    policy.deadlineUs = record.sendTimeUs + policy.ttlUs;
+
+    const uint64_t remainingUs =
+        policy.deadlineUs > nowUs
+        ? policy.deadlineUs - nowUs
+        : 0;
+
+    if (record.codecType == net::CodecType::H264 && record.keyFrame) {
+        policy.priority = net::PacketPacingPriority::Critical;
+        policy.reason = "h264-key-critical";
+        return policy;
+    }
+
+    if (IsLargeRepairFrame(record)) {
+        policy.priority = net::PacketPacingPriority::High;
+        policy.reason = "h264-large-au";
+        return policy;
+    }
+
+    if (record.codecType == net::CodecType::H264 &&
+        requestedChunks <= 2 &&
+        remainingUs <= kUrgentRepairRemainingUs) {
+        policy.priority = net::PacketPacingPriority::High;
+        policy.reason = "h264-delta-urgent-small-loss";
+        return policy;
+    }
+
+    policy.priority = net::PacketPacingPriority::Normal;
+    policy.reason =
+        record.codecType == net::CodecType::H264
+        ? "h264-delta-normal"
+        : "non-h264-normal";
+    return policy;
+}
+
+std::vector<uint16_t>
+NetworkManager::FilterRepairChunksForFecLikelyRecoveryLocked(
+    const SentFrameRecord& record,
+    const net::AckPayload& ack,
+    uint32_t retransmitAttempt,
+    uint64_t nowUs
+) {
+    if (!record.fecEnabled ||
+        record.fecGroupChunkCount < 2 ||
+        record.codecType != net::CodecType::H264 ||
+        record.keyFrame ||
+        ack.missingChunkIndices.empty()) {
+        return ack.missingChunkIndices;
+    }
+
+    const uint16_t groupChunkCount = record.fecGroupChunkCount;
+    const uint32_t groupCount =
+        (static_cast<uint32_t>(record.chunkCount) + groupChunkCount - 1) /
+        groupChunkCount;
+    if (groupCount == 0) {
+        return ack.missingChunkIndices;
+    }
+
+    std::vector<uint16_t> missingPerGroup(groupCount, 0);
+    for (uint16_t chunkIndex : ack.missingChunkIndices) {
+        if (chunkIndex >= record.chunkCount) {
+            continue;
+        }
+
+        const uint32_t groupIndex = chunkIndex / groupChunkCount;
+        if (groupIndex < missingPerGroup.size()) {
+            missingPerGroup[groupIndex]++;
+        }
+    }
+
+    std::vector<uint16_t> filtered;
+    filtered.reserve(ack.missingChunkIndices.size());
+    std::vector<uint16_t> suppressed;
+    suppressed.reserve(ack.missingChunkIndices.size());
+
+    const bool largeFrame = IsLargeRepairFrame(record);
+    for (uint16_t chunkIndex : ack.missingChunkIndices) {
+        if (chunkIndex >= record.chunkCount) {
+            continue;
+        }
+
+        const uint32_t groupIndex = chunkIndex / groupChunkCount;
+        const uint16_t missingInGroup =
+            groupIndex < missingPerGroup.size()
+            ? missingPerGroup[groupIndex]
+            : 0;
+        const bool fecCanCoverGroup = missingInGroup == 1;
+
+        if (fecCanCoverGroup) {
+            suppressed.push_back(chunkIndex);
+            continue;
+        }
+
+        filtered.push_back(chunkIndex);
+    }
+
+    if (suppressed.empty()) {
+        return ack.missingChunkIndices;
+    }
+
+    repairSuppressedByFecLikelyFrames_++;
+    repairSuppressedByFecLikelyPackets_ += suppressed.size();
+    lateRepairSavedPackets_ += suppressed.size();
+    RememberFecLikelySuppressionLocked(
+        record,
+        static_cast<uint32_t>(suppressed.size()),
+        nowUs);
+
+    const RepairPacketPolicy repairPolicy =
+        BuildRepairPacketPolicy(
+            record,
+            nowUs,
+            ack.missingChunkCount,
+            static_cast<uint32_t>(ack.missingChunkIndices.size()));
+    const char* policyReason =
+        largeFrame
+        ? "sender-fec-likely-large-au-singleton"
+        : "sender-fec-likely-delta";
+
+    for (uint16_t chunkIndex : suppressed) {
+        WriteRetransmitTrace(
+            nowUs,
+            "retransmit-suppressed-fec-likely",
+            0,
+            record.frameId,
+            record.streamId,
+            record.codecType,
+            record.keyFrame,
+            chunkIndex,
+            record.chunkCount,
+            0,
+            record.sendTimeUs,
+            nowUs,
+            ack.latestSequence,
+            retransmitAttempt,
+            ack.missingChunkCount,
+            static_cast<uint32_t>(ack.missingChunkIndices.size()),
+            ToRepairPriorityString(repairPolicy.priority),
+            repairPolicy.ttlUs,
+            repairPolicy.deadlineUs,
+            policyReason,
+            "RNVP ACK FEC-likely repair suppression");
+    }
+
+    return filtered;
+}
+
+void NetworkManager::RememberFecLikelySuppressionLocked(
+    const SentFrameRecord& record,
+    uint32_t suppressedPackets,
+    uint64_t nowUs
+) {
+    if (suppressedPackets == 0) {
+        return;
+    }
+
+    auto existing = std::find_if(
+        fecLikelySuppressionRecords_.begin(),
+        fecLikelySuppressionRecords_.end(),
+        [streamId = record.streamId, frameId = record.frameId](
+            const FecLikelySuppressionRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId &&
+                !candidate.outcomeRecorded;
+        });
+    if (existing != fecLikelySuppressionRecords_.end()) {
+        existing->lastSuppressionTimeUs = nowUs;
+        existing->suppressedPackets += suppressedPackets;
+        return;
+    }
+
+    FecLikelySuppressionRecord suppression{};
+    suppression.frameId = record.frameId;
+    suppression.streamId = record.streamId;
+    suppression.codecType = record.codecType;
+    suppression.keyFrame = record.keyFrame;
+    suppression.chunkCount = record.chunkCount;
+    suppression.frameSendTimeUs = record.sendTimeUs;
+    suppression.firstSuppressionTimeUs = nowUs;
+    suppression.lastSuppressionTimeUs = nowUs;
+    suppression.suppressedPackets = suppressedPackets;
+    fecLikelySuppressionRecords_.push_back(suppression);
+    while (fecLikelySuppressionRecords_.size() >
+        kFecLikelySuppressionHistoryLimit) {
+        fecLikelySuppressionRecords_.pop_front();
+    }
+}
+
+void NetworkManager::MarkFecLikelySuppressionOutcomeLocked(
+    uint32_t streamId,
+    uint32_t frameId,
+    const char* outcome,
+    uint64_t nowUs,
+    uint32_t ackLatestSequence,
+    const char* reason
+) {
+    auto existing = std::find_if(
+        fecLikelySuppressionRecords_.begin(),
+        fecLikelySuppressionRecords_.end(),
+        [streamId, frameId](const FecLikelySuppressionRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId &&
+                !candidate.outcomeRecorded;
+        });
+    if (existing == fecLikelySuppressionRecords_.end()) {
+        return;
+    }
+
+    existing->outcomeRecorded = true;
+    const std::string outcomeText =
+        outcome != nullptr ? outcome : "unknown";
+    if (outcomeText == "completed") {
+        repairFecLikelySuppressedCompletedFrames_++;
+        repairFecLikelySuppressedCompletedPackets_ +=
+            existing->suppressedPackets;
+    }
+    else if (outcomeText == "expired") {
+        repairFecLikelySuppressedExpiredFrames_++;
+        repairFecLikelySuppressedExpiredPackets_ +=
+            existing->suppressedPackets;
+    }
+
+    const char* eventName =
+        outcomeText == "completed"
+        ? "retransmit-suppressed-fec-outcome-completed"
+        : "retransmit-suppressed-fec-outcome-expired";
+    WriteRetransmitTrace(
+        nowUs,
+        eventName,
+        0,
+        existing->frameId,
+        existing->streamId,
+        existing->codecType,
+        existing->keyFrame,
+        0,
+        existing->chunkCount,
+        existing->suppressedPackets,
+        existing->frameSendTimeUs,
+        nowUs,
+        ackLatestSequence,
+        0,
+        0,
+        existing->suppressedPackets,
+        "",
+        0,
+        0,
+        reason != nullptr ? reason : outcomeText.c_str(),
+        "RNVP ACK FEC-likely suppression outcome");
+}
+
+bool NetworkManager::TryMarkFecLikelySuppressionRescueLocked(
+    const SentFrameRecord& record,
+    const net::AckPayload& ack,
+    uint32_t retransmitAttempt,
+    uint64_t nowUs,
+    const char* reason
+) {
+    auto existing = std::find_if(
+        fecLikelySuppressionRecords_.begin(),
+        fecLikelySuppressionRecords_.end(),
+        [streamId = record.streamId, frameId = record.frameId](
+            const FecLikelySuppressionRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId &&
+                !candidate.outcomeRecorded &&
+                !candidate.rescueAttempted;
+        });
+    if (existing == fecLikelySuppressionRecords_.end()) {
+        return false;
+    }
+
+    const bool largeFrame = IsLargeRepairFrame(record);
+    const uint64_t repairTtlUs = CalculateRepairTtlUs(record);
+    const uint64_t repairDeadlineUs = record.sendTimeUs + repairTtlUs;
+    const uint64_t remainingUs =
+        repairDeadlineUs > nowUs
+        ? repairDeadlineUs - nowUs
+        : 0;
+    const uint64_t observationUs =
+        nowUs > existing->firstSuppressionTimeUs
+        ? nowUs - existing->firstSuppressionTimeUs
+        : 0;
+
+    uint32_t missingGroupCount = 0;
+    if (record.fecGroupChunkCount >= 2 && record.chunkCount > 0) {
+        const uint16_t groupChunkCount = record.fecGroupChunkCount;
+        const uint32_t groupCount =
+            (static_cast<uint32_t>(record.chunkCount) +
+                groupChunkCount - 1) /
+            groupChunkCount;
+        std::vector<uint8_t> missingGroups(groupCount, 0);
+        for (uint16_t chunkIndex : ack.missingChunkIndices) {
+            if (chunkIndex >= record.chunkCount) {
+                continue;
+            }
+
+            const uint32_t groupIndex = chunkIndex / groupChunkCount;
+            if (groupIndex < missingGroups.size() &&
+                missingGroups[groupIndex] == 0) {
+                missingGroups[groupIndex] = 1;
+                missingGroupCount++;
+            }
+        }
+    }
+    else {
+        missingGroupCount =
+            static_cast<uint32_t>(ack.missingChunkIndices.size());
+    }
+
+    const bool budgetRescue =
+        reason != nullptr &&
+        std::string(reason).find("budget") != std::string::npos;
+    const bool enoughTimeToArrive =
+        remainingUs >= kFecRescueMinRemainingUs;
+    const bool enoughObservation =
+        observationUs >= kFecRescueMinObservationUs;
+    const bool singletonObservation =
+        observationUs >= kFecRescueSingletonObservationUs;
+    const bool largeSingletonObservation =
+        observationUs >= kFecRescueLargeSingletonObservationUs;
+    const bool multiGroupLoss = missingGroupCount >= 2;
+
+    bool allowRescue = false;
+    const char* gateReason = "rescue-deferred";
+    if (!enoughTimeToArrive) {
+        gateReason = "rescue-too-late";
+    }
+    else if (budgetRescue) {
+        if (largeFrame && !multiGroupLoss) {
+            allowRescue =
+                remainingUs <= kFecRescueLargeSingletonLatestRemainingUs &&
+                largeSingletonObservation;
+            gateReason = allowRescue
+                ? "budget-large-singleton-rescue-allowed"
+                : "budget-large-singleton-wait";
+        }
+        else {
+            allowRescue =
+                largeFrame ||
+                multiGroupLoss ||
+                enoughObservation;
+            gateReason = allowRescue
+                ? "budget-rescue-allowed"
+                : "budget-rescue-deferred";
+        }
+    }
+    else if (largeFrame) {
+        if (multiGroupLoss) {
+            allowRescue =
+                remainingUs <= kFecRescueLargeLatestRemainingUs &&
+                enoughObservation;
+            gateReason = allowRescue
+                ? "large-au-multigroup-rescue-allowed"
+                : "large-au-multigroup-wait";
+        }
+        else {
+            allowRescue =
+                remainingUs <= kFecRescueLargeSingletonLatestRemainingUs &&
+                largeSingletonObservation;
+            gateReason = allowRescue
+                ? "large-au-singleton-rescue-allowed"
+                : "large-au-singleton-wait";
+        }
+    }
+    else if (multiGroupLoss) {
+        allowRescue =
+            remainingUs <= kFecRescueDeltaLatestRemainingUs &&
+            enoughObservation;
+        gateReason = allowRescue
+            ? "delta-multigroup-rescue-allowed"
+            : "delta-multigroup-wait";
+    }
+    else {
+        allowRescue =
+            remainingUs <= kFecRescueSingletonLatestRemainingUs &&
+            singletonObservation;
+        gateReason = allowRescue
+            ? "delta-singleton-rescue-allowed"
+            : "delta-singleton-wait";
+    }
+
+    existing->rescueAttempted = true;
+    if (!allowRescue) {
+        const RepairPacketPolicy repairPolicy =
+            BuildRepairPacketPolicy(
+                record,
+                nowUs,
+                ack.missingChunkCount,
+                static_cast<uint32_t>(ack.missingChunkIndices.size()));
+        WriteRetransmitTrace(
+            nowUs,
+            "retransmit-fec-suppression-rescue-deferred",
+            0,
+            record.frameId,
+            record.streamId,
+            record.codecType,
+            record.keyFrame,
+            static_cast<uint16_t>(
+                (std::min)(missingGroupCount, uint32_t{ 65535 })),
+            record.chunkCount,
+            ack.missingChunkIndices.size(),
+            record.sendTimeUs,
+            nowUs,
+            ack.latestSequence,
+            retransmitAttempt,
+            ack.missingChunkCount,
+            static_cast<uint32_t>(ack.missingChunkIndices.size()),
+            ToRepairPriorityString(repairPolicy.priority),
+            remainingUs,
+            repairDeadlineUs,
+            gateReason,
+            "RNVP ACK FEC-likely suppression rescue gate");
+        existing->rescueAttempted = false;
+        return false;
+    }
+
+    repairFecLikelySuppressionRescueFrames_++;
+    repairFecLikelySuppressionRescuePackets_ +=
+        ack.missingChunkIndices.size();
+
+    const RepairPacketPolicy repairPolicy =
+        BuildRepairPacketPolicy(
+            record,
+            nowUs,
+            ack.missingChunkCount,
+            static_cast<uint32_t>(ack.missingChunkIndices.size()));
+    WriteRetransmitTrace(
+        nowUs,
+        "retransmit-fec-suppression-rescue",
+        0,
+        record.frameId,
+        record.streamId,
+        record.codecType,
+        record.keyFrame,
+        0,
+        record.chunkCount,
+        ack.missingChunkIndices.size(),
+        record.sendTimeUs,
+        nowUs,
+        ack.latestSequence,
+        retransmitAttempt,
+        ack.missingChunkCount,
+        static_cast<uint32_t>(ack.missingChunkIndices.size()),
+        ToRepairPriorityString(repairPolicy.priority),
+        repairPolicy.ttlUs,
+        repairPolicy.deadlineUs,
+        gateReason,
+        "RNVP ACK FEC-likely suppression rescue");
+    return true;
+}
+
+uint64_t NetworkManager::GetPendingFecLikelySuppressionPacketCountLocked()
+    const {
+    uint64_t pendingPackets = 0;
+    for (const FecLikelySuppressionRecord& record :
+        fecLikelySuppressionRecords_) {
+        if (!record.outcomeRecorded) {
+            pendingPackets += record.suppressedPackets;
+        }
+    }
+
+    return pendingPackets;
+}
+
+const char* NetworkManager::ToRepairPriorityString(
+    net::PacketPacingPriority priority
+) const {
+    switch (priority) {
+    case net::PacketPacingPriority::Critical:
+        return "critical";
+    case net::PacketPacingPriority::High:
+        return "high";
+    case net::PacketPacingPriority::Normal:
+    default:
+        return "normal";
+    }
+}
+
+bool NetworkManager::ShouldDropQueuedRepairPacket(
+    const std::vector<uint8_t>& packet,
+    const char* context
+) {
+    (void)context;
+    if (packet.size() < net::kRnvpHeaderV1Size ||
+        net::ReadU32BE(packet.data()) != net::kRnvpMagic) {
+        return false;
+    }
+
+    net::RnvpHeaderV1 header{};
+    if (!net::DecodeRnvpHeaderV1(packet.data(), packet.size(), header) ||
+        static_cast<net::PacketType>(header.packetType) !=
+            net::PacketType::Data ||
+        !net::HasPacketFlag(header.flags, net::PacketFlag_Retransmit)) {
+        return false;
+    }
+
+    bool completedAck = false;
+    bool ttlExpired = false;
+    const uint64_t nowUs = NowMicroseconds();
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    if (!ShouldSkipRepairForFrameLocked(
+            header.streamId,
+            header.frameId,
+            nowUs,
+            completedAck,
+            ttlExpired)) {
+        return false;
+    }
+
+    repairQueuedButCanceledPackets_++;
+    lateRepairSavedPackets_++;
+    if (completedAck) {
+        repairCanceledByCompleteAckPackets_++;
+    }
+    else if (ttlExpired) {
+        repairSkippedByTtlPackets_++;
+    }
+
+    SentFrameRecord traceRecord{};
+    traceRecord.frameId = header.frameId;
+    traceRecord.streamId = header.streamId;
+    traceRecord.codecType = static_cast<net::CodecType>(header.codecType);
+    traceRecord.chunkCount = header.chunkCount;
+    traceRecord.sendTimeUs = header.sendTimeUs;
+    traceRecord.keyFrame =
+        net::HasPacketFlag(header.flags, net::PacketFlag_KeyFrame);
+    const auto record = std::find_if(
+        sentFrames_.begin(),
+        sentFrames_.end(),
+        [streamId = header.streamId, frameId = header.frameId](
+            const SentFrameRecord& candidate) {
+            return candidate.streamId == streamId &&
+                candidate.frameId == frameId;
+        });
+    if (record != sentFrames_.end()) {
+        traceRecord = *record;
+    }
+    const RepairPacketPolicy repairPolicy =
+        BuildRepairPacketPolicy(traceRecord, nowUs, 0, 0);
+
+    WriteRetransmitTrace(
+        nowUs,
+        completedAck
+            ? "retransmit-queued-canceled-complete-ack"
+            : "retransmit-queued-canceled-ttl",
+        header.sequence,
+        header.frameId,
+        header.streamId,
+        static_cast<net::CodecType>(header.codecType),
+        net::HasPacketFlag(header.flags, net::PacketFlag_KeyFrame),
+        header.chunkIndex,
+        header.chunkCount,
+        header.payloadSize,
+        header.sendTimeUs,
+        nowUs,
+        0,
+        0,
+        0,
+        0,
+        ToRepairPriorityString(repairPolicy.priority),
+        repairPolicy.ttlUs,
+        repairPolicy.deadlineUs,
+        repairPolicy.reason,
+        "PacketPacer pre-send repair cancel"
+    );
+    return true;
 }
 
 // ============================================================
@@ -967,6 +2004,7 @@ void NetworkManager::HandleAckControl(
     bool shouldRetransmit = false;
     bool shouldRequestKeyFrame = false;
     bool shouldCountStaleDrop = false;
+    uint32_t retransmitAttempt = 0;
 
     const uint64_t nowUs = NowMicroseconds();
     const net::NetworkCondition condition = networkSimulator_.GetCondition();
@@ -997,6 +2035,14 @@ void NetworkManager::HandleAckControl(
             if (record != sentFrames_.end()) {
                 record->acked = true;
             }
+            RememberFrameCompleteAckLocked(streamId, ack.frameId, nowUs);
+            MarkFecLikelySuppressionOutcomeLocked(
+                streamId,
+                ack.frameId,
+                "completed",
+                nowUs,
+                ack.latestSequence,
+                "complete-ack");
 
             while (!sentFrames_.empty() &&
                 sentFrames_.front().acked &&
@@ -1010,15 +2056,20 @@ void NetworkManager::HandleAckControl(
         if (record == sentFrames_.end()) {
             shouldCountStaleDrop = true;
             shouldRequestKeyFrame = true;
+            MarkFecLikelySuppressionOutcomeLocked(
+                streamId,
+                ack.frameId,
+                "expired",
+                nowUs,
+                ack.latestSequence,
+                "sender-history-missing");
         }
         else {
             const bool staleByFrameLag =
                 latestSentFrameId_ > record->frameId + kMaxRetransmitFrameLag;
 
             const uint64_t retransmitDeadlineUs =
-                (std::min)(
-                    kMaxRetransmitAgeUs,
-                    RetransmitFreshnessDeadlineUs());
+                CalculateRepairTtlUs(*record);
 
             const bool staleByAge =
                 nowUs > record->sendTimeUs &&
@@ -1027,23 +2078,61 @@ void NetworkManager::HandleAckControl(
 
             const bool retransmitBudgetExhausted =
                 record->retransmitCount >= kMaxRetransmitsPerFrame;
+            const bool budgetRescueAllowed =
+                retransmitBudgetExhausted &&
+                !staleByFrameLag &&
+                !staleByAge &&
+                TryMarkFecLikelySuppressionRescueLocked(
+                    *record,
+                    ack,
+                    record->retransmitCount + 1,
+                    nowUs,
+                    "retransmit-budget-exhausted-rescue");
 
-            if (staleByFrameLag || staleByAge || retransmitBudgetExhausted) {
+            if (staleByFrameLag ||
+                staleByAge ||
+                (retransmitBudgetExhausted && !budgetRescueAllowed)) {
                 shouldCountStaleDrop = true;
                 shouldRequestKeyFrame = true;
+                MarkFecLikelySuppressionOutcomeLocked(
+                    streamId,
+                    ack.frameId,
+                    "expired",
+                    nowUs,
+                    ack.latestSequence,
+                    staleByFrameLag
+                        ? "stale-frame-lag"
+                        : (
+                            staleByAge
+                            ? "stale-age"
+                            : "retransmit-budget-exhausted"));
             }
             else {
-                record->retransmitCount++;
-                resendRecord = *record;
-                resendChunkIndices = ack.missingChunkIndices;
-                shouldRetransmit = true;
-                ackRetransmittedFrameCount_++;
-                ackRetransmittedChunkCount_ += resendChunkIndices.empty()
-                    ? static_cast<uint64_t>(record->chunkCount)
-                    : static_cast<uint64_t>(resendChunkIndices.size());
+                const bool postSuppressionRescue =
+                    budgetRescueAllowed ||
+                    TryMarkFecLikelySuppressionRescueLocked(
+                        *record,
+                        ack,
+                        record->retransmitCount + 1,
+                        nowUs,
+                        "post-suppression-missing-ack");
+                resendChunkIndices =
+                    postSuppressionRescue
+                    ? ack.missingChunkIndices
+                    : FilterRepairChunksForFecLikelyRecoveryLocked(
+                          *record,
+                          ack,
+                          record->retransmitCount + 1,
+                          nowUs);
+                if (!resendChunkIndices.empty()) {
+                    record->retransmitCount++;
+                    retransmitAttempt = record->retransmitCount;
+                    resendRecord = *record;
+                    shouldRetransmit = true;
 
-                if (missingRate >= 0.25) {
-                    shouldRequestKeyFrame = true;
+                    if (missingRate >= 0.25) {
+                        shouldRequestKeyFrame = true;
+                    }
                 }
             }
         }
@@ -1059,8 +2148,7 @@ void NetworkManager::HandleAckControl(
     }
 
     if (shouldRetransmit) {
-        const bool retransmitAsKeyFrame =
-            resendRecord.keyFrame || shouldRequestKeyFrame;
+        const bool retransmitAsKeyFrame = resendRecord.keyFrame;
 
         uint32_t retransmittedChunks = 0;
 
@@ -1073,7 +2161,11 @@ void NetworkManager::HandleAckControl(
                 retransmitAsKeyFrame,
                 NowMicroseconds(),
                 resendChunkIndices,
-                "RNVP ACK Selective Retransmit"
+                "RNVP ACK Selective Retransmit",
+                ack.latestSequence,
+                retransmitAttempt,
+                ack.missingChunkCount,
+                resendRecord.sendTimeUs
             );
         }
         else {
@@ -1084,10 +2176,17 @@ void NetworkManager::HandleAckControl(
                 resendRecord.streamId,
                 retransmitAsKeyFrame,
                 false,
-                "RNVP ACK Full Retransmit"
+                "RNVP ACK Full Retransmit",
+                RnvpFrameProtectionOptions{}
             );
 
             retransmittedChunks = resendRecord.chunkCount;
+        }
+
+        if (retransmittedChunks > 0) {
+            std::lock_guard<std::mutex> lock(sentFramesMutex_);
+            ackRetransmittedFrameCount_++;
+            ackRetransmittedChunkCount_ += retransmittedChunks;
         }
 
         std::ostringstream oss;
@@ -1360,6 +2459,90 @@ uint64_t NetworkManager::GetAckRetransmittedFrameCount() const {
 uint64_t NetworkManager::GetAckRetransmittedChunkCount() const {
     std::lock_guard<std::mutex> lock(sentFramesMutex_);
     return ackRetransmittedChunkCount_;
+}
+
+uint64_t NetworkManager::GetRepairCanceledByCompleteAckPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairCanceledByCompleteAckPackets_;
+}
+
+uint64_t NetworkManager::GetRepairSkippedByTtlPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairSkippedByTtlPackets_;
+}
+
+uint64_t NetworkManager::GetRepairQueuedButCanceledPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairQueuedButCanceledPackets_;
+}
+
+uint64_t NetworkManager::GetRepairSuppressedByFecLikelyFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairSuppressedByFecLikelyFrames_;
+}
+
+uint64_t NetworkManager::GetRepairSuppressedByFecLikelyPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairSuppressedByFecLikelyPackets_;
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressedCompletedFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairFecLikelySuppressedCompletedFrames_;
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressedCompletedPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairFecLikelySuppressedCompletedPackets_;
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressedExpiredFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairFecLikelySuppressedExpiredFrames_;
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressedExpiredPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairFecLikelySuppressedExpiredPackets_;
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressedPendingFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return static_cast<uint64_t>(
+        std::count_if(
+            fecLikelySuppressionRecords_.begin(),
+            fecLikelySuppressionRecords_.end(),
+            [](const FecLikelySuppressionRecord& record) {
+                return !record.outcomeRecorded;
+            }));
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressedPendingPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return GetPendingFecLikelySuppressionPacketCountLocked();
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressionRescueFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairFecLikelySuppressionRescueFrames_;
+}
+
+uint64_t
+NetworkManager::GetRepairFecLikelySuppressionRescuePacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairFecLikelySuppressionRescuePackets_;
+}
+
+uint64_t NetworkManager::GetLateRepairSavedPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return lateRepairSavedPackets_;
 }
 
 uint64_t NetworkManager::GetAckStaleDroppedFrameCount() const {
@@ -2169,8 +3352,22 @@ void NetworkManager::ResetStats() {
         latestSentFrameId_ = 0;
         ackRetransmittedFrameCount_ = 0;
         ackRetransmittedChunkCount_ = 0;
+        repairCanceledByCompleteAckPackets_ = 0;
+        repairSkippedByTtlPackets_ = 0;
+        repairQueuedButCanceledPackets_ = 0;
+        repairSuppressedByFecLikelyFrames_ = 0;
+        repairSuppressedByFecLikelyPackets_ = 0;
+        repairFecLikelySuppressedCompletedFrames_ = 0;
+        repairFecLikelySuppressedCompletedPackets_ = 0;
+        repairFecLikelySuppressedExpiredFrames_ = 0;
+        repairFecLikelySuppressedExpiredPackets_ = 0;
+        repairFecLikelySuppressionRescueFrames_ = 0;
+        repairFecLikelySuppressionRescuePackets_ = 0;
+        lateRepairSavedPackets_ = 0;
         ackStaleDroppedFrameCount_ = 0;
         ackKeyFrameRequestCount_ = 0;
+        completedFrameAcks_.clear();
+        fecLikelySuppressionRecords_.clear();
         forceNextKeyFrame_.store(false, std::memory_order_relaxed);
     }
 

@@ -28,6 +28,14 @@ public:
         std::string earlyOffReason;
     };
 
+    struct RnvpFrameProtectionOptions {
+        uint16_t fecGroupChunkCountOverride = 0;
+        bool forceFec = false;
+        bool highPriorityData = false;
+        bool highPriorityFec = false;
+        uint64_t extraPacingDeadlineUs = 0;
+    };
+
     NetworkManager(const std::string& ip, uint16_t port);
     ~NetworkManager();
 
@@ -46,7 +54,8 @@ public:
         uint32_t frameId,
         net::CodecType codecType = net::CodecType::Raw,
         uint32_t streamId = 1,
-        bool keyFrame = false
+        bool keyFrame = false,
+        const RnvpFrameProtectionOptions& protection = {}
     );
 
     void SendRNVPFragmented(
@@ -54,7 +63,8 @@ public:
         uint32_t frameId,
         net::CodecType codecType = net::CodecType::Raw,
         uint32_t streamId = 1,
-        bool keyFrame = false
+        bool keyFrame = false,
+        const RnvpFrameProtectionOptions& protection = {}
     );
 
     // ============================================================
@@ -78,6 +88,20 @@ public:
     uint64_t GetAckCount() const;
     uint64_t GetAckRetransmittedFrameCount() const;
     uint64_t GetAckRetransmittedChunkCount() const;
+    uint64_t GetRepairCanceledByCompleteAckPacketCount() const;
+    uint64_t GetRepairSkippedByTtlPacketCount() const;
+    uint64_t GetRepairQueuedButCanceledPacketCount() const;
+    uint64_t GetRepairSuppressedByFecLikelyFrameCount() const;
+    uint64_t GetRepairSuppressedByFecLikelyPacketCount() const;
+    uint64_t GetRepairFecLikelySuppressedCompletedFrameCount() const;
+    uint64_t GetRepairFecLikelySuppressedCompletedPacketCount() const;
+    uint64_t GetRepairFecLikelySuppressedExpiredFrameCount() const;
+    uint64_t GetRepairFecLikelySuppressedExpiredPacketCount() const;
+    uint64_t GetRepairFecLikelySuppressedPendingFrameCount() const;
+    uint64_t GetRepairFecLikelySuppressedPendingPacketCount() const;
+    uint64_t GetRepairFecLikelySuppressionRescueFrameCount() const;
+    uint64_t GetRepairFecLikelySuppressionRescuePacketCount() const;
+    uint64_t GetLateRepairSavedPacketCount() const;
     uint64_t GetAckStaleDroppedFrameCount() const;
     uint64_t GetAckKeyFrameRequestCount() const;
     bool IsKeyFrameRequestPending() const;
@@ -137,6 +161,8 @@ private:
         uint32_t retransmitCount = 0;
         bool acked = false;
         bool keyFrame = false;
+        bool fecEnabled = false;
+        uint16_t fecGroupChunkCount = 0;
         std::vector<uint8_t> payload;
     };
 
@@ -146,6 +172,33 @@ private:
         uint32_t packetBytes = 0;
     };
 
+    struct CompletedFrameAckRecord {
+        uint32_t frameId = 0;
+        uint32_t streamId = 0;
+        uint64_t ackTimeUs = 0;
+    };
+
+    struct RepairPacketPolicy {
+        net::PacketPacingPriority priority = net::PacketPacingPriority::Normal;
+        uint64_t ttlUs = 0;
+        uint64_t deadlineUs = 0;
+        const char* reason = "unknown";
+    };
+
+    struct FecLikelySuppressionRecord {
+        uint32_t frameId = 0;
+        uint32_t streamId = 0;
+        net::CodecType codecType = net::CodecType::Unknown;
+        bool keyFrame = false;
+        uint16_t chunkCount = 0;
+        uint64_t frameSendTimeUs = 0;
+        uint64_t firstSuppressionTimeUs = 0;
+        uint64_t lastSuppressionTimeUs = 0;
+        uint32_t suppressedPackets = 0;
+        bool rescueAttempted = false;
+        bool outcomeRecorded = false;
+    };
+
     void SendRNVPFragmentedInternal(
         const std::vector<uint8_t>& data,
         uint32_t frameId,
@@ -153,7 +206,8 @@ private:
         uint32_t streamId,
         bool keyFrame,
         bool trackFrame,
-        const char* context
+        const char* context,
+        const RnvpFrameProtectionOptions& protection
     );
 
     bool SendRNVPFramePackets(
@@ -163,7 +217,8 @@ private:
         uint32_t streamId,
         bool keyFrame,
         uint64_t sendTimeUs,
-        const char* context
+        const char* context,
+        const RnvpFrameProtectionOptions& protection
     );
 
     bool SendRNVPFecParity(
@@ -174,7 +229,8 @@ private:
         bool keyFrame,
         uint16_t chunkCount,
         uint64_t sendTimeUs,
-        const char* context
+        const char* context,
+        const RnvpFrameProtectionOptions& protection
     );
 
     uint32_t SendRNVPSelectedChunks(
@@ -185,7 +241,11 @@ private:
         bool keyFrame,
         uint64_t sendTimeUs,
         const std::vector<uint16_t>& chunkIndices,
-        const char* context
+        const char* context,
+        uint32_t ackLatestSequence = 0,
+        uint32_t retransmitAttempt = 0,
+        uint32_t ackMissingChunks = 0,
+        uint64_t originalFrameSendTimeUs = 0
     );
 
     void TrackSentFrame(
@@ -195,7 +255,64 @@ private:
         uint32_t streamId,
         bool keyFrame,
         uint16_t chunkCount,
-        uint64_t sendTimeUs
+        uint64_t sendTimeUs,
+        bool fecEnabled,
+        uint16_t fecGroupChunkCount
+    );
+    bool IsFrameCompleteAckedLocked(uint32_t streamId, uint32_t frameId) const;
+    void RememberFrameCompleteAckLocked(
+        uint32_t streamId,
+        uint32_t frameId,
+        uint64_t ackTimeUs
+    );
+    bool ShouldSkipRepairForFrameLocked(
+        uint32_t streamId,
+        uint32_t frameId,
+        uint64_t nowUs,
+        bool& completedAck,
+        bool& ttlExpired
+    ) const;
+    bool IsLargeRepairFrame(const SentFrameRecord& record) const;
+    uint64_t CalculateRepairTtlUs(const SentFrameRecord& record) const;
+    RepairPacketPolicy BuildRepairPacketPolicy(
+        const SentFrameRecord& record,
+        uint64_t nowUs,
+        uint32_t ackMissingChunks,
+        uint32_t requestedChunks
+    ) const;
+    std::vector<uint16_t> FilterRepairChunksForFecLikelyRecoveryLocked(
+        const SentFrameRecord& record,
+        const net::AckPayload& ack,
+        uint32_t retransmitAttempt,
+        uint64_t nowUs
+    );
+    void RememberFecLikelySuppressionLocked(
+        const SentFrameRecord& record,
+        uint32_t suppressedPackets,
+        uint64_t nowUs
+    );
+    void MarkFecLikelySuppressionOutcomeLocked(
+        uint32_t streamId,
+        uint32_t frameId,
+        const char* outcome,
+        uint64_t nowUs,
+        uint32_t ackLatestSequence,
+        const char* reason
+    );
+    bool TryMarkFecLikelySuppressionRescueLocked(
+        const SentFrameRecord& record,
+        const net::AckPayload& ack,
+        uint32_t retransmitAttempt,
+        uint64_t nowUs,
+        const char* reason
+    );
+    uint64_t GetPendingFecLikelySuppressionPacketCountLocked() const;
+    const char* ToRepairPriorityString(
+        net::PacketPacingPriority priority
+    ) const;
+    bool ShouldDropQueuedRepairPacket(
+        const std::vector<uint8_t>& packet,
+        const char* context
     );
 
     void HandleAckControl(
@@ -325,8 +442,22 @@ private:
     uint32_t latestSentFrameId_ = 0;
     uint64_t ackRetransmittedFrameCount_ = 0;
     uint64_t ackRetransmittedChunkCount_ = 0;
+    uint64_t repairCanceledByCompleteAckPackets_ = 0;
+    uint64_t repairSkippedByTtlPackets_ = 0;
+    uint64_t repairQueuedButCanceledPackets_ = 0;
+    uint64_t repairSuppressedByFecLikelyFrames_ = 0;
+    uint64_t repairSuppressedByFecLikelyPackets_ = 0;
+    uint64_t repairFecLikelySuppressedCompletedFrames_ = 0;
+    uint64_t repairFecLikelySuppressedCompletedPackets_ = 0;
+    uint64_t repairFecLikelySuppressedExpiredFrames_ = 0;
+    uint64_t repairFecLikelySuppressedExpiredPackets_ = 0;
+    uint64_t repairFecLikelySuppressionRescueFrames_ = 0;
+    uint64_t repairFecLikelySuppressionRescuePackets_ = 0;
+    uint64_t lateRepairSavedPackets_ = 0;
     uint64_t ackStaleDroppedFrameCount_ = 0;
     uint64_t ackKeyFrameRequestCount_ = 0;
+    std::deque<CompletedFrameAckRecord> completedFrameAcks_;
+    std::deque<FecLikelySuppressionRecord> fecLikelySuppressionRecords_;
     std::atomic<bool> forceNextKeyFrame_{ false };
 
     mutable std::mutex sentPacketsMutex_;
@@ -340,6 +471,8 @@ private:
     static constexpr uint32_t kMaxRetransmitsPerFrame = 1;
     static constexpr uint32_t kMaxRetransmitFrameLag = 2;
     static constexpr uint64_t kMaxRetransmitAgeUs = 180000;
+    static constexpr size_t kCompletedFrameAckHistoryLimit = 64;
+    static constexpr size_t kFecLikelySuppressionHistoryLimit = 128;
 
     static constexpr int kControlReceiveBufferSize = 2048;
 };

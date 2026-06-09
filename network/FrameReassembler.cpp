@@ -1,10 +1,24 @@
 #include "FrameReassembler.h"
 
+#include <Windows.h>
+
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 #include <utility>
 
 namespace net {
+    namespace {
+        constexpr uint16_t kH264LargeAuChunkThreshold = 8;
+        constexpr uint64_t kH264DeltaRecoveryExpireUs = 140000;
+        constexpr uint64_t kH264LargeRecoveryExtraUs = 30000;
+        constexpr uint64_t kH264KeyRecoveryExtraUs = 30000;
+        constexpr uint64_t kNackFecGraceUs = 5000;
+        constexpr uint64_t kNackLikelyArrivalGraceUs = 4000;
+        constexpr uint64_t kRecentArrivalWindowUs = 7000;
+        constexpr uint64_t kRepairChunkBudgetUs = 2500;
+        constexpr uint64_t kTooLateDecisionWindowUs = 45000;
+    }
 
     FrameReassembler::FrameReassembler(NetworkStats* stats)
         : stats_(stats) {
@@ -54,12 +68,21 @@ namespace net {
 
         const uint64_t frameKey = MakeFrameKey(parsed.streamId, parsed.frameId);
 
-        if (IsRecentlyCompletedFrame(frameKey)) {
+        if (const RetiredFrameRecord* retired =
+                FindRetiredFrame(frameKey)) {
+            if (parsed.isRetransmit) {
+                EmitRetiredFrameRetransmitOutcome(
+                    *retired,
+                    parsed,
+                    receiveTimeUs);
+            }
             if (stats_) {
                 stats_->OnDuplicatePacket();
             }
 
-            if (outAckInfo && parsed.isRnvp) {
+            if (outAckInfo &&
+                parsed.isRnvp &&
+                retired->outcome == RetiredFrameOutcome::Completed) {
                 FrameAckInfo ack{};
                 ack.valid = true;
                 ack.frameId = parsed.frameId;
@@ -67,6 +90,13 @@ namespace net {
                 ack.latestSequence = parsed.sequence;
                 ack.receivedChunkCount = parsed.chunkCount;
                 ack.missingChunkCount = 0;
+                ack.chunkCount = parsed.chunkCount;
+                ack.codecType = parsed.codecType;
+                ack.keyFrame =
+                    (parsed.flags & PacketFlag_KeyFrame) != 0;
+                ack.largeFrame =
+                    parsed.codecType == CodecType::H264 &&
+                    parsed.chunkCount >= kH264LargeAuChunkThreshold;
                 *outAckInfo = std::move(ack);
             }
 
@@ -83,6 +113,10 @@ namespace net {
             frame.chunkCount = parsed.chunkCount;
             frame.receivedCount = 0;
             frame.latestSequence = parsed.sequence;
+            frame.lastPacketSequence = parsed.sequence;
+            frame.lastPacketChunkIndex = parsed.chunkIndex;
+            frame.keyFrame =
+                (parsed.flags & PacketFlag_KeyFrame) != 0;
 
             frame.firstReceiveTimeUs = receiveTimeUs;
             frame.sendTimeUs = parsed.sendTimeUs;
@@ -95,6 +129,12 @@ namespace net {
         }
 
         if (frame.chunkCount != parsed.chunkCount) {
+            EmitFrameRecoveryOutcome(
+                frame,
+                "chunk-count-mismatch",
+                "rejected",
+                frame.chunkCount - frame.receivedCount,
+                receiveTimeUs);
             if (stats_) {
                 stats_->OnDroppedFrame();
             }
@@ -104,15 +144,33 @@ namespace net {
         }
 
         if (parsed.isFec) {
-            if (StoreFecParity(frame, parsed) && stats_) {
-                stats_->OnFecParityPacket();
+            if (StoreFecParity(frame, parsed)) {
+                frame.fecParityPackets++;
+                if (stats_) {
+                    stats_->OnFecParityPacket();
+                }
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "fec-parity",
+                    "pending",
+                    frame.chunkCount - frame.receivedCount,
+                    receiveTimeUs);
             }
-            frame.lastUpdateTimeUs = receiveTimeUs;
+            UpdateFrameArrivalTiming(frame, receiveTimeUs);
 
             const uint32_t fecRecoveredChunks =
                 TryRecoverMissingChunksWithFec(frame);
-            if (fecRecoveredChunks > 0 && stats_) {
-                stats_->OnFecRecoveredFrame(fecRecoveredChunks);
+            if (fecRecoveredChunks > 0) {
+                frame.fecRecoveredChunks += fecRecoveredChunks;
+                if (stats_) {
+                    stats_->OnFecRecoveredFrame(fecRecoveredChunks);
+                }
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "fec-recovered",
+                    "pending",
+                    frame.chunkCount - frame.receivedCount,
+                    receiveTimeUs);
             }
 
             if (outAckInfo && parsed.isRnvp) {
@@ -126,9 +184,21 @@ namespace net {
                     stats_->OnDeadlineNackRecoveredFrame();
                 }
                 frame.recoveryState = FrameRecoveryState::Recovered;
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    completed ? "completed" : "rejected",
+                    completed ? "completed" : "rejected",
+                    0,
+                    receiveTimeUs);
 
+                RetireFrame(
+                    frameKey,
+                    frame,
+                    completed
+                        ? RetiredFrameOutcome::Completed
+                        : RetiredFrameOutcome::Rejected,
+                    receiveTimeUs);
                 pendingFrames_.erase(frameKey);
-                RetireFrame(frameKey);
 
                 if (completed && stats_) {
                     stats_->OnFrameCompleted(
@@ -145,7 +215,24 @@ namespace net {
             return std::nullopt;
         }
 
+        frame.lastPacketSequence = parsed.sequence;
+        frame.lastPacketChunkIndex = parsed.chunkIndex;
+
         if (frame.received[parsed.chunkIndex]) {
+            if (parsed.isRetransmit) {
+                frame.retransmitDuplicatePackets++;
+                frame.lastRetransmitSequence = parsed.sequence;
+                frame.lastRetransmitChunkIndex = parsed.chunkIndex;
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "retransmit-duplicate",
+                    "pending",
+                    frame.chunkCount - frame.receivedCount,
+                    receiveTimeUs,
+                    parsed.sequence,
+                    parsed.chunkIndex,
+                    true);
+            }
             if (stats_) {
                 stats_->OnDuplicatePacket();
             }
@@ -157,6 +244,24 @@ namespace net {
             return std::nullopt;
         }
 
+        if (frame.nackSent) {
+            frame.postNackReceivedChunks++;
+        }
+        if (parsed.isRetransmit) {
+            frame.retransmitReceivedChunks++;
+            frame.lastRetransmitSequence = parsed.sequence;
+            frame.lastRetransmitChunkIndex = parsed.chunkIndex;
+            EmitFrameRecoveryOutcome(
+                frame,
+                "retransmit-arrived",
+                "pending",
+                frame.chunkCount - frame.receivedCount,
+                receiveTimeUs,
+                parsed.sequence,
+                parsed.chunkIndex,
+                true);
+        }
+
         frame.chunks[parsed.chunkIndex].assign(
             parsed.payload,
             parsed.payload + parsed.payloadSize
@@ -165,12 +270,21 @@ namespace net {
         frame.received[parsed.chunkIndex] = true;
         frame.receivedCount++;
         frame.latestSequence = parsed.sequence;
-        frame.lastUpdateTimeUs = receiveTimeUs;
+        UpdateFrameArrivalTiming(frame, receiveTimeUs);
 
         const uint32_t fecRecoveredChunks =
             TryRecoverMissingChunksWithFec(frame);
-        if (fecRecoveredChunks > 0 && stats_) {
-            stats_->OnFecRecoveredFrame(fecRecoveredChunks);
+        if (fecRecoveredChunks > 0) {
+            frame.fecRecoveredChunks += fecRecoveredChunks;
+            if (stats_) {
+                stats_->OnFecRecoveredFrame(fecRecoveredChunks);
+            }
+            EmitFrameRecoveryOutcome(
+                frame,
+                "fec-recovered",
+                "pending",
+                frame.chunkCount - frame.receivedCount,
+                receiveTimeUs);
         }
 
         if (outAckInfo && parsed.isRnvp) {
@@ -184,9 +298,21 @@ namespace net {
                 stats_->OnDeadlineNackRecoveredFrame();
             }
             frame.recoveryState = FrameRecoveryState::Recovered;
+            EmitFrameRecoveryOutcome(
+                frame,
+                completed ? "completed" : "rejected",
+                completed ? "completed" : "rejected",
+                0,
+                receiveTimeUs);
 
+            RetireFrame(
+                frameKey,
+                frame,
+                completed
+                    ? RetiredFrameOutcome::Completed
+                    : RetiredFrameOutcome::Rejected,
+                receiveTimeUs);
             pendingFrames_.erase(frameKey);
-            RetireFrame(frameKey);
 
             if (completed && stats_) {
                 stats_->OnFrameCompleted(
@@ -246,6 +372,27 @@ namespace net {
                 continue;
             }
 
+            const bool h264Frame = frame.codecType == CodecType::H264;
+            const bool largeH264Frame =
+                h264Frame &&
+                frame.chunkCount >= kH264LargeAuChunkThreshold;
+            const bool protectedH264Frame =
+                h264Frame && (frame.keyFrame || largeH264Frame);
+
+            uint64_t effectiveRecoveryExpireUs = recoveryExpireUs;
+            if (h264Frame && !protectedH264Frame) {
+                effectiveRecoveryExpireUs =
+                    (std::min)(
+                        effectiveRecoveryExpireUs,
+                        kH264DeltaRecoveryExpireUs);
+            }
+            if (largeH264Frame) {
+                effectiveRecoveryExpireUs += kH264LargeRecoveryExtraUs;
+            }
+            if (frame.keyFrame && h264Frame) {
+                effectiveRecoveryExpireUs += kH264KeyRecoveryExtraUs;
+            }
+
             if (frame.recoveryExpireTimeUs == 0) {
                 uint64_t recoveryBaseTimeUs = frame.sendTimeUs;
                 if (recoveryBaseTimeUs == 0 ||
@@ -253,8 +400,14 @@ namespace net {
                     recoveryBaseTimeUs = frame.firstReceiveTimeUs;
                 }
                 frame.recoveryExpireTimeUs =
-                    recoveryBaseTimeUs + recoveryExpireUs;
+                    recoveryBaseTimeUs + effectiveRecoveryExpireUs;
             }
+
+            const uint64_t effectiveNackDeadlineUs = nackDeadlineUs;
+            const uint32_t effectiveMaxNacksPerFrame =
+                protectedH264Frame
+                ? maxNacksPerFrame
+                : maxNacksPerFrame;
 
             const bool expiredByLifetime =
                 nowUs >= frame.recoveryExpireTimeUs;
@@ -275,22 +428,35 @@ namespace net {
                 actions.lastExpiredStreamId = frame.streamId;
 
                 frame.recoveryState = FrameRecoveryState::Expired;
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    expiredByLifetime ? "expired" : "expired-no-slack",
+                    "expired",
+                    expiredInfo.missingChunkCount,
+                    nowUs);
 
                 if (stats_) {
                     stats_->OnDeadlineNackExpiredFrame(
                         expiredInfo.missingChunkCount,
-                        frame.nackSent
+                        frame.nackSent,
+                        expiredInfo.codecType,
+                        expiredInfo.keyFrame,
+                        expiredInfo.largeFrame
                     );
                 }
 
-                RetireFrame(frameKey);
+                RetireFrame(
+                    frameKey,
+                    frame,
+                    RetiredFrameOutcome::Expired,
+                    nowUs);
                 it = pendingFrames_.erase(it);
                 continue;
             }
 
-            if (frame.nackCount >= maxNacksPerFrame ||
+            if (frame.nackCount >= effectiveMaxNacksPerFrame ||
                 nowUs <= frame.firstReceiveTimeUs ||
-                nowUs - frame.firstReceiveTimeUs < nackDeadlineUs) {
+                nowUs - frame.firstReceiveTimeUs < effectiveNackDeadlineUs) {
                 ++it;
                 continue;
             }
@@ -308,10 +474,149 @@ namespace net {
                 continue;
             }
 
+            if (ShouldSuppressNackForFecGrace(
+                    frame,
+                    ackInfo,
+                    nowUs,
+                    minRecoverySlackUs)) {
+                frame.fecGraceSuppressionCount++;
+                frame.lastNackTimeUs = nowUs;
+                actions.suppressedFrameCount++;
+                actions.suppressedMissingChunkCount +=
+                    ackInfo.missingChunkCount;
+                if (stats_) {
+                    stats_->OnNackSuppressed(
+                        "fec-grace",
+                        ackInfo.missingChunkCount);
+                }
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "nack-suppressed-fec-grace",
+                    "pending",
+                    ackInfo.missingChunkCount,
+                    nowUs);
+                if (nackIntervalUs > kNackFecGraceUs) {
+                    frame.lastNackTimeUs =
+                        nowUs - nackIntervalUs + kNackFecGraceUs;
+                }
+                ++it;
+                continue;
+            }
+
+            if (ShouldDeferNackForLikelyArrival(
+                    frame,
+                    ackInfo,
+                    nowUs,
+                    minRecoverySlackUs)) {
+                frame.likelyArrivalSuppressionCount++;
+                frame.lastNackTimeUs = nowUs;
+                actions.suppressedFrameCount++;
+                actions.suppressedMissingChunkCount +=
+                    ackInfo.missingChunkCount;
+                actions.deferredLikelyArrivalCount++;
+                if (stats_) {
+                    stats_->OnNackSuppressed(
+                        "likely-arrival",
+                        ackInfo.missingChunkCount);
+                    stats_->OnNackShapingDecision(
+                        "deferred-likely-arrival",
+                        ackInfo.missingChunkCount,
+                        0,
+                        false);
+                }
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "nack-deferred-likely-arrival",
+                    "pending",
+                    ackInfo.missingChunkCount,
+                    nowUs);
+                if (nackIntervalUs > kNackLikelyArrivalGraceUs) {
+                    frame.lastNackTimeUs =
+                        nowUs - nackIntervalUs + kNackLikelyArrivalGraceUs;
+                }
+                ++it;
+                continue;
+            }
+
+            const uint32_t requestedChunkBudget =
+                CalculateNackRequestedChunkBudget(
+                    frame,
+                    nowUs,
+                    minRecoverySlackUs);
+            if (ShouldSkipNackAsTooLate(
+                    frame,
+                    ackInfo,
+                    nowUs,
+                    minRecoverySlackUs,
+                    requestedChunkBudget)) {
+                actions.suppressedFrameCount++;
+                actions.suppressedMissingChunkCount +=
+                    ackInfo.missingChunkCount;
+                actions.skippedTooLateCount++;
+                actions.expiredFrameCount++;
+                actions.expiredAfterNackCount += frame.nackSent ? 1 : 0;
+                actions.expiredMissingChunkCount +=
+                    ackInfo.missingChunkCount;
+                actions.lastExpiredFrameId = frame.frameId;
+                actions.lastExpiredStreamId = frame.streamId;
+                frame.recoveryState = FrameRecoveryState::Expired;
+                if (stats_) {
+                    stats_->OnNackSuppressed(
+                        "too-late",
+                        ackInfo.missingChunkCount);
+                    stats_->OnNackShapingDecision(
+                        "skipped-too-late",
+                        ackInfo.missingChunkCount,
+                        requestedChunkBudget,
+                        false);
+                    stats_->OnDeadlineNackExpiredFrame(
+                        ackInfo.missingChunkCount,
+                        frame.nackSent,
+                        ackInfo.codecType,
+                        ackInfo.keyFrame,
+                        ackInfo.largeFrame);
+                }
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "nack-skipped-too-late",
+                    "expired",
+                    ackInfo.missingChunkCount,
+                    nowUs);
+                RetireFrame(
+                    frameKey,
+                    frame,
+                    RetiredFrameOutcome::Expired,
+                    nowUs);
+                it = pendingFrames_.erase(it);
+                continue;
+            }
+
             frame.lastNackTimeUs = nowUs;
             frame.nackCount++;
             frame.nackSent = true;
+            frame.nackRequestedChunks +=
+                static_cast<uint32_t>(ackInfo.missingChunkIndices.size());
             frame.recoveryState = FrameRecoveryState::NackSent;
+            actions.predictedUsefulNackCount++;
+            actions.requestedChunkBudget +=
+                (std::min)(
+                    ackInfo.missingChunkCount,
+                    requestedChunkBudget);
+            if (stats_) {
+                stats_->OnNackShapingDecision(
+                    "predicted-useful",
+                    ackInfo.missingChunkCount,
+                    (std::min)(
+                        ackInfo.missingChunkCount,
+                        requestedChunkBudget),
+                    true);
+            }
+            EmitFrameRecoveryOutcome(
+                frame,
+                "nack-sent",
+                "pending",
+                ackInfo.missingChunkCount,
+                nowUs);
             actions.nackAckInfos.push_back(std::move(ackInfo));
             ++it;
         }
@@ -325,9 +630,61 @@ namespace net {
         pendingFrames_.clear();
         recentlyCompletedFrames_.clear();
         recentlyCompletedFrameSet_.clear();
+        retiredFrames_.clear();
+        retiredFrameIndex_.clear();
 
         hasLastRnvpSequence_ = false;
         lastRnvpSequence_ = 0;
+    }
+
+    bool FrameReassembler::RefreshNackAckInfo(
+        const FrameAckInfo& candidate,
+        uint64_t nowUs,
+        FrameAckInfo& outAckInfo
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const uint64_t frameKey =
+            MakeFrameKey(candidate.streamId, candidate.frameId);
+        const auto pending = pendingFrames_.find(frameKey);
+        if (pending == pendingFrames_.end()) {
+            if (stats_) {
+                const char* reason =
+                    FindRetiredFrame(frameKey) != nullptr
+                    ? "preflight-retired"
+                    : "preflight-missing-frame";
+                stats_->OnNackSuppressed(
+                    reason,
+                    candidate.missingChunkCount);
+            }
+            return false;
+        }
+
+        PendingFrame& frame = pending->second;
+        outAckInfo = BuildAckInfoFromPendingFrame(frame);
+        if (!outAckInfo.valid || outAckInfo.missingChunkCount == 0) {
+            if (stats_) {
+                stats_->OnNackSuppressed(
+                    "preflight-completed",
+                    candidate.missingChunkCount);
+            }
+            EmitFrameRecoveryOutcome(
+                frame,
+                "nack-suppressed-preflight-completed",
+                "pending",
+                0,
+                nowUs);
+            return false;
+        }
+
+        if (outAckInfo.missingChunkCount < candidate.missingChunkCount &&
+            stats_) {
+            stats_->OnNackSuppressed(
+                "preflight-shrunk",
+                candidate.missingChunkCount - outAckInfo.missingChunkCount);
+        }
+
+        return true;
     }
 
     bool FrameReassembler::TryParseDataPacket(
@@ -388,6 +745,8 @@ namespace net {
 
             outPacket.isRnvp = true;
             outPacket.isFec = packetType == PacketType::Fec;
+            outPacket.isRetransmit =
+                HasPacketFlag(header.flags, PacketFlag_Retransmit);
             outPacket.sequence = header.sequence;
             outPacket.streamId = header.streamId;
 
@@ -474,7 +833,98 @@ namespace net {
             );
         }
 
+        if (!ValidateCompletedFramePayload(completed)) {
+            return std::nullopt;
+        }
+
         return completed;
+    }
+
+    bool FrameReassembler::ValidateCompletedFramePayload(
+        const CompletedFrame& frame
+    ) const {
+        if (frame.codecType != CodecType::H264) {
+            return true;
+        }
+
+        H264AccessUnitPayloadHeader auHeader{};
+        if (!DecodeH264AccessUnitPayloadHeader(
+                frame.data.data(),
+                frame.data.size(),
+                auHeader)) {
+            if (stats_) {
+                stats_->OnH264ReassemblerAuRejected("payload-header-failure");
+            }
+            static uint32_t logCount = 0;
+            if (logCount < 16) {
+                OutputDebugStringA(
+                    "[FrameReassembler] Dropped H.264 AU: payload header failure.\n");
+                ++logCount;
+            }
+            return false;
+        }
+
+        const size_t expectedBytes =
+            static_cast<size_t>(auHeader.headerBytes) +
+            static_cast<size_t>(auHeader.accessUnitBytes);
+        if (frame.data.size() != expectedBytes) {
+            if (stats_) {
+                stats_->OnH264ReassemblerAuRejected("payload-size-mismatch");
+            }
+            static uint32_t logCount = 0;
+            if (logCount < 16) {
+                std::ostringstream oss;
+                oss << "[FrameReassembler] Dropped H.264 AU: size mismatch. frameId="
+                    << frame.frameId
+                    << " bytes=" << frame.data.size()
+                    << " expected=" << expectedBytes
+                    << "\n";
+                OutputDebugStringA(oss.str().c_str());
+                ++logCount;
+            }
+            return false;
+        }
+
+        if (auHeader.frameId != frame.frameId) {
+            if (stats_) {
+                stats_->OnH264ReassemblerAuRejected("frame-id-mismatch");
+            }
+            static uint32_t logCount = 0;
+            if (logCount < 16) {
+                std::ostringstream oss;
+                oss << "[FrameReassembler] Dropped H.264 AU: frame id mismatch. rnvp="
+                    << frame.frameId
+                    << " au=" << auHeader.frameId
+                    << "\n";
+                OutputDebugStringA(oss.str().c_str());
+                ++logCount;
+            }
+            return false;
+        }
+
+        if (auHeader.magic == kH264AccessUnitPayloadMagicV2) {
+            const uint8_t* accessUnit =
+                frame.data.data() + auHeader.headerBytes;
+            const uint32_t calculatedCrc =
+                ComputeCrc32(accessUnit, auHeader.accessUnitBytes);
+            if (calculatedCrc != auHeader.accessUnitCrc32) {
+                if (stats_) {
+                    stats_->OnH264ReassemblerAuRejected("crc-mismatch");
+                }
+                static uint32_t logCount = 0;
+                if (logCount < 16) {
+                    std::ostringstream oss;
+                    oss << "[FrameReassembler] Dropped H.264 AU: CRC mismatch. frameId="
+                        << frame.frameId
+                        << "\n";
+                    OutputDebugStringA(oss.str().c_str());
+                    ++logCount;
+                }
+                return false;
+            }
+        }
+
+        return true;
     }
 
     bool FrameReassembler::StoreFecParity(
@@ -633,11 +1083,21 @@ namespace net {
                 nowUs - frame.lastUpdateTimeUs > kFrameTimeoutUs) {
 
                 // 未完成のままタイムアウトしたフレームはdrop扱い
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "timeout-expired",
+                    "expired",
+                    frame.chunkCount - frame.receivedCount,
+                    nowUs);
                 if (stats_) {
                     stats_->OnDroppedFrame();
                 }
 
-                RetireFrame(it->first);
+                RetireFrame(
+                    it->first,
+                    frame,
+                    RetiredFrameOutcome::Expired,
+                    nowUs);
                 it = pendingFrames_.erase(it);
             }
             else {
@@ -647,20 +1107,6 @@ namespace net {
     }
 
     void FrameReassembler::RetireFrame(uint64_t frameKey) {
-        TrackCompletedFrame(frameKey);
-    }
-
-    bool FrameReassembler::IsRecentlyCompletedFrame(uint64_t frameKey) const {
-        return recentlyCompletedFrameSet_.find(frameKey) !=
-            recentlyCompletedFrameSet_.end();
-    }
-
-    void FrameReassembler::TrackCompletedFrame(uint64_t frameKey) {
-        if (recentlyCompletedFrameSet_.find(frameKey) !=
-            recentlyCompletedFrameSet_.end()) {
-            return;
-        }
-
         recentlyCompletedFrames_.push_back(frameKey);
         recentlyCompletedFrameSet_.insert(frameKey);
 
@@ -669,6 +1115,274 @@ namespace net {
             recentlyCompletedFrames_.pop_front();
             recentlyCompletedFrameSet_.erase(oldFrameKey);
         }
+    }
+
+    void FrameReassembler::RetireFrame(
+        uint64_t frameKey,
+        const PendingFrame& frame,
+        RetiredFrameOutcome outcome,
+        uint64_t eventTimeUs
+    ) {
+        RetireFrame(frameKey);
+        TrackRetiredFrame(frameKey, frame, outcome, eventTimeUs);
+    }
+
+    bool FrameReassembler::IsRecentlyCompletedFrame(uint64_t frameKey) const {
+        return recentlyCompletedFrameSet_.find(frameKey) !=
+            recentlyCompletedFrameSet_.end();
+    }
+
+    const FrameReassembler::RetiredFrameRecord*
+        FrameReassembler::FindRetiredFrame(uint64_t frameKey) const {
+        const auto found = retiredFrameIndex_.find(frameKey);
+        if (found == retiredFrameIndex_.end() ||
+            found->second >= retiredFrames_.size()) {
+            return nullptr;
+        }
+
+        return &retiredFrames_[found->second];
+    }
+
+    void FrameReassembler::TrackRetiredFrame(
+        uint64_t frameKey,
+        const PendingFrame& frame,
+        RetiredFrameOutcome outcome,
+        uint64_t eventTimeUs
+    ) {
+        if (retiredFrameIndex_.find(frameKey) !=
+            retiredFrameIndex_.end()) {
+            return;
+        }
+
+        RetiredFrameRecord record{};
+        record.frameKey = frameKey;
+        record.frameId = frame.frameId;
+        record.streamId = frame.streamId;
+        record.codecType = frame.codecType;
+        record.keyFrame = frame.keyFrame;
+        record.largeFrame =
+            frame.codecType == CodecType::H264 &&
+            frame.chunkCount >= kH264LargeAuChunkThreshold;
+        record.chunkCount = frame.chunkCount;
+        record.receivedCount = frame.receivedCount;
+        record.nackCount = frame.nackCount;
+        record.retransmitReceivedChunks =
+            frame.retransmitReceivedChunks;
+        record.retransmitDuplicatePackets =
+            frame.retransmitDuplicatePackets;
+        record.sendTimeUs = frame.sendTimeUs;
+        record.firstReceiveTimeUs = frame.firstReceiveTimeUs;
+        record.eventTimeUs = eventTimeUs;
+        record.outcome = outcome;
+
+        retiredFrameIndex_[frameKey] = retiredFrames_.size();
+        retiredFrames_.push_back(std::move(record));
+
+        while (retiredFrames_.size() > kCompletedFrameHistoryLimit) {
+            retiredFrameIndex_.erase(retiredFrames_.front().frameKey);
+            retiredFrames_.pop_front();
+            retiredFrameIndex_.clear();
+            for (size_t i = 0; i < retiredFrames_.size(); ++i) {
+                retiredFrameIndex_[retiredFrames_[i].frameKey] = i;
+            }
+        }
+    }
+
+    void FrameReassembler::EmitRetiredFrameRetransmitOutcome(
+        const RetiredFrameRecord& retired,
+        const ParsedDataPacket& packet,
+        uint64_t receiveTimeUs
+    ) const {
+        if (stats_ == nullptr) {
+            return;
+        }
+
+        const char* eventName = "retransmit-late-after-completed";
+        const char* outcome = "completed";
+        if (retired.outcome == RetiredFrameOutcome::Expired) {
+            eventName = "retransmit-late-after-expired";
+            outcome = "expired";
+        }
+        else if (retired.outcome == RetiredFrameOutcome::Rejected) {
+            eventName = "retransmit-late-after-rejected";
+            outcome = "rejected";
+        }
+
+        const uint32_t missingChunks =
+            retired.chunkCount > retired.receivedCount
+            ? static_cast<uint32_t>(
+                retired.chunkCount - retired.receivedCount)
+            : 0;
+
+        stats_->OnFrameRecoveryOutcome(
+            eventName,
+            outcome,
+            retired.frameId,
+            retired.streamId,
+            retired.codecType,
+            retired.keyFrame,
+            retired.largeFrame,
+            retired.chunkCount,
+            retired.receivedCount,
+            missingChunks,
+            0,
+            0,
+            retired.nackCount,
+            0,
+            0,
+            retired.retransmitReceivedChunks,
+            retired.retransmitDuplicatePackets,
+            packet.sequence,
+            packet.chunkIndex,
+            packet.sequence,
+            packet.chunkIndex,
+            packet.sequence,
+            packet.chunkIndex,
+            true,
+            retired.sendTimeUs,
+            retired.firstReceiveTimeUs != 0
+                ? retired.firstReceiveTimeUs
+                : retired.eventTimeUs,
+            receiveTimeUs);
+    }
+
+    bool FrameReassembler::ShouldSuppressNackForFecGrace(
+        const PendingFrame& frame,
+        const FrameAckInfo& ackInfo,
+        uint64_t nowUs,
+        uint64_t minRecoverySlackUs
+    ) const {
+        if (frame.fecGraceSuppressionCount > 0 ||
+            frame.recoveryExpireTimeUs == 0 ||
+            nowUs >= frame.recoveryExpireTimeUs ||
+            ackInfo.missingChunkCount == 0) {
+            return false;
+        }
+
+        const bool h264Frame = frame.codecType == CodecType::H264;
+        const bool largeH264Frame =
+            h264Frame &&
+            frame.chunkCount >= kH264LargeAuChunkThreshold;
+        (void)largeH264Frame;
+        if (h264Frame && frame.keyFrame) {
+            return false;
+        }
+
+        const uint64_t requiredSlackUs =
+            kNackFecGraceUs + minRecoverySlackUs;
+        if (nowUs + requiredSlackUs >= frame.recoveryExpireTimeUs) {
+            return false;
+        }
+
+        const bool hasFecParity = !frame.fecParityGroups.empty();
+        const bool smallLoss = h264Frame
+            ? ackInfo.missingChunkCount <= 2
+            : ackInfo.missingChunkCount == 1;
+        return hasFecParity || smallLoss;
+    }
+
+    bool FrameReassembler::ShouldDeferNackForLikelyArrival(
+        const PendingFrame& frame,
+        const FrameAckInfo& ackInfo,
+        uint64_t nowUs,
+        uint64_t minRecoverySlackUs
+    ) const {
+        if (frame.likelyArrivalSuppressionCount > 1 ||
+            frame.recoveryExpireTimeUs == 0 ||
+            nowUs >= frame.recoveryExpireTimeUs ||
+            ackInfo.missingChunkCount == 0 ||
+            frame.keyFrame) {
+            return false;
+        }
+
+        const uint64_t requiredSlackUs =
+            kNackLikelyArrivalGraceUs + minRecoverySlackUs;
+        if (nowUs + requiredSlackUs >= frame.recoveryExpireTimeUs) {
+            return false;
+        }
+
+        const bool h264Frame = frame.codecType == CodecType::H264;
+        const bool smallLoss = h264Frame
+            ? ackInfo.missingChunkCount <= 2
+            : ackInfo.missingChunkCount == 1;
+        if (!smallLoss) {
+            return false;
+        }
+
+        const bool recentArrival =
+            frame.lastUpdateTimeUs != 0 &&
+            nowUs >= frame.lastUpdateTimeUs &&
+            nowUs - frame.lastUpdateTimeUs <= kRecentArrivalWindowUs;
+        const bool tightArrivalCadence =
+            frame.recentArrivalIntervalUs > 0 &&
+            frame.recentArrivalIntervalUs <= kRecentArrivalWindowUs;
+        const bool hasFecParity = !frame.fecParityGroups.empty();
+
+        return recentArrival || tightArrivalCadence || hasFecParity;
+    }
+
+    uint32_t FrameReassembler::CalculateNackRequestedChunkBudget(
+        const PendingFrame& frame,
+        uint64_t nowUs,
+        uint64_t minRecoverySlackUs
+    ) const {
+        if (frame.recoveryExpireTimeUs == 0 ||
+            nowUs >= frame.recoveryExpireTimeUs) {
+            return 0;
+        }
+
+        uint64_t slackUs = frame.recoveryExpireTimeUs - nowUs;
+        if (slackUs <= minRecoverySlackUs) {
+            return 0;
+        }
+        slackUs -= minRecoverySlackUs;
+        const uint32_t budget =
+            static_cast<uint32_t>(slackUs / kRepairChunkBudgetUs);
+        return std::clamp<uint32_t>(budget, 1, 64);
+    }
+
+    bool FrameReassembler::ShouldSkipNackAsTooLate(
+        const PendingFrame& frame,
+        const FrameAckInfo& ackInfo,
+        uint64_t nowUs,
+        uint64_t minRecoverySlackUs,
+        uint32_t requestedChunkBudget
+    ) const {
+        if (frame.recoveryExpireTimeUs == 0 ||
+            nowUs >= frame.recoveryExpireTimeUs ||
+            frame.keyFrame ||
+            ackInfo.missingChunkCount <= requestedChunkBudget) {
+            return false;
+        }
+
+        const uint64_t slackUs = frame.recoveryExpireTimeUs - nowUs;
+        if (slackUs > kTooLateDecisionWindowUs + minRecoverySlackUs) {
+            return false;
+        }
+
+        const bool h264Frame = frame.codecType == CodecType::H264;
+        const bool largeH264Frame =
+            h264Frame &&
+            frame.chunkCount >= kH264LargeAuChunkThreshold;
+        if (largeH264Frame && frame.nackCount == 0) {
+            return false;
+        }
+
+        return ackInfo.missingChunkCount >=
+            (std::max<uint32_t>)(3, requestedChunkBudget + 2);
+    }
+
+    void FrameReassembler::UpdateFrameArrivalTiming(
+        PendingFrame& frame,
+        uint64_t receiveTimeUs
+    ) const {
+        if (frame.lastUpdateTimeUs != 0 &&
+            receiveTimeUs >= frame.lastUpdateTimeUs) {
+            frame.previousUpdateTimeUs = frame.lastUpdateTimeUs;
+            frame.recentArrivalIntervalUs =
+                receiveTimeUs - frame.lastUpdateTimeUs;
+        }
+        frame.lastUpdateTimeUs = receiveTimeUs;
     }
 
     uint64_t FrameReassembler::MakeFrameKey(
@@ -691,6 +1405,12 @@ namespace net {
         ack.latestSequence = frame.latestSequence;
 
         ack.receivedChunkCount = frame.receivedCount;
+        ack.chunkCount = frame.chunkCount;
+        ack.codecType = frame.codecType;
+        ack.keyFrame = frame.keyFrame;
+        ack.largeFrame =
+            frame.codecType == CodecType::H264 &&
+            frame.chunkCount >= kH264LargeAuChunkThreshold;
 
         uint32_t totalMissingChunks = 0;
 
@@ -707,6 +1427,51 @@ namespace net {
         ack.missingChunkCount = totalMissingChunks;
 
         return ack;
+    }
+
+    void FrameReassembler::EmitFrameRecoveryOutcome(
+        const PendingFrame& frame,
+        const char* eventName,
+        const char* outcome,
+        uint32_t missingChunks,
+        uint64_t eventTimeUs,
+        uint32_t packetSequence,
+        uint16_t packetChunkIndex,
+        bool packetWasRetransmit
+    ) const {
+        if (stats_ == nullptr || frame.chunkCount == 0) {
+            return;
+        }
+
+        stats_->OnFrameRecoveryOutcome(
+            eventName,
+            outcome,
+            frame.frameId,
+            frame.streamId,
+            frame.codecType,
+            frame.keyFrame,
+            frame.codecType == CodecType::H264 &&
+                frame.chunkCount >= kH264LargeAuChunkThreshold,
+            frame.chunkCount,
+            frame.receivedCount,
+            missingChunks,
+            frame.fecParityPackets,
+            frame.fecRecoveredChunks,
+            frame.nackCount,
+            frame.postNackReceivedChunks,
+            frame.nackRequestedChunks,
+            frame.retransmitReceivedChunks,
+            frame.retransmitDuplicatePackets,
+            frame.lastPacketSequence,
+            frame.lastPacketChunkIndex,
+            frame.lastRetransmitSequence,
+            frame.lastRetransmitChunkIndex,
+            packetSequence,
+            packetChunkIndex,
+            packetWasRetransmit,
+            frame.sendTimeUs,
+            frame.firstReceiveTimeUs,
+            eventTimeUs);
     }
 
     void FrameReassembler::TrackRnvpSequence(const ParsedDataPacket& packet) {

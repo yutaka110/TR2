@@ -2,8 +2,164 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <ctime>
 
 namespace net {
+namespace {
+
+    std::string MakeTimestamp() {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t time = std::chrono::system_clock::to_time_t(now);
+
+        std::tm localTime{};
+        localtime_s(&localTime, &time);
+
+        std::ostringstream oss;
+        oss << std::put_time(&localTime, "%Y%m%d_%H%M%S");
+        return oss.str();
+    }
+
+    std::string EscapeCsv(std::string value) {
+        const bool needsQuote =
+            value.find_first_of(",\"\r\n") != std::string::npos;
+        if (!needsQuote) {
+            return value;
+        }
+
+        std::string escaped;
+        escaped.reserve(value.size() + 2);
+        escaped.push_back('"');
+        for (char ch : value) {
+            if (ch == '"') {
+                escaped.push_back('"');
+            }
+            escaped.push_back(ch);
+        }
+        escaped.push_back('"');
+        return escaped;
+    }
+
+    std::ofstream& FrameRecoveryTraceFile() {
+        static std::ofstream file;
+        static bool initialized = false;
+        if (initialized) {
+            return file;
+        }
+
+        initialized = true;
+        std::error_code ec;
+        std::filesystem::create_directories("logs", ec);
+        const std::filesystem::path path =
+            std::filesystem::path("logs") /
+            ("frame_recovery_trace_" + MakeTimestamp() + ".csv");
+        file.open(path, std::ios::out | std::ios::trunc);
+        if (file) {
+            file
+                << "eventTimeUs,"
+                << "eventName,"
+                << "outcome,"
+                << "frameId,"
+                << "streamId,"
+                << "codec,"
+                << "keyFrame,"
+                << "largeFrame,"
+                << "chunkCount,"
+                << "receivedChunks,"
+                << "missingChunks,"
+                << "fecParityPackets,"
+                << "fecRecoveredChunks,"
+                << "nackCount,"
+                << "postNackReceivedChunks,"
+                << "nackRequestedChunks,"
+                << "retransmitReceivedChunks,"
+                << "retransmitDuplicatePackets,"
+                << "lastPacketSequence,"
+                << "lastPacketChunkIndex,"
+                << "lastRetransmitSequence,"
+                << "lastRetransmitChunkIndex,"
+                << "eventPacketSequence,"
+                << "eventPacketChunkIndex,"
+                << "eventPacketWasRetransmit,"
+                << "sendTimeUs,"
+                << "firstReceiveTimeUs,"
+                << "ageMs\n";
+        }
+        return file;
+    }
+
+    void WriteFrameRecoveryTrace(
+        uint64_t eventTimeUs,
+        const char* eventName,
+        const char* outcome,
+        uint32_t frameId,
+        uint32_t streamId,
+        CodecType codecType,
+        bool keyFrame,
+        bool largeFrame,
+        uint32_t chunkCount,
+        uint32_t receivedChunks,
+        uint32_t missingChunks,
+        uint32_t fecParityPackets,
+        uint32_t fecRecoveredChunks,
+        uint32_t nackCount,
+        uint32_t postNackReceivedChunks,
+        uint32_t nackRequestedChunks,
+        uint32_t retransmitReceivedChunks,
+        uint32_t retransmitDuplicatePackets,
+        uint32_t lastPacketSequence,
+        uint32_t lastPacketChunkIndex,
+        uint32_t lastRetransmitSequence,
+        uint32_t lastRetransmitChunkIndex,
+        uint32_t eventPacketSequence,
+        uint32_t eventPacketChunkIndex,
+        bool eventPacketWasRetransmit,
+        uint64_t sendTimeUs,
+        uint64_t firstReceiveTimeUs,
+        double ageMs
+    ) {
+        std::ofstream& file = FrameRecoveryTraceFile();
+        if (!file) {
+            return;
+        }
+
+        file
+            << eventTimeUs << ','
+            << EscapeCsv(eventName != nullptr ? eventName : "unknown") << ','
+            << EscapeCsv(outcome != nullptr ? outcome : "unknown") << ','
+            << frameId << ','
+            << streamId << ','
+            << EscapeCsv(ToString(codecType)) << ','
+            << (keyFrame ? 1 : 0) << ','
+            << (largeFrame ? 1 : 0) << ','
+            << chunkCount << ','
+            << receivedChunks << ','
+            << missingChunks << ','
+            << fecParityPackets << ','
+            << fecRecoveredChunks << ','
+            << nackCount << ','
+            << postNackReceivedChunks << ','
+            << nackRequestedChunks << ','
+            << retransmitReceivedChunks << ','
+            << retransmitDuplicatePackets << ','
+            << lastPacketSequence << ','
+            << lastPacketChunkIndex << ','
+            << lastRetransmitSequence << ','
+            << lastRetransmitChunkIndex << ','
+            << eventPacketSequence << ','
+            << eventPacketChunkIndex << ','
+            << (eventPacketWasRetransmit ? 1 : 0) << ','
+            << sendTimeUs << ','
+            << firstReceiveTimeUs << ','
+            << ageMs
+            << '\n';
+        file.flush();
+    }
+
+} // namespace
 
     NetworkStats::NetworkStats() {
         Reset();
@@ -255,11 +411,27 @@ namespace net {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
-    void NetworkStats::OnDeadlineNackSent(uint32_t missingChunkCount) {
+    void NetworkStats::OnDeadlineNackSent(
+        uint32_t missingChunkCount,
+        CodecType codecType,
+        bool keyFrame,
+        bool largeFrame
+    ) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         snapshot_.deadlineNackSentFrames++;
         snapshot_.deadlineNackMissingChunks += missingChunkCount;
+        if (codecType == CodecType::H264) {
+            if (keyFrame) {
+                snapshot_.deadlineNackSentH264KeyFrames++;
+            }
+            else if (largeFrame) {
+                snapshot_.deadlineNackSentH264LargeFrames++;
+            }
+            else {
+                snapshot_.deadlineNackSentH264DeltaFrames++;
+            }
+        }
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
@@ -272,12 +444,26 @@ namespace net {
 
     void NetworkStats::OnDeadlineNackExpiredFrame(
         uint32_t missingChunkCount,
-        bool nackSent
+        bool nackSent,
+        CodecType codecType,
+        bool keyFrame,
+        bool largeFrame
     ) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         snapshot_.deadlineNackExpiredDroppedFrames++;
         snapshot_.deadlineNackExpiredMissingChunks += missingChunkCount;
+        if (codecType == CodecType::H264) {
+            if (keyFrame) {
+                snapshot_.deadlineNackExpiredH264KeyFrames++;
+            }
+            else if (largeFrame) {
+                snapshot_.deadlineNackExpiredH264LargeFrames++;
+            }
+            else {
+                snapshot_.deadlineNackExpiredH264DeltaFrames++;
+            }
+        }
 
         if (nackSent) {
             snapshot_.deadlineNackExpiredAfterNackFrames++;
@@ -313,6 +499,291 @@ namespace net {
 
         snapshot_.fecRecoveredFrames++;
         snapshot_.fecRecoveredChunks += recoveredChunkCount;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnH264ReassemblerAuRejected(const char* reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const std::string reasonText =
+            reason != nullptr ? reason : "unknown";
+
+        snapshot_.h264ReassemblerAuRejectedFrames++;
+        snapshot_.h264ReassemblerLastRejectReason = reasonText;
+        if (reasonText == "payload-header-failure") {
+            snapshot_.h264ReassemblerHeaderFailures++;
+        }
+        else if (reasonText == "payload-size-mismatch") {
+            snapshot_.h264ReassemblerPayloadSizeMismatches++;
+        }
+        else if (reasonText == "frame-id-mismatch") {
+            snapshot_.h264ReassemblerFrameIdMismatches++;
+        }
+        else if (reasonText == "crc-mismatch") {
+            snapshot_.h264ReassemblerCrcMismatches++;
+        }
+
+        snapshot_.droppedFrames++;
+        const uint64_t totalFrames =
+            snapshot_.completedFrames + snapshot_.droppedFrames;
+        if (totalFrames > 0) {
+            snapshot_.frameDropRate =
+                static_cast<double>(snapshot_.droppedFrames) /
+                static_cast<double>(totalFrames);
+        }
+
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnFrameRecoveryOutcome(
+        const char* eventName,
+        const char* outcome,
+        uint32_t frameId,
+        uint32_t streamId,
+        CodecType codecType,
+        bool keyFrame,
+        bool largeFrame,
+        uint32_t chunkCount,
+        uint32_t receivedChunks,
+        uint32_t missingChunks,
+        uint32_t fecParityPackets,
+        uint32_t fecRecoveredChunks,
+        uint32_t nackCount,
+        uint32_t postNackReceivedChunks,
+        uint32_t nackRequestedChunks,
+        uint32_t retransmitReceivedChunks,
+        uint32_t retransmitDuplicatePackets,
+        uint32_t lastPacketSequence,
+        uint32_t lastPacketChunkIndex,
+        uint32_t lastRetransmitSequence,
+        uint32_t lastRetransmitChunkIndex,
+        uint32_t eventPacketSequence,
+        uint32_t eventPacketChunkIndex,
+        bool eventPacketWasRetransmit,
+        uint64_t sendTimeUs,
+        uint64_t firstReceiveTimeUs,
+        uint64_t eventTimeUs
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const std::string eventText =
+            eventName != nullptr ? eventName : "unknown";
+        const std::string outcomeText =
+            outcome != nullptr ? outcome : "unknown";
+        double ageMs = 0.0;
+        if (firstReceiveTimeUs != 0 && eventTimeUs >= firstReceiveTimeUs) {
+            ageMs =
+                static_cast<double>(eventTimeUs - firstReceiveTimeUs) /
+                1000.0;
+        }
+
+        snapshot_.frameRecoveryOutcomeEvents++;
+        if (outcomeText == "completed") {
+            snapshot_.frameRecoveryCompletedFrames++;
+        }
+        else if (outcomeText == "expired") {
+            snapshot_.frameRecoveryExpiredFrames++;
+        }
+        else if (outcomeText == "rejected") {
+            snapshot_.frameRecoveryRejectedFrames++;
+        }
+
+        if (eventText == "nack-sent") {
+            snapshot_.frameRecoveryNackSentFrames++;
+        }
+        else if (eventText == "fec-recovered") {
+            snapshot_.frameRecoveryFecRecoveredFrames++;
+        }
+        else if (eventText == "retransmit-arrived") {
+            snapshot_.retransmitUsefulChunks++;
+        }
+        else if (eventText == "retransmit-duplicate") {
+            snapshot_.retransmitDuplicatePackets++;
+        }
+        else if (eventText == "retransmit-late-after-completed") {
+            snapshot_.retransmitLateAfterCompletedPackets++;
+        }
+        else if (eventText == "retransmit-late-after-expired") {
+            snapshot_.retransmitLateAfterExpiredPackets++;
+        }
+        else if (eventText == "retransmit-late-after-rejected") {
+            snapshot_.retransmitLateAfterRejectedPackets++;
+        }
+
+        if (outcomeText == "completed" && retransmitReceivedChunks > 0) {
+            snapshot_.retransmitCompletedFrames++;
+        }
+        else if (outcomeText == "expired" && retransmitReceivedChunks > 0) {
+            snapshot_.retransmitExpiredFrames++;
+        }
+
+        const uint64_t retransmitArrivals =
+            snapshot_.retransmitUsefulChunks +
+            snapshot_.retransmitDuplicatePackets;
+        if (retransmitArrivals > 0) {
+            snapshot_.retransmitUsefulnessRatio =
+                static_cast<double>(snapshot_.retransmitUsefulChunks) /
+                static_cast<double>(retransmitArrivals);
+            snapshot_.retransmitDuplicateRatio =
+                static_cast<double>(snapshot_.retransmitDuplicatePackets) /
+                static_cast<double>(retransmitArrivals);
+        }
+
+        snapshot_.retransmitClassifiedPackets =
+            snapshot_.retransmitUsefulChunks +
+            snapshot_.retransmitDuplicatePackets +
+            snapshot_.retransmitLateAfterCompletedPackets +
+            snapshot_.retransmitLateAfterExpiredPackets +
+            snapshot_.retransmitLateAfterRejectedPackets;
+
+        const uint64_t retransmitOutcomeFrames =
+            snapshot_.retransmitCompletedFrames +
+            snapshot_.retransmitExpiredFrames;
+        if (retransmitOutcomeFrames > 0) {
+            snapshot_.retransmitExpiredAfterUsefulRatio =
+                static_cast<double>(snapshot_.retransmitExpiredFrames) /
+                static_cast<double>(retransmitOutcomeFrames);
+        }
+
+        snapshot_.frameRecoveryLastFrameId = frameId;
+        snapshot_.frameRecoveryLastStreamId = streamId;
+        snapshot_.frameRecoveryLastEvent = eventText;
+        snapshot_.frameRecoveryLastOutcome = outcomeText;
+        snapshot_.frameRecoveryLastCodec = ToString(codecType);
+        snapshot_.frameRecoveryLastKeyFrame = keyFrame;
+        snapshot_.frameRecoveryLastLargeFrame = largeFrame;
+        snapshot_.frameRecoveryLastChunkCount = chunkCount;
+        snapshot_.frameRecoveryLastReceivedChunks = receivedChunks;
+        snapshot_.frameRecoveryLastMissingChunks = missingChunks;
+        snapshot_.frameRecoveryLastFecParityPackets = fecParityPackets;
+        snapshot_.frameRecoveryLastFecRecoveredChunks = fecRecoveredChunks;
+        snapshot_.frameRecoveryLastNackCount = nackCount;
+        snapshot_.frameRecoveryLastPostNackReceivedChunks =
+            postNackReceivedChunks;
+        snapshot_.frameRecoveryLastNackRequestedChunks =
+            nackRequestedChunks;
+        snapshot_.frameRecoveryLastRetransmitReceivedChunks =
+            retransmitReceivedChunks;
+        snapshot_.frameRecoveryLastRetransmitDuplicatePackets =
+            retransmitDuplicatePackets;
+        snapshot_.frameRecoveryLastPacketSequence = lastPacketSequence;
+        snapshot_.frameRecoveryLastPacketChunkIndex = lastPacketChunkIndex;
+        snapshot_.frameRecoveryLastRetransmitSequence =
+            lastRetransmitSequence;
+        snapshot_.frameRecoveryLastRetransmitChunkIndex =
+            lastRetransmitChunkIndex;
+        snapshot_.frameRecoveryLastEventPacketSequence =
+            eventPacketSequence;
+        snapshot_.frameRecoveryLastEventPacketChunkIndex =
+            eventPacketChunkIndex;
+        snapshot_.frameRecoveryLastEventWasRetransmit =
+            eventPacketWasRetransmit;
+        snapshot_.frameRecoveryLastAgeMs = ageMs;
+        snapshot_.lastUpdateTimeUs = eventTimeUs;
+
+        WriteFrameRecoveryTrace(
+            eventTimeUs,
+            eventName,
+            outcome,
+            frameId,
+            streamId,
+            codecType,
+            keyFrame,
+            largeFrame,
+            chunkCount,
+            receivedChunks,
+            missingChunks,
+            fecParityPackets,
+            fecRecoveredChunks,
+            nackCount,
+            postNackReceivedChunks,
+            nackRequestedChunks,
+            retransmitReceivedChunks,
+            retransmitDuplicatePackets,
+            lastPacketSequence,
+            lastPacketChunkIndex,
+            lastRetransmitSequence,
+            lastRetransmitChunkIndex,
+            eventPacketSequence,
+            eventPacketChunkIndex,
+            eventPacketWasRetransmit,
+            sendTimeUs,
+            firstReceiveTimeUs,
+            ageMs);
+    }
+
+    void NetworkStats::OnDynamicNackDeadlineUpdated(
+        uint64_t deadlineUs,
+        double usefulnessRatio,
+        double duplicateRatio,
+        double expiredAfterRetransmitRatio,
+        const char* reason
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.dynamicNackDeadlineMs =
+            static_cast<double>(deadlineUs) / 1000.0;
+        snapshot_.dynamicNackUsefulnessRatio = usefulnessRatio;
+        snapshot_.dynamicNackDuplicateRatio = duplicateRatio;
+        snapshot_.dynamicNackExpiredAfterRetransmitRatio =
+            expiredAfterRetransmitRatio;
+        snapshot_.dynamicNackDecisionReason =
+            reason != nullptr ? reason : "unknown";
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnNackSuppressed(
+        const char* reason,
+        uint32_t missingChunkCount
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const std::string reasonText =
+            reason != nullptr ? reason : "unknown";
+        const bool chunkOnlySuppression =
+            reasonText == "preflight-shrunk";
+        if (!chunkOnlySuppression) {
+            snapshot_.nackSuppressedFrames++;
+        }
+        snapshot_.nackSuppressedMissingChunks += missingChunkCount;
+        if (reasonText.rfind("preflight", 0) == 0) {
+            if (!chunkOnlySuppression) {
+                snapshot_.nackPreflightSuppressedFrames++;
+            }
+            snapshot_.nackPreflightSuppressedChunks += missingChunkCount;
+        }
+        else if (reasonText == "fec-grace") {
+            snapshot_.nackFecGraceSuppressedFrames++;
+            snapshot_.nackFecGraceSuppressedChunks += missingChunkCount;
+        }
+        snapshot_.nackLastSuppressionReason = reasonText;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnNackShapingDecision(
+        const char* reason,
+        uint32_t missingChunkCount,
+        uint32_t requestedChunkBudget,
+        bool sent
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const std::string reasonText =
+            reason != nullptr ? reason : "unknown";
+        if (sent || reasonText == "predicted-useful") {
+            snapshot_.nackPredictedUsefulFrames++;
+            snapshot_.nackPredictedUsefulChunks += missingChunkCount;
+        }
+        else if (reasonText == "deferred-likely-arrival") {
+            snapshot_.nackDeferredForLikelyArrivalFrames++;
+            snapshot_.nackDeferredForLikelyArrivalChunks += missingChunkCount;
+        }
+        else if (reasonText == "skipped-too-late") {
+            snapshot_.nackSkippedTooLateFrames++;
+            snapshot_.nackSkippedTooLateChunks += missingChunkCount;
+        }
+        snapshot_.nackRequestedChunkBudget += requestedChunkBudget;
+        snapshot_.nackLastShapingReason = reasonText;
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 

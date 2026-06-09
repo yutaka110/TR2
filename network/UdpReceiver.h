@@ -41,6 +41,7 @@ namespace net {
 
         void NotifyDecodeFrame();
         void NotifyDisplayFrame();
+        void RequestKeyFrame(uint32_t frameId);
     private:
         void ReceiveLoop();
 
@@ -111,6 +112,10 @@ namespace net {
             const sockaddr_in& toAddr
         );
         void SendDeadlineNacks(uint64_t nowUs);
+        uint64_t CalculateDynamicNackDeadlineUs(
+            uint64_t nowUs,
+            uint64_t baseDeadlineUs
+        );
         void TrackTransportFeedback(
             const RnvpHeaderV1& dataHeader,
             uint64_t receiveTimeUs
@@ -149,6 +154,14 @@ namespace net {
         std::atomic<uint32_t> rnvpSequence_{ 1 };
         uint32_t consecutiveIncompleteFrames_ = 0;
         uint64_t lastKeyFrameRequestUs_ = 0;
+        uint64_t dynamicNackDeadlineUs_ = 25000;
+        uint64_t lastDynamicNackUpdateUs_ = 0;
+        uint64_t lastRetransmitUsefulChunks_ = 0;
+        uint64_t lastRetransmitDuplicatePackets_ = 0;
+        uint64_t lastRetransmitLateAfterCompletedPackets_ = 0;
+        uint64_t lastRetransmitLateAfterExpiredPackets_ = 0;
+        uint64_t lastRetransmitCompletedFrames_ = 0;
+        uint64_t lastRetransmitExpiredFrames_ = 0;
         bool hasLastRnvpDataAddr_ = false;
         sockaddr_in lastRnvpDataAddr_{};
 
@@ -169,11 +182,11 @@ namespace net {
         // Transport/reassembly safety valve only. Video freshness is owned by
         // NetworkVideoReceiver so low-latency policy is measured separately.
         static constexpr uint64_t kReceiverSafetyExpireUs = 1000000;
-        static constexpr uint64_t kFrameNackDeadlineUs = 80000;
-        static constexpr uint64_t kFrameNackIntervalUs = 40000;
+        static constexpr uint64_t kFrameNackDeadlineUs = 25000;
+        static constexpr uint64_t kFrameNackIntervalUs = 20000;
         static constexpr uint64_t kFrameNackRecoveryExpireUs = 140000;
         static constexpr uint64_t kFrameNackMinRecoverySlackUs = 12000;
-        static constexpr uint32_t kMaxDeadlineNacksPerFrame = 2;
+        static constexpr uint32_t kMaxDeadlineNacksPerFrame = 3;
         static constexpr uint64_t kKeyFrameRequestCooldownUs = 500000;
         static constexpr uint64_t kTransportFeedbackIntervalUs = 50000;
         static constexpr size_t kTransportFeedbackBatchSize = 32;

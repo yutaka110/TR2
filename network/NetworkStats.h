@@ -2,6 +2,7 @@
 
 #include "NetworkConditionSimulator.h"
 #include "NetworkRuntimeMode.h"
+#include "PacketProtocol.h"
 
 #include <cstdint>
 #include <mutex>
@@ -39,6 +40,73 @@ namespace net {
 		std::string lastOutputQueueDropReason;
 		uint64_t decodedFrames = 0;
 		uint64_t displayedFrames = 0;
+		uint64_t frameRecoveryOutcomeEvents = 0;
+		uint64_t frameRecoveryCompletedFrames = 0;
+		uint64_t frameRecoveryExpiredFrames = 0;
+		uint64_t frameRecoveryRejectedFrames = 0;
+		uint64_t frameRecoveryNackSentFrames = 0;
+		uint64_t frameRecoveryFecRecoveredFrames = 0;
+		uint32_t frameRecoveryLastFrameId = 0;
+		uint32_t frameRecoveryLastStreamId = 0;
+		std::string frameRecoveryLastEvent;
+		std::string frameRecoveryLastOutcome;
+		std::string frameRecoveryLastCodec;
+		bool frameRecoveryLastKeyFrame = false;
+		bool frameRecoveryLastLargeFrame = false;
+		uint32_t frameRecoveryLastChunkCount = 0;
+		uint32_t frameRecoveryLastReceivedChunks = 0;
+		uint32_t frameRecoveryLastMissingChunks = 0;
+		uint32_t frameRecoveryLastFecParityPackets = 0;
+		uint32_t frameRecoveryLastFecRecoveredChunks = 0;
+		uint32_t frameRecoveryLastNackCount = 0;
+		uint32_t frameRecoveryLastPostNackReceivedChunks = 0;
+		uint32_t frameRecoveryLastNackRequestedChunks = 0;
+		uint32_t frameRecoveryLastRetransmitReceivedChunks = 0;
+		uint32_t frameRecoveryLastRetransmitDuplicatePackets = 0;
+		uint32_t frameRecoveryLastPacketSequence = 0;
+		uint32_t frameRecoveryLastPacketChunkIndex = 0;
+		uint32_t frameRecoveryLastRetransmitSequence = 0;
+		uint32_t frameRecoveryLastRetransmitChunkIndex = 0;
+		uint32_t frameRecoveryLastEventPacketSequence = 0;
+		uint32_t frameRecoveryLastEventPacketChunkIndex = 0;
+		bool frameRecoveryLastEventWasRetransmit = false;
+		double frameRecoveryLastAgeMs = 0.0;
+		uint64_t retransmitUsefulChunks = 0;
+		uint64_t retransmitDuplicatePackets = 0;
+		uint64_t retransmitLateAfterCompletedPackets = 0;
+		uint64_t retransmitLateAfterExpiredPackets = 0;
+		uint64_t retransmitLateAfterRejectedPackets = 0;
+		uint64_t retransmitClassifiedPackets = 0;
+		uint64_t retransmitNotArrivedPackets = 0;
+		uint64_t retransmitAccountedPackets = 0;
+		uint64_t retransmitUnclassifiedPackets = 0;
+		uint64_t retransmitCompletedFrames = 0;
+		uint64_t retransmitExpiredFrames = 0;
+		double retransmitUsefulnessRatio = 0.0;
+		double retransmitDuplicateRatio = 0.0;
+		double retransmitFinalClassificationRatio = 0.0;
+		double retransmitFinalAccountingRatio = 0.0;
+		double retransmitExpiredAfterUsefulRatio = 0.0;
+		double dynamicNackDeadlineMs = 0.0;
+		double dynamicNackUsefulnessRatio = 0.0;
+		double dynamicNackDuplicateRatio = 0.0;
+		double dynamicNackExpiredAfterRetransmitRatio = 0.0;
+		std::string dynamicNackDecisionReason;
+		uint64_t nackSuppressedFrames = 0;
+		uint64_t nackSuppressedMissingChunks = 0;
+		uint64_t nackPreflightSuppressedFrames = 0;
+		uint64_t nackPreflightSuppressedChunks = 0;
+		uint64_t nackFecGraceSuppressedFrames = 0;
+		uint64_t nackFecGraceSuppressedChunks = 0;
+		uint64_t nackPredictedUsefulFrames = 0;
+		uint64_t nackPredictedUsefulChunks = 0;
+		uint64_t nackDeferredForLikelyArrivalFrames = 0;
+		uint64_t nackDeferredForLikelyArrivalChunks = 0;
+		uint64_t nackSkippedTooLateFrames = 0;
+		uint64_t nackSkippedTooLateChunks = 0;
+		uint64_t nackRequestedChunkBudget = 0;
+		std::string nackLastShapingReason;
+		std::string nackLastSuppressionReason;
 
 		double receiveFps = 0.0;
 		double decodeFps = 0.0;
@@ -72,22 +140,45 @@ namespace net {
 		double lastAckMissingRate = 0.0;
 		uint64_t ackRetransmittedFrames = 0;
 		uint64_t ackRetransmittedChunks = 0;
+		uint64_t repairCanceledByCompleteAckPackets = 0;
+		uint64_t repairSkippedByTtlPackets = 0;
+		uint64_t repairQueuedButCanceledPackets = 0;
+		uint64_t repairSuppressedByFecLikelyFrames = 0;
+		uint64_t repairSuppressedByFecLikelyPackets = 0;
+		uint64_t repairFecLikelySuppressedCompletedFrames = 0;
+		uint64_t repairFecLikelySuppressedCompletedPackets = 0;
+		uint64_t repairFecLikelySuppressedExpiredFrames = 0;
+		uint64_t repairFecLikelySuppressedExpiredPackets = 0;
+		uint64_t repairFecLikelySuppressedPendingFrames = 0;
+		uint64_t repairFecLikelySuppressedPendingPackets = 0;
+		uint64_t repairFecLikelySuppressionRescueFrames = 0;
+		uint64_t repairFecLikelySuppressionRescuePackets = 0;
+		uint64_t lateRepairSavedPackets = 0;
 		uint64_t ackStaleDroppedFrames = 0;
 		uint64_t ackKeyFrameRequests = 0;
 		bool ackKeyFramePending = false;
 		bool pacingEnabled = false;
 		uint32_t pacingTargetBitrateBps = 0;
+		uint32_t pacingRepairTargetBitrateBps = 0;
 		uint32_t pacingQueuedPackets = 0;
 		uint32_t pacingHighPriorityQueuedPackets = 0;
 		uint32_t pacingNormalQueuedPackets = 0;
 		uint64_t pacingEnqueuedPackets = 0;
 		uint64_t pacingSentPackets = 0;
 		uint64_t pacingSentBytes = 0;
+		uint64_t pacingRepairSentPackets = 0;
+		uint64_t pacingRepairSentBytes = 0;
+		uint64_t pacingRepairBorrowedPackets = 0;
+		uint64_t pacingRepairBorrowedBytes = 0;
 		uint64_t pacingDroppedPackets = 0;
 		uint64_t pacingDeadlineDroppedPackets = 0;
+		uint64_t pacingHighPriorityDeadlineDroppedPackets = 0;
+		uint64_t pacingNormalDeadlineDroppedPackets = 0;
 		uint64_t pacingOverflowDroppedPackets = 0;
 		double pacingCurrentQueueDelayMs = 0.0;
 		double pacingMaxQueueDelayMs = 0.0;
+		double pacingVideoCreditBytes = 0.0;
+		double pacingRepairCreditBytes = 0.0;
 		uint64_t transportFeedbackPackets = 0;
 		uint64_t transportFeedbackPacketStatuses = 0;
 		uint64_t transportFeedbackReceivedPackets = 0;
@@ -106,15 +197,27 @@ namespace net {
 		uint64_t deadlineNackSentFrames = 0;
 		uint64_t deadlineNackRecoveredFrames = 0;
 		uint64_t deadlineNackMissingChunks = 0;
+		uint64_t deadlineNackSentH264KeyFrames = 0;
+		uint64_t deadlineNackSentH264LargeFrames = 0;
+		uint64_t deadlineNackSentH264DeltaFrames = 0;
 		uint64_t deadlineNackExpiredDroppedFrames = 0;
 		uint64_t deadlineNackExpiredAfterNackFrames = 0;
 		uint64_t deadlineNackExpiredMissingChunks = 0;
+		uint64_t deadlineNackExpiredH264KeyFrames = 0;
+		uint64_t deadlineNackExpiredH264LargeFrames = 0;
+		uint64_t deadlineNackExpiredH264DeltaFrames = 0;
 		bool fecEnabled = false;
 		bool adaptiveFecEnabled = false;
 		uint32_t fecGroupChunkCount = 0;
 		uint64_t fecParityPackets = 0;
 		uint64_t fecRecoveredFrames = 0;
 		uint64_t fecRecoveredChunks = 0;
+		uint64_t h264ReassemblerAuRejectedFrames = 0;
+		uint64_t h264ReassemblerHeaderFailures = 0;
+		uint64_t h264ReassemblerPayloadSizeMismatches = 0;
+		uint64_t h264ReassemblerFrameIdMismatches = 0;
+		uint64_t h264ReassemblerCrcMismatches = 0;
+		std::string h264ReassemblerLastRejectReason;
 		std::string adaptiveFecDecisionReason;
 		std::string adaptiveFecHoldReason;
 		bool adaptiveFecG8ToG4Recovery = false;
@@ -142,10 +245,63 @@ namespace net {
 		uint64_t adaptiveRawFrameBytes = 0;
 		uint64_t adaptiveEncodedFrameBytes = 0;
 		double adaptiveCompressionRatio = 0.0;
+		std::string sendActualCodec;
+		uint32_t sendActualEncodeWidth = 0;
+		uint32_t sendActualEncodeHeight = 0;
+		uint64_t sendActualRawFrameBytes = 0;
+		uint64_t sendActualEncodedFrameBytes = 0;
 		double captureFps = 0.0;
 		double encodeMs = 0.0;
+		double sendResizeMs = 0.0;
+		double sendNv12PrepareMs = 0.0;
+		double sendH264EncodeMs = 0.0;
+		uint32_t sendH264EncoderRequestedBitrateKbps = 0;
+		uint32_t sendH264EncoderTargetBitrateKbps = 0;
+		uint32_t sendH264EncoderAppliedBitrateKbps = 0;
+		uint64_t h264DynamicBitrateUpdateRequests = 0;
+		uint64_t h264DynamicBitrateUpdateSuccesses = 0;
+		uint64_t h264DynamicBitrateUpdateFailures = 0;
+		uint64_t h264EncoderReinitializations = 0;
+		uint32_t sendPacingTargetBitrateKbps = 0;
+		double sendH264VideoBudgetScale = 1.0;
+		bool pacingBurstGuardActive = false;
+		double adaptiveRepairBudgetUtilization = 0.0;
+		double adaptiveRepairBorrowedRatio = 0.0;
+		uint64_t adaptiveRepairSentBytesDelta = 0;
+		uint64_t adaptiveRepairBorrowedBytesDelta = 0;
+		bool adaptiveRepairBudgetGuardActive = false;
+		bool adaptiveRepairVideoBudgetPressure = false;
+		double adaptiveRetransmitUsefulRatio = 0.0;
+		double adaptiveLateRepairWasteRatio = 0.0;
+		double adaptiveRetransmitNotArrivedRatio = 0.0;
+		bool adaptiveRetransmitAccountingComplete = false;
+		bool adaptiveLateRepairWastePressure = false;
+		bool adaptiveRetransmitNotArrivedPressure = false;
+		std::string adaptiveRepairDecisionReason;
+		uint32_t h264AuChunkCount = 0;
+		bool h264AuIsIdr = false;
+		bool h264AuIsDecoderSync = false;
+		std::string h264AuProtectionLevel;
+		uint64_t fecProtectedH264KeyFrames = 0;
+		uint64_t fecProtectedH264LargeFrames = 0;
+		uint32_t h264EncoderDelayFrames = 0;
+		double h264EncoderDelayMs = 0.0;
+		uint32_t h264EncoderPendingFrames = 0;
+		uint32_t h264EncodedInputFrameId = 0;
+		uint64_t encodedCameraFrameId = 0;
+		int64_t encodedCameraSourceTimestamp100ns = 0;
+		uint64_t encodedCameraCaptureCompletedTimeUs = 0;
+		double encodedCameraFrameAgeMs = 0.0;
+		double sendJpegEncodeMs = 0.0;
+		double sendPacketizeMs = 0.0;
 		double sendFrameIntervalMs = 0.0;
 		bool cameraFrameReady = false;
+		uint64_t cameraFrameId = 0;
+		int64_t cameraSourceTimestamp100ns = 0;
+		uint64_t cameraCaptureCompletedTimeUs = 0;
+		double cameraReadSampleMs = 0.0;
+		double cameraFrameAgeMs = 0.0;
+		bool cameraFrameCacheUsed = false;
 		double receiveJpegDecodeMs = 0.0;
 		double receiveDecodeWorkerFps = 0.0;
 		uint64_t receiveDecodeWorkerFrames = 0;
@@ -154,6 +310,17 @@ namespace net {
 		uint64_t receiveDecodeRenderOverwriteFrames = 0;
 		uint64_t receiveDecodeFailures = 0;
 		uint64_t receiveFreshnessDroppedFrames = 0;
+		uint64_t receiveH264AuInvalidFrames = 0;
+		uint64_t receiveH264AuCrcMismatches = 0;
+		uint64_t receiveH264AuPayloadSizeMismatches = 0;
+		uint64_t receiveH264AuNalCountMismatches = 0;
+		uint64_t receiveH264AuNoAnnexBNals = 0;
+		uint64_t receiveH264AuIdrFlagMismatches = 0;
+		uint64_t receiveH264AuSpsPpsFlagMismatches = 0;
+		uint64_t receiveH264AuSyncWithoutIdr = 0;
+		uint64_t receiveH264AuIdrWithoutSpsPps = 0;
+		uint64_t receiveH264AuForbiddenZeroBit = 0;
+		std::string receiveH264AuLastInvalidReason;
 		double receiveDecodeInputFrameAgeMs = 0.0;
 		double receiveLatestDecodedFrameAgeMs = 0.0;
 		double receiveFreshnessDropThresholdMs = 0.0;
@@ -280,14 +447,69 @@ namespace net {
 			double newestFrameAgeMs,
 			const char* reason
 		);
-		void OnDeadlineNackSent(uint32_t missingChunkCount);
+		void OnDeadlineNackSent(
+			uint32_t missingChunkCount,
+			CodecType codecType = CodecType::Unknown,
+			bool keyFrame = false,
+			bool largeFrame = false
+		);
 		void OnDeadlineNackRecoveredFrame();
 		void OnDeadlineNackExpiredFrame(
 			uint32_t missingChunkCount,
-			bool nackSent
+			bool nackSent,
+			CodecType codecType = CodecType::Unknown,
+			bool keyFrame = false,
+			bool largeFrame = false
 		);
 		void OnFecParityPacket();
 		void OnFecRecoveredFrame(uint32_t recoveredChunkCount);
+		void OnH264ReassemblerAuRejected(const char* reason);
+		void OnFrameRecoveryOutcome(
+			const char* eventName,
+			const char* outcome,
+			uint32_t frameId,
+			uint32_t streamId,
+			CodecType codecType,
+			bool keyFrame,
+			bool largeFrame,
+			uint32_t chunkCount,
+			uint32_t receivedChunks,
+			uint32_t missingChunks,
+			uint32_t fecParityPackets,
+			uint32_t fecRecoveredChunks,
+			uint32_t nackCount,
+			uint32_t postNackReceivedChunks,
+			uint32_t nackRequestedChunks,
+			uint32_t retransmitReceivedChunks,
+			uint32_t retransmitDuplicatePackets,
+			uint32_t lastPacketSequence,
+			uint32_t lastPacketChunkIndex,
+			uint32_t lastRetransmitSequence,
+			uint32_t lastRetransmitChunkIndex,
+			uint32_t eventPacketSequence,
+			uint32_t eventPacketChunkIndex,
+			bool eventPacketWasRetransmit,
+			uint64_t sendTimeUs,
+			uint64_t firstReceiveTimeUs,
+			uint64_t eventTimeUs
+		);
+		void OnDynamicNackDeadlineUpdated(
+			uint64_t deadlineUs,
+			double usefulnessRatio,
+			double duplicateRatio,
+			double expiredAfterRetransmitRatio,
+			const char* reason
+		);
+		void OnNackSuppressed(
+			const char* reason,
+			uint32_t missingChunkCount
+		);
+		void OnNackShapingDecision(
+			const char* reason,
+			uint32_t missingChunkCount,
+			uint32_t requestedChunkBudget,
+			bool sent
+		);
 
 		// 重複packetを観測したときに呼ぶ
 		void OnDuplicatePacket();

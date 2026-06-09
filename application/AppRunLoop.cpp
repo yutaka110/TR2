@@ -41,6 +41,81 @@ void UpdateTimingEwma(double& value, bool& hasValue, double sampleMs) {
     value = (value * (1.0 - kAlpha)) + (sampleMs * kAlpha);
 }
 
+void TransitionResource(
+    ID3D12GraphicsCommandList* commandList,
+    ID3D12Resource* resource,
+    D3D12_RESOURCE_STATES before,
+    D3D12_RESOURCE_STATES after) {
+    if (commandList == nullptr || resource == nullptr || before == after) {
+        return;
+    }
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    commandList->ResourceBarrier(1, &barrier);
+}
+
+bool CopyPlaneToUploadBuffer(
+    ID3D12Device* device,
+    ID3D12Resource* uploadBuffer,
+    ID3D12Resource* texture,
+    const uint8_t* src,
+    uint32_t srcPitch,
+    uint32_t widthBytes,
+    uint32_t height,
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT& outFootprint) {
+    if (device == nullptr ||
+        uploadBuffer == nullptr ||
+        texture == nullptr ||
+        src == nullptr ||
+        srcPitch < widthBytes ||
+        widthBytes == 0 ||
+        height == 0) {
+        return false;
+    }
+
+    const D3D12_RESOURCE_DESC textureDesc = texture->GetDesc();
+    UINT numRows = 0;
+    UINT64 rowSizeInBytes = 0;
+    UINT64 totalBytes = 0;
+    device->GetCopyableFootprints(
+        &textureDesc,
+        0,
+        1,
+        0,
+        &outFootprint,
+        &numRows,
+        &rowSizeInBytes,
+        &totalBytes);
+
+    uint8_t* mapped = nullptr;
+    const HRESULT mapHr = uploadBuffer->Map(
+        0,
+        nullptr,
+        reinterpret_cast<void**>(&mapped));
+    if (FAILED(mapHr) || mapped == nullptr) {
+        return false;
+    }
+
+    uint8_t* dst = mapped + outFootprint.Offset;
+    const size_t dstPitch =
+        static_cast<size_t>(outFootprint.Footprint.RowPitch);
+    for (uint32_t y = 0; y < height; ++y) {
+        std::memcpy(
+            dst + static_cast<size_t>(y) * dstPitch,
+            src + static_cast<size_t>(y) * srcPitch,
+            widthBytes);
+    }
+
+    uploadBuffer->Unmap(0, nullptr);
+    return true;
+}
+
 void TransitionSceneDepthIfNeeded(
     ID3D12GraphicsCommandList* commandList,
     ID3D12Resource* depthResource,
@@ -306,6 +381,7 @@ void AppRunLoop::SetNetworkFrameDisplayNotifier(std::function<void()> notifier) 
 void AppRunLoop::SetReceivedVideoTexture(
     Microsoft::WRL::ComPtr<ID3D12Resource> texture,
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uploadBuffers,
+    D3D12_GPU_DESCRIPTOR_HANDLE uavGpuHandle,
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle,
     uint32_t width,
     uint32_t height) {
@@ -314,9 +390,25 @@ void AppRunLoop::SetReceivedVideoTexture(
     receivedVideoUploadFenceValues_.assign(receivedVideoUploadBuffers_.size(), 0);
     receivedVideoUploadCursor_ = 0;
     activeReceivedVideoUploadBufferIndex_ = -1;
+    receivedVideoUavGpuHandle_ = uavGpuHandle;
     receivedVideoSrvGpuHandle_ = srvGpuHandle;
     receivedVideoWidth_ = width;
     receivedVideoHeight_ = height;
+}
+
+void AppRunLoop::SetReceivedVideoNv12Textures(
+    Microsoft::WRL::ComPtr<ID3D12Resource> yTexture,
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> yUploadBuffers,
+    D3D12_GPU_DESCRIPTOR_HANDLE ySrvGpuHandle,
+    Microsoft::WRL::ComPtr<ID3D12Resource> uvTexture,
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uvUploadBuffers,
+    D3D12_GPU_DESCRIPTOR_HANDLE uvSrvGpuHandle) {
+    receivedVideoNv12YTexture_ = std::move(yTexture);
+    receivedVideoNv12YUploadBuffers_ = std::move(yUploadBuffers);
+    receivedVideoNv12YSrvGpuHandle_ = ySrvGpuHandle;
+    receivedVideoNv12UVTexture_ = std::move(uvTexture);
+    receivedVideoNv12UVUploadBuffers_ = std::move(uvUploadBuffers);
+    receivedVideoNv12UVSrvGpuHandle_ = uvSrvGpuHandle;
 }
 
 void AppRunLoop::PopulateNetworkRenderTimings(
@@ -527,6 +619,185 @@ void AppRunLoop::UploadReceivedVideoFrame(
 
     net::DecodedVideoFrame frame{};
     if (!receivedFrameProvider_(frame)) {
+        return;
+    }
+
+    if (frame.format == net::DecodedVideoFrameFormat::Nv12) {
+        if (!receivedVideoNv12YTexture_ ||
+            !receivedVideoNv12UVTexture_ ||
+            receivedVideoNv12YUploadBuffers_.empty() ||
+            receivedVideoNv12UVUploadBuffers_.empty() ||
+            receivedVideoNv12YSrvGpuHandle_.ptr == 0 ||
+            receivedVideoNv12UVSrvGpuHandle_.ptr == 0 ||
+            receivedVideoUavGpuHandle_.ptr == 0 ||
+            frame.width != receivedVideoWidth_ ||
+            frame.height != receivedVideoHeight_ ||
+            frame.nv12YPitch < frame.width ||
+            frame.nv12UVPitch < frame.width ||
+            frame.nv12Y.size() <
+                static_cast<size_t>(frame.nv12YPitch) * frame.height ||
+            frame.nv12UV.size() <
+                static_cast<size_t>(frame.nv12UVPitch) * (frame.height / 2u)) {
+            static uint32_t invalidNv12FrameLogCount = 0;
+            if (invalidNv12FrameLogCount < 10) {
+                OutputDebugStringA("[ReceivedVideo] NV12 frame/resources invalid. Skip upload.\n");
+                invalidNv12FrameLogCount++;
+            }
+            return;
+        }
+
+        const auto uploadBufferWaitStart = std::chrono::steady_clock::now();
+        const UINT uploadBufferIndex =
+            receivedVideoUploadCursor_ %
+            static_cast<UINT>(receivedVideoUploadBuffers_.size());
+        receivedVideoUploadCursor_ =
+            (receivedVideoUploadCursor_ + 1u) %
+            static_cast<UINT>(receivedVideoUploadBuffers_.size());
+
+        WaitForReceivedVideoUploadBuffer(uploadBufferIndex);
+        UpdateTimingEwma(
+            receiveUploadBufferWaitMs_,
+            hasReceiveUploadBufferWaitMs_,
+            ElapsedMs(uploadBufferWaitStart));
+
+        if (uploadBufferIndex >= receivedVideoNv12YUploadBuffers_.size() ||
+            uploadBufferIndex >= receivedVideoNv12UVUploadBuffers_.size()) {
+            return;
+        }
+
+        ID3D12Resource* yUpload =
+            receivedVideoNv12YUploadBuffers_[uploadBufferIndex].Get();
+        ID3D12Resource* uvUpload =
+            receivedVideoNv12UVUploadBuffers_[uploadBufferIndex].Get();
+        if (yUpload == nullptr || uvUpload == nullptr) {
+            return;
+        }
+
+        activeReceivedVideoUploadBufferIndex_ =
+            static_cast<int>(uploadBufferIndex);
+
+        const auto textureUploadStart = std::chrono::steady_clock::now();
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT yFootprint{};
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT uvFootprint{};
+        const bool yCopied = CopyPlaneToUploadBuffer(
+            dev_.GetDevice(),
+            yUpload,
+            receivedVideoNv12YTexture_.Get(),
+            frame.nv12Y.data(),
+            frame.nv12YPitch,
+            frame.width,
+            frame.height,
+            yFootprint);
+        const bool uvCopied = CopyPlaneToUploadBuffer(
+            dev_.GetDevice(),
+            uvUpload,
+            receivedVideoNv12UVTexture_.Get(),
+            frame.nv12UV.data(),
+            frame.nv12UVPitch,
+            frame.width,
+            frame.height / 2u,
+            uvFootprint);
+        if (!yCopied || !uvCopied) {
+            OutputDebugStringA("[ReceivedVideo] NV12 upload buffer copy failed.\n");
+            UpdateTimingEwma(
+                textureUploadMs_,
+                hasTextureUploadMs_,
+                ElapsedMs(textureUploadStart));
+            return;
+        }
+
+        TransitionResource(
+            commandList,
+            receivedVideoNv12YTexture_.Get(),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_COPY_DEST);
+        TransitionResource(
+            commandList,
+            receivedVideoNv12UVTexture_.Get(),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_COPY_DEST);
+
+        D3D12_TEXTURE_COPY_LOCATION yDst{};
+        yDst.pResource = receivedVideoNv12YTexture_.Get();
+        yDst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        yDst.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION ySrc{};
+        ySrc.pResource = yUpload;
+        ySrc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        ySrc.PlacedFootprint = yFootprint;
+        commandList->CopyTextureRegion(&yDst, 0, 0, 0, &ySrc, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION uvDst{};
+        uvDst.pResource = receivedVideoNv12UVTexture_.Get();
+        uvDst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        uvDst.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION uvSrc{};
+        uvSrc.pResource = uvUpload;
+        uvSrc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        uvSrc.PlacedFootprint = uvFootprint;
+        commandList->CopyTextureRegion(&uvDst, 0, 0, 0, &uvSrc, nullptr);
+
+        TransitionResource(
+            commandList,
+            receivedVideoNv12YTexture_.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        TransitionResource(
+            commandList,
+            receivedVideoNv12UVTexture_.Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        TransitionResource(
+            commandList,
+            receivedVideoTexture_.Get(),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        ID3D12DescriptorHeap* descriptorHeaps[] = { srvDescriptorHeap_.Get() };
+        commandList->SetDescriptorHeaps(1, descriptorHeaps);
+        commandList->SetPipelineState(appPipelines_.GetComputePSO());
+        commandList->SetComputeRootSignature(appPipelines_.GetComputeRootSignature());
+        commandList->SetComputeRootDescriptorTable(
+            0,
+            receivedVideoNv12YSrvGpuHandle_);
+        commandList->SetComputeRootDescriptorTable(
+            1,
+            receivedVideoUavGpuHandle_);
+        commandList->Dispatch(
+            (receivedVideoWidth_ + 7u) / 8u,
+            (receivedVideoHeight_ + 7u) / 8u,
+            1);
+
+        D3D12_RESOURCE_BARRIER uavBarrier{};
+        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier.UAV.pResource = receivedVideoTexture_.Get();
+        commandList->ResourceBarrier(1, &uavBarrier);
+
+        TransitionResource(
+            commandList,
+            receivedVideoTexture_.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        TransitionResource(
+            commandList,
+            receivedVideoNv12YTexture_.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        TransitionResource(
+            commandList,
+            receivedVideoNv12UVTexture_.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        UpdateTimingEwma(
+            textureUploadMs_,
+            hasTextureUploadMs_,
+            ElapsedMs(textureUploadStart));
+
+        if (networkFrameDisplayNotifier_) {
+            networkFrameDisplayNotifier_();
+        }
         return;
     }
 

@@ -115,7 +115,7 @@ bool AppPipelines::HotReloadIfNeeded(ID3D12Device* device) {
         L"resources/Object3D.PS.hlsl",
         L"resources/Sprite.VS.hlsl",
         L"resources/Sprite.PS.hlsl",
-        L"resources/MotionDetect.CS.hlsl",
+        L"resources/ReceivedVideoNv12ToRgba.CS.hlsl",
         L"resources/Particle.VS.hlsl",
         L"resources/Particle.PS.hlsl",
         L"resources/TrailMesh.VS.hlsl",
@@ -361,13 +361,13 @@ bool AppPipelines::Initialize(ID3D12Device* device) {
     if (FAILED(hr)) return FailHr("CreateRootSignature(Particle)", hr);
 
     // ------------------------------
-    // Compute RootSignature (MotionDetect)
+    // Compute RootSignature (ReceivedVideo NV12 -> RGBA)
     // ------------------------------
-    // t4: Y, t5: UV, u0: output
+    // t6: Y, t7: UV, u0: output
     D3D12_DESCRIPTOR_RANGE ranges[2] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[0].NumDescriptors = 2;
-    ranges[0].BaseShaderRegister = 4;
+    ranges[0].BaseShaderRegister = 6;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
 
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
@@ -524,7 +524,7 @@ bool AppPipelines::Initialize(ID3D12Device* device) {
     ps_ = Compile_(L"resources/Object3D.PS.hlsl", L"ps_6_0");
     spriteVs_ = Compile_(L"resources/Sprite.VS.hlsl", L"vs_6_0");
     spritePs_ = Compile_(L"resources/Sprite.PS.hlsl", L"ps_6_0");
-    cs_ = Compile_(L"resources/MotionDetect.CS.hlsl", L"cs_6_0");
+    cs_ = Compile_(L"resources/ReceivedVideoNv12ToRgba.CS.hlsl", L"cs_6_0");
     particleVs_ = Compile_(L"resources/Particle.VS.hlsl", L"vs_6_0");
     particlePs_ = Compile_(L"resources/Particle.PS.hlsl", L"ps_6_0");
     trailMeshVs_ = Compile_(L"resources/TrailMesh.VS.hlsl", L"vs_6_0");
@@ -671,7 +671,7 @@ bool AppPipelines::Initialize(ID3D12Device* device) {
     computePsoDesc.pRootSignature = computeRootSignature_.Get();
     computePsoDesc.CS = { cs_->GetBufferPointer(), cs_->GetBufferSize() };
     hr = device->CreateComputePipelineState(&computePsoDesc, IID_PPV_ARGS(&computePso_));
-    if (FAILED(hr)) return FailHr("CreateComputePipelineState(MotionDetect)", hr);
+    if (FAILED(hr)) return FailHr("CreateComputePipelineState(ReceivedVideoNv12)", hr);
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC gpuParticleComputeDesc{};
     gpuParticleComputeDesc.pRootSignature = gpuParticleComputeRootSignature_.Get();
@@ -941,7 +941,7 @@ bool AppPipelines::Initialize(ID3D12Device* device) {
         L"resources/Object3D.PS.hlsl",
         L"resources/Sprite.VS.hlsl",
         L"resources/Sprite.PS.hlsl",
-        L"resources/MotionDetect.CS.hlsl",
+        L"resources/ReceivedVideoNv12ToRgba.CS.hlsl",
         L"resources/Particle.VS.hlsl",
         L"resources/Particle.PS.hlsl",
         L"resources/TrailMesh.VS.hlsl",
