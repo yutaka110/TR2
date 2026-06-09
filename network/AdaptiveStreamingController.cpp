@@ -96,6 +96,20 @@ namespace net {
         lastReceiveFreshnessDroppedFrames_ = 0;
         hasPacingCounters_ = false;
         lastPacingDeadlineDroppedPackets_ = 0;
+        lastPacingHighPriorityDeadlineDroppedPackets_ = 0;
+        hasRepairCounters_ = false;
+        lastPacingRepairSentBytes_ = 0;
+        lastPacingRepairBorrowedBytes_ = 0;
+        hasRetransmitOutcomeCounters_ = false;
+        lastRetransmitUsefulChunks_ = 0;
+        lastRetransmitDuplicatePackets_ = 0;
+        lastRetransmitLateAfterCompletedPackets_ = 0;
+        lastRetransmitLateAfterExpiredPackets_ = 0;
+        lastRetransmitLateAfterRejectedPackets_ = 0;
+        lastRetransmitNotArrivedPackets_ = 0;
+        lastRetransmitAccountedPackets_ = 0;
+        lastNackFecGraceSuppressedFrames_ = 0;
+        lastNackFecGraceSuppressedChunks_ = 0;
         hasFecCounters_ = false;
         lastFecParityPackets_ = 0;
         lastFecRecoveredFrames_ = 0;
@@ -112,6 +126,14 @@ namespace net {
         lastAdaptiveFecSampleGroupChunkCount_ = 0;
         postG8ToG4QualityHoldSec_ = 0.0;
         fecBurstTailRecoverySec_ = 0.0;
+        pacingBurstGuardSec_ = 0.0;
+        pacingBurstPressureSec_ = 0.0;
+        pacingBurstVideoBudgetScale_ = 1.0;
+        repairBudgetGuardSec_ = 0.0;
+        repairBorrowPressureSec_ = 0.0;
+        retransmitNotArrivedPressureSec_ = 0.0;
+        lateRepairWasteGuardSec_ = 0.0;
+        repairTelemetryHoldSec_ = 0.0;
         nackExpiredBitrateOnlyDecreaseSamples_ = 0;
         nackExpiredBitrateOnlyDecreaseBudget_ = 2;
         activeBandwidthCeilingKbps_ = kMaxBitrateKbps;
@@ -246,6 +268,7 @@ namespace net {
         uint64_t retransmitStaleDropDelta = 0;
         uint64_t freshnessDropDelta = 0;
         uint64_t pacingDeadlineDropDelta = 0;
+        uint64_t pacingHighPriorityDeadlineDropDelta = 0;
 
         if (hasDropCounters_) {
             if (input.deadlineDroppedFrames >= lastDeadlineDroppedFrames_) {
@@ -312,10 +335,246 @@ namespace net {
                 input.pacingDeadlineDroppedPackets -
                 lastPacingDeadlineDroppedPackets_;
         }
+        if (hasPacingCounters_ &&
+            input.pacingHighPriorityDeadlineDroppedPackets >=
+            lastPacingHighPriorityDeadlineDroppedPackets_) {
+            pacingHighPriorityDeadlineDropDelta =
+                input.pacingHighPriorityDeadlineDroppedPackets -
+                lastPacingHighPriorityDeadlineDroppedPackets_;
+        }
 
         hasPacingCounters_ = true;
         lastPacingDeadlineDroppedPackets_ =
             input.pacingDeadlineDroppedPackets;
+        lastPacingHighPriorityDeadlineDroppedPackets_ =
+            input.pacingHighPriorityDeadlineDroppedPackets;
+
+        uint64_t repairSentBytesDelta = 0;
+        uint64_t repairBorrowedBytesDelta = 0;
+        if (hasRepairCounters_) {
+            if (input.pacingRepairSentBytes >= lastPacingRepairSentBytes_) {
+                repairSentBytesDelta =
+                    input.pacingRepairSentBytes -
+                    lastPacingRepairSentBytes_;
+            }
+            if (input.pacingRepairBorrowedBytes >=
+                lastPacingRepairBorrowedBytes_) {
+                repairBorrowedBytesDelta =
+                    input.pacingRepairBorrowedBytes -
+                    lastPacingRepairBorrowedBytes_;
+            }
+        }
+        hasRepairCounters_ = true;
+        lastPacingRepairSentBytes_ = input.pacingRepairSentBytes;
+        lastPacingRepairBorrowedBytes_ = input.pacingRepairBorrowedBytes;
+
+        const double positiveDeltaSec =
+            (std::max)(0.0, deltaTimeSec);
+        const double repairSentBps =
+            positiveDeltaSec > 0.0
+            ? static_cast<double>(repairSentBytesDelta) * 8.0 /
+                positiveDeltaSec
+            : 0.0;
+        const double repairBudgetUtilization =
+            input.pacingRepairTargetBitrateBps > 0
+            ? repairSentBps /
+                static_cast<double>(input.pacingRepairTargetBitrateBps)
+            : 0.0;
+        const double repairBorrowedRatio =
+            repairSentBytesDelta > 0
+            ? static_cast<double>(repairBorrowedBytesDelta) /
+                static_cast<double>(repairSentBytesDelta)
+            : 0.0;
+        if (repairSentBytesDelta > 0) {
+            state_.lastRepairBudgetUtilization =
+                std::clamp(repairBudgetUtilization, 0.0, 4.0);
+            state_.lastRepairBorrowedRatio =
+                std::clamp(repairBorrowedRatio, 0.0, 1.0);
+            state_.lastRepairSentBytesDelta = repairSentBytesDelta;
+            state_.lastRepairBorrowedBytesDelta = repairBorrowedBytesDelta;
+            repairTelemetryHoldSec_ = 1.2;
+        }
+        else if (repairTelemetryHoldSec_ > 0.0) {
+            repairTelemetryHoldSec_ =
+                (std::max)(0.0, repairTelemetryHoldSec_ - positiveDeltaSec);
+        }
+        else {
+            state_.lastRepairBudgetUtilization = 0.0;
+            state_.lastRepairBorrowedRatio = 0.0;
+            state_.lastRepairSentBytesDelta = 0;
+            state_.lastRepairBorrowedBytesDelta = 0;
+        }
+
+        uint64_t retransmitUsefulDelta = 0;
+        uint64_t retransmitDuplicateDelta = 0;
+        uint64_t retransmitLateCompletedDelta = 0;
+        uint64_t retransmitLateExpiredDelta = 0;
+        uint64_t retransmitLateRejectedDelta = 0;
+        uint64_t retransmitNotArrivedDelta = 0;
+        uint64_t retransmitAccountedDelta = 0;
+        uint64_t nackFecGraceSuppressedFrameDelta = 0;
+        uint64_t nackFecGraceSuppressedChunkDelta = 0;
+        if (hasRetransmitOutcomeCounters_) {
+            if (input.retransmitUsefulChunks >= lastRetransmitUsefulChunks_) {
+                retransmitUsefulDelta =
+                    input.retransmitUsefulChunks - lastRetransmitUsefulChunks_;
+            }
+            if (input.retransmitDuplicatePackets >=
+                lastRetransmitDuplicatePackets_) {
+                retransmitDuplicateDelta =
+                    input.retransmitDuplicatePackets -
+                    lastRetransmitDuplicatePackets_;
+            }
+            if (input.retransmitLateAfterCompletedPackets >=
+                lastRetransmitLateAfterCompletedPackets_) {
+                retransmitLateCompletedDelta =
+                    input.retransmitLateAfterCompletedPackets -
+                    lastRetransmitLateAfterCompletedPackets_;
+            }
+            if (input.retransmitLateAfterExpiredPackets >=
+                lastRetransmitLateAfterExpiredPackets_) {
+                retransmitLateExpiredDelta =
+                    input.retransmitLateAfterExpiredPackets -
+                    lastRetransmitLateAfterExpiredPackets_;
+            }
+            if (input.retransmitLateAfterRejectedPackets >=
+                lastRetransmitLateAfterRejectedPackets_) {
+                retransmitLateRejectedDelta =
+                    input.retransmitLateAfterRejectedPackets -
+                    lastRetransmitLateAfterRejectedPackets_;
+            }
+            if (input.retransmitNotArrivedPackets >=
+                lastRetransmitNotArrivedPackets_) {
+                retransmitNotArrivedDelta =
+                    input.retransmitNotArrivedPackets -
+                    lastRetransmitNotArrivedPackets_;
+            }
+            if (input.retransmitAccountedPackets >=
+                lastRetransmitAccountedPackets_) {
+                retransmitAccountedDelta =
+                    input.retransmitAccountedPackets -
+                    lastRetransmitAccountedPackets_;
+            }
+            if (input.nackFecGraceSuppressedFrames >=
+                lastNackFecGraceSuppressedFrames_) {
+                nackFecGraceSuppressedFrameDelta =
+                    input.nackFecGraceSuppressedFrames -
+                    lastNackFecGraceSuppressedFrames_;
+            }
+            if (input.nackFecGraceSuppressedChunks >=
+                lastNackFecGraceSuppressedChunks_) {
+                nackFecGraceSuppressedChunkDelta =
+                    input.nackFecGraceSuppressedChunks -
+                    lastNackFecGraceSuppressedChunks_;
+            }
+        }
+        hasRetransmitOutcomeCounters_ = true;
+        lastRetransmitUsefulChunks_ = input.retransmitUsefulChunks;
+        lastRetransmitDuplicatePackets_ = input.retransmitDuplicatePackets;
+        lastRetransmitLateAfterCompletedPackets_ =
+            input.retransmitLateAfterCompletedPackets;
+        lastRetransmitLateAfterExpiredPackets_ =
+            input.retransmitLateAfterExpiredPackets;
+        lastRetransmitLateAfterRejectedPackets_ =
+            input.retransmitLateAfterRejectedPackets;
+        lastRetransmitNotArrivedPackets_ = input.retransmitNotArrivedPackets;
+        lastRetransmitAccountedPackets_ = input.retransmitAccountedPackets;
+        lastNackFecGraceSuppressedFrames_ =
+            input.nackFecGraceSuppressedFrames;
+        lastNackFecGraceSuppressedChunks_ =
+            input.nackFecGraceSuppressedChunks;
+
+        const uint64_t retransmitLateWasteDelta =
+            retransmitDuplicateDelta +
+            retransmitLateCompletedDelta +
+            retransmitLateExpiredDelta +
+            retransmitLateRejectedDelta;
+        const uint64_t retransmitObservedDelta =
+            retransmitUsefulDelta +
+            retransmitLateWasteDelta +
+            retransmitNotArrivedDelta;
+        const uint64_t retransmitCumulativeLateWaste =
+            input.retransmitDuplicatePackets +
+            input.retransmitLateAfterCompletedPackets +
+            input.retransmitLateAfterExpiredPackets +
+            input.retransmitLateAfterRejectedPackets;
+        const uint64_t retransmitCumulativeObserved =
+            input.retransmitUsefulChunks +
+            retransmitCumulativeLateWaste +
+            input.retransmitNotArrivedPackets;
+        const double retransmitUsefulRatio =
+            retransmitObservedDelta > 0
+            ? static_cast<double>(retransmitUsefulDelta) /
+                static_cast<double>(retransmitObservedDelta)
+            : 0.0;
+        const double lateRepairWasteRatio =
+            retransmitObservedDelta > 0
+            ? static_cast<double>(retransmitLateWasteDelta) /
+                static_cast<double>(retransmitObservedDelta)
+            : 0.0;
+        const double retransmitNotArrivedRatio =
+            retransmitObservedDelta > 0
+            ? static_cast<double>(retransmitNotArrivedDelta) /
+                static_cast<double>(retransmitObservedDelta)
+            : 0.0;
+        const double cumulativeRetransmitUsefulRatio =
+            retransmitCumulativeObserved > 0
+            ? static_cast<double>(input.retransmitUsefulChunks) /
+                static_cast<double>(retransmitCumulativeObserved)
+            : 0.0;
+        const double cumulativeLateRepairWasteRatio =
+            retransmitCumulativeObserved > 0
+            ? static_cast<double>(retransmitCumulativeLateWaste) /
+                static_cast<double>(retransmitCumulativeObserved)
+            : 0.0;
+        const double cumulativeRetransmitNotArrivedRatio =
+            retransmitCumulativeObserved > 0
+            ? static_cast<double>(input.retransmitNotArrivedPackets) /
+                static_cast<double>(retransmitCumulativeObserved)
+            : 0.0;
+        const double repairUsefulRatioForDecision =
+            retransmitObservedDelta > 0
+            ? retransmitUsefulRatio
+            : cumulativeRetransmitUsefulRatio;
+        const double lateWasteRatioForDecision =
+            retransmitObservedDelta > 0
+            ? lateRepairWasteRatio
+            : cumulativeLateRepairWasteRatio;
+        const double notArrivedRatioForDecision =
+            retransmitObservedDelta > 0
+            ? retransmitNotArrivedRatio
+            : cumulativeRetransmitNotArrivedRatio;
+        const uint64_t lateWasteCountForDecision =
+            retransmitLateWasteDelta > 0
+            ? retransmitLateWasteDelta
+            : retransmitCumulativeLateWaste;
+        const uint64_t notArrivedCountForDecision =
+            retransmitNotArrivedDelta > 0
+            ? retransmitNotArrivedDelta
+            : input.retransmitNotArrivedPackets;
+        const bool retransmitAccountingComplete =
+            input.retransmitFinalAccountingRatio >= 0.999 ||
+            (retransmitObservedDelta > 0 &&
+                retransmitAccountedDelta >= retransmitObservedDelta);
+        if (retransmitObservedDelta > 0 ||
+            retransmitCumulativeObserved > 0) {
+            state_.lastRetransmitUsefulRatio =
+                std::clamp(repairUsefulRatioForDecision, 0.0, 1.0);
+            state_.lastLateRepairWasteRatio =
+                std::clamp(lateWasteRatioForDecision, 0.0, 1.0);
+            state_.lastRetransmitNotArrivedRatio =
+                std::clamp(notArrivedRatioForDecision, 0.0, 1.0);
+        }
+        else {
+            state_.lastRetransmitUsefulRatio = 0.0;
+            state_.lastLateRepairWasteRatio = 0.0;
+            state_.lastRetransmitNotArrivedRatio = 0.0;
+        }
+        state_.lastRetransmitAccountingComplete =
+            retransmitAccountingComplete;
+        state_.lastLateRepairWastePressure = false;
+        state_.lastRetransmitNotArrivedPressure = false;
+        state_.lastRepairDecisionReason.clear();
 
         uint64_t fecParityPacketDelta = 0;
         uint64_t fecRecoveredFrameDelta = 0;
@@ -458,16 +717,251 @@ namespace net {
             stableTimeSec_ = 0.0;
             badTimeSec_ = 0.0;
             lossOnlyBadTimeSec_ = 0.0;
+            pacingBurstGuardSec_ = 0.0;
+            pacingBurstPressureSec_ = 0.0;
+            pacingBurstVideoBudgetScale_ = 1.0;
+            repairBudgetGuardSec_ = 0.0;
+            repairBorrowPressureSec_ = 0.0;
+            retransmitNotArrivedPressureSec_ = 0.0;
+            lateRepairWasteGuardSec_ = 0.0;
+            repairTelemetryHoldSec_ = 0.0;
+            state_.h264VideoBudgetScale = 1.0;
+            state_.lastPacingBurstGuardActive = false;
+            state_.lastRepairBudgetGuardActive = false;
+            state_.lastRepairVideoBudgetPressure = false;
+            state_.lastLateRepairWastePressure = false;
+            state_.lastRetransmitNotArrivedPressure = false;
+            state_.lastRepairDecisionReason = "disabled";
             return;
         }
 
         if (controlMode_ == AdaptiveControlMode::LossReactive) {
+            pacingBurstGuardSec_ = 0.0;
+            pacingBurstPressureSec_ = 0.0;
+            pacingBurstVideoBudgetScale_ = 1.0;
+            repairBudgetGuardSec_ = 0.0;
+            repairBorrowPressureSec_ = 0.0;
+            retransmitNotArrivedPressureSec_ = 0.0;
+            lateRepairWasteGuardSec_ = 0.0;
+            repairTelemetryHoldSec_ = 0.0;
+            state_.h264VideoBudgetScale = 1.0;
+            state_.lastPacingBurstGuardActive = false;
+            state_.lastRepairBudgetGuardActive = false;
+            state_.lastRepairVideoBudgetPressure = false;
+            state_.lastLateRepairWastePressure = false;
+            state_.lastRetransmitNotArrivedPressure = false;
+            state_.lastRepairDecisionReason = "loss-reactive";
             UpdateLossReactive(
                 input,
                 deltaTimeSec,
                 qualityDeadlineNackDelta,
                 qualityDeadlineNackMissingChunkDelta);
             return;
+        }
+
+        const bool repairActive =
+            input.pacingEnabled &&
+            input.pacingRepairTargetBitrateBps > 0 &&
+            repairSentBytesDelta > 0;
+        const bool retransmitOutcomeActive =
+            (retransmitObservedDelta >= 8 ||
+                retransmitCumulativeObserved >= 32) &&
+            retransmitAccountingComplete;
+        const bool retransmitNotArrivedPressure =
+            retransmitOutcomeActive &&
+            notArrivedCountForDecision >= 8 &&
+            notArrivedRatioForDecision >= 0.18;
+        const bool hardRetransmitNotArrivedPressure =
+            retransmitNotArrivedPressure &&
+            (notArrivedRatioForDecision >= 0.32 ||
+                notArrivedCountForDecision >= 32);
+        const bool lateRepairWastePressure =
+            retransmitOutcomeActive &&
+            !retransmitNotArrivedPressure &&
+            lateWasteCountForDecision >= 8 &&
+            lateWasteRatioForDecision >= 0.35 &&
+            repairUsefulRatioForDecision < 0.65;
+        const bool retransmitUsefulStable =
+            retransmitOutcomeActive &&
+            repairUsefulRatioForDecision >= 0.50 &&
+            notArrivedRatioForDecision <= 0.12 &&
+            pacingHighPriorityDeadlineDropDelta == 0 &&
+            pacingDeadlineDropDelta == 0;
+        const bool repairBudgetHealthy =
+            (repairActive || retransmitUsefulStable) &&
+            state_.lastRepairBorrowedRatio <= 0.15 &&
+            state_.lastRepairBudgetUtilization <= 1.25 &&
+            pacingHighPriorityDeadlineDropDelta == 0 &&
+            pacingDeadlineDropDelta == 0;
+        const bool repairVideoBudgetPressure =
+            (repairActive &&
+                (state_.lastRepairBorrowedRatio >= 0.20 ||
+                repairBorrowedBytesDelta >= 32768 ||
+                pacingHighPriorityDeadlineDropDelta > 0 ||
+                (state_.lastRepairBudgetUtilization >= 1.15 &&
+                    repairBorrowedBytesDelta > 0))) ||
+            retransmitNotArrivedPressure;
+
+        if (repairBudgetHealthy) {
+            repairBudgetGuardSec_ =
+                (std::max)(repairBudgetGuardSec_, 1.0);
+            if (state_.lastRepairDecisionReason.empty()) {
+                state_.lastRepairDecisionReason =
+                    retransmitUsefulStable
+                    ? "retransmit-useful-stable"
+                    : "repair-budget-healthy";
+            }
+        }
+
+        if (lateRepairWastePressure) {
+            lateRepairWasteGuardSec_ =
+                (std::max)(lateRepairWasteGuardSec_, 1.25);
+            state_.lastLateRepairWastePressure = true;
+            state_.lastRepairBudgetGuardActive = true;
+            state_.lastRepairDecisionReason =
+                nackFecGraceSuppressedChunkDelta > 0 ||
+                nackFecGraceSuppressedFrameDelta > 0
+                ? "late-repair-waste-fec-grace"
+                : "late-repair-waste-guard";
+            pacingBurstVideoBudgetScale_ =
+                (std::min)(1.0, pacingBurstVideoBudgetScale_ + 0.02);
+        }
+
+        if (repairVideoBudgetPressure) {
+            const bool hardRepairPressure =
+                hardRetransmitNotArrivedPressure ||
+                state_.lastRepairBorrowedRatio >= 0.45 ||
+                repairBorrowedBytesDelta >= 96u * 1024u ||
+                pacingHighPriorityDeadlineDropDelta > 0;
+
+            repairBorrowPressureSec_ += positiveDeltaSec;
+            if (retransmitNotArrivedPressure) {
+                retransmitNotArrivedPressureSec_ += positiveDeltaSec;
+            }
+            repairBudgetGuardSec_ = 0.0;
+            lateRepairWasteGuardSec_ = 0.0;
+            pacingBurstVideoBudgetScale_ =
+                (std::min)(
+                    pacingBurstVideoBudgetScale_,
+                    hardRepairPressure ? 0.80 : 0.90);
+            state_.h264VideoBudgetScale =
+                std::clamp(pacingBurstVideoBudgetScale_, 0.60, 1.0);
+            state_.lastPacingBurstGuardActive = true;
+            state_.lastRepairBudgetGuardActive = false;
+            state_.lastRepairVideoBudgetPressure = true;
+            state_.lastRetransmitNotArrivedPressure =
+                retransmitNotArrivedPressure;
+            state_.lastRepairDecisionReason =
+                retransmitNotArrivedPressure
+                ? "retransmit-not-arrived-video-budget-pressure"
+                : "repair-budget-borrowed-video-budget-pressure";
+
+            const bool persistentRepairPressure =
+                (hardRepairPressure && repairBorrowPressureSec_ >= 1.0) ||
+                repairBorrowPressureSec_ >= 1.8 ||
+                retransmitNotArrivedPressureSec_ >= 1.2;
+            if (persistentRepairPressure) {
+                ApplyAimdBitrateOnlyDecrease(
+                    input,
+                    AdaptiveDegradationCause::PacingQueue,
+                    hardRepairPressure);
+                repairBorrowPressureSec_ = 0.0;
+                retransmitNotArrivedPressureSec_ = 0.0;
+                cooldownSec_ = hardRepairPressure ? 0.80 : 0.60;
+            }
+
+            badTimeSec_ = 0.0;
+            lossOnlyBadTimeSec_ = 0.0;
+            stableTimeSec_ = 0.0;
+            return;
+        }
+
+        repairBorrowPressureSec_ =
+            (std::max)(0.0, repairBorrowPressureSec_ - positiveDeltaSec);
+        retransmitNotArrivedPressureSec_ =
+            (std::max)(
+                0.0,
+                retransmitNotArrivedPressureSec_ - positiveDeltaSec);
+        if (repairBudgetGuardSec_ > 0.0) {
+            repairBudgetGuardSec_ =
+                (std::max)(0.0, repairBudgetGuardSec_ - positiveDeltaSec);
+        }
+        if (lateRepairWasteGuardSec_ > 0.0) {
+            lateRepairWasteGuardSec_ =
+                (std::max)(0.0, lateRepairWasteGuardSec_ - positiveDeltaSec);
+        }
+        state_.lastRepairBudgetGuardActive =
+            repairBudgetGuardSec_ > 0.0 || lateRepairWasteGuardSec_ > 0.0;
+        state_.lastRepairVideoBudgetPressure = false;
+        state_.lastLateRepairWastePressure =
+            state_.lastLateRepairWastePressure ||
+            lateRepairWasteGuardSec_ > 0.0;
+        state_.lastRetransmitNotArrivedPressure = false;
+        if (state_.lastRepairDecisionReason.empty() &&
+            lateRepairWasteGuardSec_ > 0.0) {
+            state_.lastRepairDecisionReason = "late-repair-waste-hold";
+        }
+
+        const bool pacingBurstPressure =
+            HasPacingDropPressure(input, pacingDeadlineDropDelta);
+        if (pacingBurstPressure &&
+            (pacingDeadlineDropDelta >= 8 ||
+                input.pacingCurrentQueueDelayMs >= 15.0 ||
+                input.pacingMaxQueueDelayMs >= 60.0)) {
+            const bool hardPacingBurst =
+                pacingDeadlineDropDelta >= 32 ||
+                input.pacingCurrentQueueDelayMs >= 30.0 ||
+                input.pacingMaxQueueDelayMs >= 100.0;
+
+            pacingBurstPressureSec_ += positiveDeltaSec;
+            pacingBurstGuardSec_ =
+                (std::max)(pacingBurstGuardSec_, hardPacingBurst ? 1.20 : 0.75);
+            pacingBurstVideoBudgetScale_ =
+                (std::min)(
+                    pacingBurstVideoBudgetScale_,
+                    hardPacingBurst ? 0.72 : 0.84);
+            state_.h264VideoBudgetScale =
+                std::clamp(pacingBurstVideoBudgetScale_, 0.55, 1.0);
+            state_.lastPacingBurstGuardActive = true;
+            if (state_.lastRepairDecisionReason.empty()) {
+                state_.lastRepairDecisionReason = "pacing-burst-pressure";
+            }
+
+            const bool persistentPacingPressure =
+                (hardPacingBurst && pacingBurstPressureSec_ >= 1.0) ||
+                pacingBurstPressureSec_ >= 1.6;
+            if (persistentPacingPressure) {
+                ApplyAimdBitrateOnlyDecrease(
+                    input,
+                    AdaptiveDegradationCause::PacingQueue,
+                    hardPacingBurst);
+                pacingBurstPressureSec_ = 0.0;
+                cooldownSec_ = hardPacingBurst ? 0.75 : 0.55;
+            }
+            badTimeSec_ = 0.0;
+            lossOnlyBadTimeSec_ = 0.0;
+            stableTimeSec_ = 0.0;
+            return;
+        }
+
+        pacingBurstPressureSec_ =
+            (std::max)(0.0, pacingBurstPressureSec_ - positiveDeltaSec * 0.75);
+        if (pacingBurstGuardSec_ > 0.0) {
+            pacingBurstGuardSec_ =
+                (std::max)(0.0, pacingBurstGuardSec_ - positiveDeltaSec);
+        }
+        else {
+            pacingBurstVideoBudgetScale_ =
+                (std::min)(
+                    1.0,
+                    pacingBurstVideoBudgetScale_ + positiveDeltaSec * 0.20);
+        }
+        state_.h264VideoBudgetScale =
+            std::clamp(pacingBurstVideoBudgetScale_, 0.55, 1.0);
+        state_.lastPacingBurstGuardActive =
+            pacingBurstGuardSec_ > 0.0 || pacingBurstVideoBudgetScale_ < 0.999;
+        if (state_.lastRepairDecisionReason.empty()) {
+            state_.lastRepairDecisionReason = "none";
         }
 
         if (cooldownSec_ > 0.0) {
@@ -606,6 +1100,16 @@ namespace net {
             input.fecGroupChunkCount == 4;
         state_.lastAdaptiveFecQualityHoldActive =
             postG8ToG4QualityHoldActive;
+        const bool repairQualityGuard =
+            state_.lastRepairBudgetGuardActive &&
+            qualityDeadlineDropDelta == 0 &&
+            outputQueueDropDelta == 0 &&
+            retransmitStaleDropDelta == 0 &&
+            freshnessDropDelta == 0 &&
+            input.pacingCurrentQueueDelayMs < 30.0 &&
+            input.pacingMaxQueueDelayMs < 100.0 &&
+            displayHealthy;
+        state_.lastRepairBudgetGuardActive = repairQualityGuard;
         const bool smoothGuardReleaseDecrease =
             postG8ToG4QualityHoldActive ||
             (nackExpiredGuardReleaseActive &&
@@ -617,12 +1121,14 @@ namespace net {
             qoeScore >= 2.0 &&
             !recoveryFallbackPending &&
             !(fecQualityGuard && qoeScore < 3.0) &&
-            !(fecBurstTailRecovery && qoeScore < 3.0);
+            !(fecBurstTailRecovery && qoeScore < 3.0) &&
+            !(repairQualityGuard && qoeScore < 3.0);
         const bool moderateQoeProblem =
             qoeScore >= 1.0 &&
             !recoveryFallbackPending &&
             !fecQualityGuard &&
-            !fecBurstTailRecovery;
+            !fecBurstTailRecovery &&
+            !repairQualityGuard;
         const bool congestionPressure =
             HasCongestionPressure(
                 input,
@@ -633,12 +1139,14 @@ namespace net {
             congestionPressure &&
             !recoveryFallbackPending &&
             !fecQualityGuard &&
-            !fecBurstTailRecovery;
+            !fecBurstTailRecovery &&
+            !repairQualityGuard;
         const bool guardedBandwidthPressure =
             bandwidthPressure &&
             !recoveryFallbackPending &&
             !fecQualityGuard &&
-            !fecBurstTailRecovery;
+            !fecBurstTailRecovery &&
+            !repairQualityGuard;
         const bool lossOnlyPressure =
             !moderateQoeProblem &&
             guardedCongestionPressure;
@@ -1128,7 +1636,7 @@ namespace net {
         const AdaptiveStreamingInput& input,
         uint64_t pacingDeadlineDropDelta
     ) const {
-        return ShouldSuppressPacingDropForQuality(input) &&
+        return input.pacingEnabled &&
             (pacingDeadlineDropDelta > 0 ||
                 input.pacingCurrentQueueDelayMs >= 30.0 ||
                 input.pacingMaxQueueDelayMs >= 100.0);
@@ -1244,7 +1752,7 @@ namespace net {
         case AdaptiveDegradationCause::RecoveryDeadline:
             return hardProblem ? 0.82 : 0.90;
         case AdaptiveDegradationCause::PacingQueue:
-            return 1.0;
+            return hardProblem ? 0.88 : 0.94;
         case AdaptiveDegradationCause::None:
         default:
             return hardProblem ? 0.82 : 0.90;

@@ -4,6 +4,7 @@
 #include <d3d12.h>
 
 #include "../network/NetworkRuntimeMode.h"
+#include "../network/PacketProtocol.h"
 #include "utils/math/MathUtils.h"
 
 struct RuntimeAabbState {
@@ -51,6 +52,7 @@ struct AppRuntimeState {
     bool networkExperimentMode = false;
     net::NetworkRuntimeMode networkRuntimeMode =
         net::NetworkRuntimeMode::Loopback;
+    net::CodecType networkVideoCodec = net::CodecType::H264;
     bool enableVfxRenderPasses = true;
     bool enablePostProcessPasses = true;
     bool enableDebugPreviewPasses = true;

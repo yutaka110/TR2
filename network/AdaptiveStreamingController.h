@@ -62,6 +62,12 @@ namespace net {
         std::string lastOutputQueueDropReason;
         bool pacingEnabled = false;
         uint64_t pacingDeadlineDroppedPackets = 0;
+        uint64_t pacingHighPriorityDeadlineDroppedPackets = 0;
+        uint64_t pacingNormalDeadlineDroppedPackets = 0;
+        uint32_t pacingRepairTargetBitrateBps = 0;
+        uint64_t pacingRepairSentBytes = 0;
+        uint64_t pacingRepairBorrowedPackets = 0;
+        uint64_t pacingRepairBorrowedBytes = 0;
         double pacingCurrentQueueDelayMs = 0.0;
         double pacingMaxQueueDelayMs = 0.0;
         bool networkConditionEnabled = false;
@@ -79,6 +85,16 @@ namespace net {
         uint64_t fecParityPackets = 0;
         uint64_t fecRecoveredFrames = 0;
         uint64_t fecRecoveredChunks = 0;
+        uint64_t retransmitUsefulChunks = 0;
+        uint64_t retransmitDuplicatePackets = 0;
+        uint64_t retransmitLateAfterCompletedPackets = 0;
+        uint64_t retransmitLateAfterExpiredPackets = 0;
+        uint64_t retransmitLateAfterRejectedPackets = 0;
+        uint64_t retransmitNotArrivedPackets = 0;
+        uint64_t retransmitAccountedPackets = 0;
+        double retransmitFinalAccountingRatio = 0.0;
+        uint64_t nackFecGraceSuppressedFrames = 0;
+        uint64_t nackFecGraceSuppressedChunks = 0;
     };
 
     struct AdaptiveStreamingState {
@@ -146,6 +162,21 @@ namespace net {
         uint64_t lastOutputQueueDroppedFrames = 0;
         uint64_t lastDeadlineNackSentFrames = 0;
         uint64_t lastDeadlineNackMissingChunks = 0;
+        double h264VideoBudgetScale = 1.0;
+        bool lastPacingBurstGuardActive = false;
+        double lastRepairBudgetUtilization = 0.0;
+        double lastRepairBorrowedRatio = 0.0;
+        uint64_t lastRepairSentBytesDelta = 0;
+        uint64_t lastRepairBorrowedBytesDelta = 0;
+        bool lastRepairBudgetGuardActive = false;
+        bool lastRepairVideoBudgetPressure = false;
+        double lastRetransmitUsefulRatio = 0.0;
+        double lastLateRepairWasteRatio = 0.0;
+        double lastRetransmitNotArrivedRatio = 0.0;
+        bool lastRetransmitAccountingComplete = false;
+        bool lastLateRepairWastePressure = false;
+        bool lastRetransmitNotArrivedPressure = false;
+        std::string lastRepairDecisionReason;
     };
 
     class AdaptiveStreamingController {
@@ -301,6 +332,20 @@ namespace net {
         uint64_t lastReceiveFreshnessDroppedFrames_ = 0;
         bool hasPacingCounters_ = false;
         uint64_t lastPacingDeadlineDroppedPackets_ = 0;
+        uint64_t lastPacingHighPriorityDeadlineDroppedPackets_ = 0;
+        bool hasRepairCounters_ = false;
+        uint64_t lastPacingRepairSentBytes_ = 0;
+        uint64_t lastPacingRepairBorrowedBytes_ = 0;
+        bool hasRetransmitOutcomeCounters_ = false;
+        uint64_t lastRetransmitUsefulChunks_ = 0;
+        uint64_t lastRetransmitDuplicatePackets_ = 0;
+        uint64_t lastRetransmitLateAfterCompletedPackets_ = 0;
+        uint64_t lastRetransmitLateAfterExpiredPackets_ = 0;
+        uint64_t lastRetransmitLateAfterRejectedPackets_ = 0;
+        uint64_t lastRetransmitNotArrivedPackets_ = 0;
+        uint64_t lastRetransmitAccountedPackets_ = 0;
+        uint64_t lastNackFecGraceSuppressedFrames_ = 0;
+        uint64_t lastNackFecGraceSuppressedChunks_ = 0;
         bool hasFecCounters_ = false;
         uint64_t lastFecParityPackets_ = 0;
         uint64_t lastFecRecoveredFrames_ = 0;
@@ -317,6 +362,14 @@ namespace net {
         uint32_t lastAdaptiveFecSampleGroupChunkCount_ = 0;
         double postG8ToG4QualityHoldSec_ = 0.0;
         double fecBurstTailRecoverySec_ = 0.0;
+        double pacingBurstGuardSec_ = 0.0;
+        double pacingBurstPressureSec_ = 0.0;
+        double pacingBurstVideoBudgetScale_ = 1.0;
+        double repairBudgetGuardSec_ = 0.0;
+        double repairBorrowPressureSec_ = 0.0;
+        double retransmitNotArrivedPressureSec_ = 0.0;
+        double lateRepairWasteGuardSec_ = 0.0;
+        double repairTelemetryHoldSec_ = 0.0;
         uint32_t nackExpiredBitrateOnlyDecreaseSamples_ = 0;
         uint32_t nackExpiredBitrateOnlyDecreaseBudget_ = 2;
         int activeBandwidthCeilingKbps_ = 12000;
@@ -327,7 +380,7 @@ namespace net {
         static constexpr int kMinFps = 8;
         static constexpr int kMaxFps = 30;
 
-        static constexpr int kMinBitrateKbps = 500;
+        static constexpr int kMinBitrateKbps = 1800;
         static constexpr int kMaxBitrateKbps = 12000;
     };
 

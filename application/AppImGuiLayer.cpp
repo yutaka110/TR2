@@ -341,6 +341,24 @@ namespace {
             "listen :50000 / remote 127.0.0.1:50000",
             ImVec4(0.55f, 0.65f, 0.75f, 1.0f));
 
+        const char* codecModes[] = {
+            "MJPEG",
+            "H.264"
+        };
+        int codecModeIndex =
+            runtimeState.networkVideoCodec == net::CodecType::H264 ? 1 : 0;
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo(
+            "Codec Mode",
+            &codecModeIndex,
+            codecModes,
+            IM_ARRAYSIZE(codecModes))) {
+            runtimeState.networkVideoCodec =
+                codecModeIndex == 1
+                ? net::CodecType::H264
+                : net::CodecType::MJPEG;
+        }
+
         const char* adaptiveModes[] = {
             "Fixed Quality",
             "Loss Reactive",

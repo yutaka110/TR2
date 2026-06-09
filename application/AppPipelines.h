@@ -10,7 +10,7 @@
 #include "core/ShaderCompiler.h"
 
 // AppMain.cpp から RootSignature / PSO / ShaderCompile を切り出す。
-// 対象: Object3D, MotionDetect(CS), Particle。
+// 対象: Object3D, ReceivedVideoNv12(CS), Particle。
 class AppPipelines {
 public:
     bool Initialize(ID3D12Device* device);

@@ -170,26 +170,116 @@ namespace {
             << EscapeCsv(stats.lastOutputQueueDropReason) << ','
             << stats.decodedFrames << ','
             << stats.displayedFrames << ','
+            << stats.frameRecoveryOutcomeEvents << ','
+            << stats.frameRecoveryCompletedFrames << ','
+            << stats.frameRecoveryExpiredFrames << ','
+            << stats.frameRecoveryRejectedFrames << ','
+            << stats.frameRecoveryNackSentFrames << ','
+            << stats.frameRecoveryFecRecoveredFrames << ','
+            << stats.frameRecoveryLastFrameId << ','
+            << stats.frameRecoveryLastStreamId << ','
+            << EscapeCsv(stats.frameRecoveryLastEvent) << ','
+            << EscapeCsv(stats.frameRecoveryLastOutcome) << ','
+            << EscapeCsv(stats.frameRecoveryLastCodec) << ','
+            << (stats.frameRecoveryLastKeyFrame ? 1 : 0) << ','
+            << (stats.frameRecoveryLastLargeFrame ? 1 : 0) << ','
+            << stats.frameRecoveryLastChunkCount << ','
+            << stats.frameRecoveryLastReceivedChunks << ','
+            << stats.frameRecoveryLastMissingChunks << ','
+            << stats.frameRecoveryLastFecParityPackets << ','
+            << stats.frameRecoveryLastFecRecoveredChunks << ','
+            << stats.frameRecoveryLastNackCount << ','
+            << stats.frameRecoveryLastPostNackReceivedChunks << ','
+            << stats.frameRecoveryLastNackRequestedChunks << ','
+            << stats.frameRecoveryLastRetransmitReceivedChunks << ','
+            << stats.frameRecoveryLastRetransmitDuplicatePackets << ','
+            << stats.frameRecoveryLastPacketSequence << ','
+            << stats.frameRecoveryLastPacketChunkIndex << ','
+            << stats.frameRecoveryLastRetransmitSequence << ','
+            << stats.frameRecoveryLastRetransmitChunkIndex << ','
+            << stats.frameRecoveryLastEventPacketSequence << ','
+            << stats.frameRecoveryLastEventPacketChunkIndex << ','
+            << (stats.frameRecoveryLastEventWasRetransmit ? 1 : 0) << ','
+            << stats.frameRecoveryLastAgeMs << ','
+            << stats.retransmitUsefulChunks << ','
+            << stats.retransmitDuplicatePackets << ','
+            << stats.retransmitLateAfterCompletedPackets << ','
+            << stats.retransmitLateAfterExpiredPackets << ','
+            << stats.retransmitLateAfterRejectedPackets << ','
+            << stats.retransmitClassifiedPackets << ','
+            << stats.retransmitNotArrivedPackets << ','
+            << stats.retransmitAccountedPackets << ','
+            << stats.retransmitUnclassifiedPackets << ','
+            << stats.retransmitCompletedFrames << ','
+            << stats.retransmitExpiredFrames << ','
+            << stats.retransmitUsefulnessRatio << ','
+            << stats.retransmitDuplicateRatio << ','
+            << stats.retransmitFinalClassificationRatio << ','
+            << stats.retransmitFinalAccountingRatio << ','
+            << stats.retransmitExpiredAfterUsefulRatio << ','
+            << stats.dynamicNackDeadlineMs << ','
+            << stats.dynamicNackUsefulnessRatio << ','
+            << stats.dynamicNackDuplicateRatio << ','
+            << stats.dynamicNackExpiredAfterRetransmitRatio << ','
+            << EscapeCsv(stats.dynamicNackDecisionReason) << ','
+            << stats.nackSuppressedFrames << ','
+            << stats.nackSuppressedMissingChunks << ','
+            << stats.nackPreflightSuppressedFrames << ','
+            << stats.nackPreflightSuppressedChunks << ','
+            << stats.nackFecGraceSuppressedFrames << ','
+            << stats.nackFecGraceSuppressedChunks << ','
+            << stats.nackPredictedUsefulFrames << ','
+            << stats.nackPredictedUsefulChunks << ','
+            << stats.nackDeferredForLikelyArrivalFrames << ','
+            << stats.nackDeferredForLikelyArrivalChunks << ','
+            << stats.nackSkippedTooLateFrames << ','
+            << stats.nackSkippedTooLateChunks << ','
+            << stats.nackRequestedChunkBudget << ','
+            << EscapeCsv(stats.nackLastShapingReason) << ','
+            << EscapeCsv(stats.nackLastSuppressionReason) << ','
             << stats.ackCount << ','
             << stats.lastAckMissingRate << ','
             << stats.ackRetransmittedFrames << ','
             << stats.ackRetransmittedChunks << ','
+            << stats.repairCanceledByCompleteAckPackets << ','
+            << stats.repairSkippedByTtlPackets << ','
+            << stats.repairQueuedButCanceledPackets << ','
+            << stats.repairSuppressedByFecLikelyFrames << ','
+            << stats.repairSuppressedByFecLikelyPackets << ','
+            << stats.repairFecLikelySuppressedCompletedFrames << ','
+            << stats.repairFecLikelySuppressedCompletedPackets << ','
+            << stats.repairFecLikelySuppressedExpiredFrames << ','
+            << stats.repairFecLikelySuppressedExpiredPackets << ','
+            << stats.repairFecLikelySuppressedPendingFrames << ','
+            << stats.repairFecLikelySuppressedPendingPackets << ','
+            << stats.repairFecLikelySuppressionRescueFrames << ','
+            << stats.repairFecLikelySuppressionRescuePackets << ','
+            << stats.lateRepairSavedPackets << ','
             << stats.ackStaleDroppedFrames << ','
             << stats.ackKeyFrameRequests << ','
             << (stats.ackKeyFramePending ? 1 : 0) << ','
             << (stats.pacingEnabled ? 1 : 0) << ','
             << stats.pacingTargetBitrateBps << ','
+            << stats.pacingRepairTargetBitrateBps << ','
             << stats.pacingQueuedPackets << ','
             << stats.pacingHighPriorityQueuedPackets << ','
             << stats.pacingNormalQueuedPackets << ','
             << stats.pacingEnqueuedPackets << ','
             << stats.pacingSentPackets << ','
             << stats.pacingSentBytes << ','
+            << stats.pacingRepairSentPackets << ','
+            << stats.pacingRepairSentBytes << ','
+            << stats.pacingRepairBorrowedPackets << ','
+            << stats.pacingRepairBorrowedBytes << ','
             << stats.pacingDroppedPackets << ','
             << stats.pacingDeadlineDroppedPackets << ','
+            << stats.pacingHighPriorityDeadlineDroppedPackets << ','
+            << stats.pacingNormalDeadlineDroppedPackets << ','
             << stats.pacingOverflowDroppedPackets << ','
             << stats.pacingCurrentQueueDelayMs << ','
             << stats.pacingMaxQueueDelayMs << ','
+            << stats.pacingVideoCreditBytes << ','
+            << stats.pacingRepairCreditBytes << ','
             << stats.transportFeedbackPackets << ','
             << stats.transportFeedbackPacketStatuses << ','
             << stats.transportFeedbackReceivedPackets << ','
@@ -208,15 +298,27 @@ namespace {
             << stats.deadlineNackSentFrames << ','
             << stats.deadlineNackRecoveredFrames << ','
             << stats.deadlineNackMissingChunks << ','
+            << stats.deadlineNackSentH264KeyFrames << ','
+            << stats.deadlineNackSentH264LargeFrames << ','
+            << stats.deadlineNackSentH264DeltaFrames << ','
             << stats.deadlineNackExpiredDroppedFrames << ','
             << stats.deadlineNackExpiredAfterNackFrames << ','
             << stats.deadlineNackExpiredMissingChunks << ','
+            << stats.deadlineNackExpiredH264KeyFrames << ','
+            << stats.deadlineNackExpiredH264LargeFrames << ','
+            << stats.deadlineNackExpiredH264DeltaFrames << ','
             << (stats.fecEnabled ? 1 : 0) << ','
             << (stats.adaptiveFecEnabled ? 1 : 0) << ','
             << stats.fecGroupChunkCount << ','
             << stats.fecParityPackets << ','
             << stats.fecRecoveredFrames << ','
             << stats.fecRecoveredChunks << ','
+            << stats.h264ReassemblerAuRejectedFrames << ','
+            << stats.h264ReassemblerHeaderFailures << ','
+            << stats.h264ReassemblerPayloadSizeMismatches << ','
+            << stats.h264ReassemblerFrameIdMismatches << ','
+            << stats.h264ReassemblerCrcMismatches << ','
+            << EscapeCsv(stats.h264ReassemblerLastRejectReason) << ','
             << EscapeCsv(stats.adaptiveFecDecisionReason) << ','
             << EscapeCsv(stats.adaptiveFecHoldReason) << ','
             << (stats.adaptiveFecG8ToG4Recovery ? 1 : 0) << ','
@@ -233,13 +335,66 @@ namespace {
             << stats.adaptiveBandwidthCeilingKbps << ','
             << stats.adaptiveTargetWidth << ','
             << stats.adaptiveTargetHeight << ','
+            << EscapeCsv(stats.sendActualCodec) << ','
+            << stats.sendActualEncodeWidth << ','
+            << stats.sendActualEncodeHeight << ','
+            << stats.sendActualRawFrameBytes << ','
+            << stats.sendActualEncodedFrameBytes << ','
             << stats.adaptiveRawFrameBytes << ','
             << stats.adaptiveEncodedFrameBytes << ','
             << stats.adaptiveCompressionRatio << ','
             << stats.captureFps << ','
             << stats.encodeMs << ','
+            << stats.sendResizeMs << ','
+            << stats.sendNv12PrepareMs << ','
+            << stats.sendH264EncodeMs << ','
+            << stats.sendH264EncoderRequestedBitrateKbps << ','
+            << stats.sendH264EncoderTargetBitrateKbps << ','
+            << stats.sendH264EncoderAppliedBitrateKbps << ','
+            << stats.h264DynamicBitrateUpdateRequests << ','
+            << stats.h264DynamicBitrateUpdateSuccesses << ','
+            << stats.h264DynamicBitrateUpdateFailures << ','
+            << stats.h264EncoderReinitializations << ','
+            << stats.sendPacingTargetBitrateKbps << ','
+            << stats.sendH264VideoBudgetScale << ','
+            << (stats.pacingBurstGuardActive ? 1 : 0) << ','
+            << stats.adaptiveRepairBudgetUtilization << ','
+            << stats.adaptiveRepairBorrowedRatio << ','
+            << stats.adaptiveRepairSentBytesDelta << ','
+            << stats.adaptiveRepairBorrowedBytesDelta << ','
+            << (stats.adaptiveRepairBudgetGuardActive ? 1 : 0) << ','
+            << (stats.adaptiveRepairVideoBudgetPressure ? 1 : 0) << ','
+            << stats.adaptiveRetransmitUsefulRatio << ','
+            << stats.adaptiveLateRepairWasteRatio << ','
+            << stats.adaptiveRetransmitNotArrivedRatio << ','
+            << (stats.adaptiveRetransmitAccountingComplete ? 1 : 0) << ','
+            << (stats.adaptiveLateRepairWastePressure ? 1 : 0) << ','
+            << (stats.adaptiveRetransmitNotArrivedPressure ? 1 : 0) << ','
+            << EscapeCsv(stats.adaptiveRepairDecisionReason) << ','
+            << stats.h264AuChunkCount << ','
+            << (stats.h264AuIsIdr ? 1 : 0) << ','
+            << (stats.h264AuIsDecoderSync ? 1 : 0) << ','
+            << EscapeCsv(stats.h264AuProtectionLevel) << ','
+            << stats.fecProtectedH264KeyFrames << ','
+            << stats.fecProtectedH264LargeFrames << ','
+            << stats.h264EncoderDelayFrames << ','
+            << stats.h264EncoderDelayMs << ','
+            << stats.h264EncoderPendingFrames << ','
+            << stats.h264EncodedInputFrameId << ','
+            << stats.encodedCameraFrameId << ','
+            << stats.encodedCameraSourceTimestamp100ns << ','
+            << stats.encodedCameraCaptureCompletedTimeUs << ','
+            << stats.encodedCameraFrameAgeMs << ','
+            << stats.sendJpegEncodeMs << ','
+            << stats.sendPacketizeMs << ','
             << stats.sendFrameIntervalMs << ','
             << (stats.cameraFrameReady ? 1 : 0) << ','
+            << stats.cameraFrameId << ','
+            << stats.cameraSourceTimestamp100ns << ','
+            << stats.cameraCaptureCompletedTimeUs << ','
+            << stats.cameraReadSampleMs << ','
+            << stats.cameraFrameAgeMs << ','
+            << (stats.cameraFrameCacheUsed ? 1 : 0) << ','
             << stats.receiveJpegDecodeMs << ','
             << stats.receiveDecodeWorkerFps << ','
             << stats.receiveDecodeWorkerFrames << ','
@@ -248,6 +403,17 @@ namespace {
             << stats.receiveDecodeRenderOverwriteFrames << ','
             << stats.receiveDecodeFailures << ','
             << stats.receiveFreshnessDroppedFrames << ','
+            << stats.receiveH264AuInvalidFrames << ','
+            << stats.receiveH264AuCrcMismatches << ','
+            << stats.receiveH264AuPayloadSizeMismatches << ','
+            << stats.receiveH264AuNalCountMismatches << ','
+            << stats.receiveH264AuNoAnnexBNals << ','
+            << stats.receiveH264AuIdrFlagMismatches << ','
+            << stats.receiveH264AuSpsPpsFlagMismatches << ','
+            << stats.receiveH264AuSyncWithoutIdr << ','
+            << stats.receiveH264AuIdrWithoutSpsPps << ','
+            << stats.receiveH264AuForbiddenZeroBit << ','
+            << EscapeCsv(stats.receiveH264AuLastInvalidReason) << ','
             << stats.receiveDecodeInputFrameAgeMs << ','
             << stats.receiveLatestDecodedFrameAgeMs << ','
             << stats.receiveFreshnessDropThresholdMs << ','
@@ -347,26 +513,116 @@ namespace {
             << "lastOutputQueueDropReason,"
             << "decodedFrames,"
             << "displayedFrames,"
+            << "frameRecoveryOutcomeEvents,"
+            << "frameRecoveryCompletedFrames,"
+            << "frameRecoveryExpiredFrames,"
+            << "frameRecoveryRejectedFrames,"
+            << "frameRecoveryNackSentFrames,"
+            << "frameRecoveryFecRecoveredFrames,"
+            << "frameRecoveryLastFrameId,"
+            << "frameRecoveryLastStreamId,"
+            << "frameRecoveryLastEvent,"
+            << "frameRecoveryLastOutcome,"
+            << "frameRecoveryLastCodec,"
+            << "frameRecoveryLastKeyFrame,"
+            << "frameRecoveryLastLargeFrame,"
+            << "frameRecoveryLastChunkCount,"
+            << "frameRecoveryLastReceivedChunks,"
+            << "frameRecoveryLastMissingChunks,"
+            << "frameRecoveryLastFecParityPackets,"
+            << "frameRecoveryLastFecRecoveredChunks,"
+            << "frameRecoveryLastNackCount,"
+            << "frameRecoveryLastPostNackReceivedChunks,"
+            << "frameRecoveryLastNackRequestedChunks,"
+            << "frameRecoveryLastRetransmitReceivedChunks,"
+            << "frameRecoveryLastRetransmitDuplicatePackets,"
+            << "frameRecoveryLastPacketSequence,"
+            << "frameRecoveryLastPacketChunkIndex,"
+            << "frameRecoveryLastRetransmitSequence,"
+            << "frameRecoveryLastRetransmitChunkIndex,"
+            << "frameRecoveryLastEventPacketSequence,"
+            << "frameRecoveryLastEventPacketChunkIndex,"
+            << "frameRecoveryLastEventWasRetransmit,"
+            << "frameRecoveryLastAgeMs,"
+            << "retransmitUsefulChunks,"
+            << "retransmitDuplicatePackets,"
+            << "retransmitLateAfterCompletedPackets,"
+            << "retransmitLateAfterExpiredPackets,"
+            << "retransmitLateAfterRejectedPackets,"
+            << "retransmitClassifiedPackets,"
+            << "retransmitNotArrivedPackets,"
+            << "retransmitAccountedPackets,"
+            << "retransmitUnclassifiedPackets,"
+            << "retransmitCompletedFrames,"
+            << "retransmitExpiredFrames,"
+            << "retransmitUsefulnessRatio,"
+            << "retransmitDuplicateRatio,"
+            << "retransmitFinalClassificationRatio,"
+            << "retransmitFinalAccountingRatio,"
+            << "retransmitExpiredAfterUsefulRatio,"
+            << "dynamicNackDeadlineMs,"
+            << "dynamicNackUsefulnessRatio,"
+            << "dynamicNackDuplicateRatio,"
+            << "dynamicNackExpiredAfterRetransmitRatio,"
+            << "dynamicNackDecisionReason,"
+            << "nackSuppressedFrames,"
+            << "nackSuppressedMissingChunks,"
+            << "nackPreflightSuppressedFrames,"
+            << "nackPreflightSuppressedChunks,"
+            << "nackFecGraceSuppressedFrames,"
+            << "nackFecGraceSuppressedChunks,"
+            << "nackPredictedUsefulFrames,"
+            << "nackPredictedUsefulChunks,"
+            << "nackDeferredForLikelyArrivalFrames,"
+            << "nackDeferredForLikelyArrivalChunks,"
+            << "nackSkippedTooLateFrames,"
+            << "nackSkippedTooLateChunks,"
+            << "nackRequestedChunkBudget,"
+            << "nackLastShapingReason,"
+            << "nackLastSuppressionReason,"
             << "ackCount,"
             << "lastAckMissingRate,"
             << "ackRetransmittedFrames,"
             << "ackRetransmittedChunks,"
+            << "repairCanceledByCompleteAckPackets,"
+            << "repairSkippedByTtlPackets,"
+            << "repairQueuedButCanceledPackets,"
+            << "repairSuppressedByFecLikelyFrames,"
+            << "repairSuppressedByFecLikelyPackets,"
+            << "repairFecLikelySuppressedCompletedFrames,"
+            << "repairFecLikelySuppressedCompletedPackets,"
+            << "repairFecLikelySuppressedExpiredFrames,"
+            << "repairFecLikelySuppressedExpiredPackets,"
+            << "repairFecLikelySuppressedPendingFrames,"
+            << "repairFecLikelySuppressedPendingPackets,"
+            << "repairFecLikelySuppressionRescueFrames,"
+            << "repairFecLikelySuppressionRescuePackets,"
+            << "lateRepairSavedPackets,"
             << "ackStaleDroppedFrames,"
             << "ackKeyFrameRequests,"
             << "ackKeyFramePending,"
             << "pacingEnabled,"
             << "pacingTargetBitrateBps,"
+            << "pacingRepairTargetBitrateBps,"
             << "pacingQueuedPackets,"
             << "pacingHighPriorityQueuedPackets,"
             << "pacingNormalQueuedPackets,"
             << "pacingEnqueuedPackets,"
             << "pacingSentPackets,"
             << "pacingSentBytes,"
+            << "pacingRepairSentPackets,"
+            << "pacingRepairSentBytes,"
+            << "pacingRepairBorrowedPackets,"
+            << "pacingRepairBorrowedBytes,"
             << "pacingDroppedPackets,"
             << "pacingDeadlineDroppedPackets,"
+            << "pacingHighPriorityDeadlineDroppedPackets,"
+            << "pacingNormalDeadlineDroppedPackets,"
             << "pacingOverflowDroppedPackets,"
             << "pacingCurrentQueueDelayMs,"
             << "pacingMaxQueueDelayMs,"
+            << "pacingVideoCreditBytes,"
+            << "pacingRepairCreditBytes,"
             << "transportFeedbackPackets,"
             << "transportFeedbackPacketStatuses,"
             << "transportFeedbackReceivedPackets,"
@@ -385,15 +641,27 @@ namespace {
             << "deadlineNackSentFrames,"
             << "deadlineNackRecoveredFrames,"
             << "deadlineNackMissingChunks,"
+            << "deadlineNackSentH264KeyFrames,"
+            << "deadlineNackSentH264LargeFrames,"
+            << "deadlineNackSentH264DeltaFrames,"
             << "deadlineNackExpiredDroppedFrames,"
             << "deadlineNackExpiredAfterNackFrames,"
             << "deadlineNackExpiredMissingChunks,"
+            << "deadlineNackExpiredH264KeyFrames,"
+            << "deadlineNackExpiredH264LargeFrames,"
+            << "deadlineNackExpiredH264DeltaFrames,"
             << "fecEnabled,"
             << "adaptiveFecEnabled,"
             << "fecGroupChunkCount,"
             << "fecParityPackets,"
             << "fecRecoveredFrames,"
             << "fecRecoveredChunks,"
+            << "h264ReassemblerAuRejectedFrames,"
+            << "h264ReassemblerHeaderFailures,"
+            << "h264ReassemblerPayloadSizeMismatches,"
+            << "h264ReassemblerFrameIdMismatches,"
+            << "h264ReassemblerCrcMismatches,"
+            << "h264ReassemblerLastRejectReason,"
             << "adaptiveFecDecisionReason,"
             << "adaptiveFecHoldReason,"
             << "adaptiveFecG8ToG4Recovery,"
@@ -410,13 +678,66 @@ namespace {
             << "adaptiveBandwidthCeilingKbps,"
             << "targetWidth,"
             << "targetHeight,"
+            << "actualCodec,"
+            << "actualEncodeWidth,"
+            << "actualEncodeHeight,"
+            << "actualRawFrameBytes,"
+            << "actualEncodedFrameBytes,"
             << "rawFrameBytes,"
             << "encodedFrameBytes,"
             << "compressionRatio,"
             << "captureFps,"
             << "encodeMs,"
+            << "resizeMs,"
+            << "nv12PrepareMs,"
+            << "h264EncodeMs,"
+            << "h264EncoderRequestedBitrateKbps,"
+            << "h264EncoderTargetBitrateKbps,"
+            << "h264EncoderAppliedBitrateKbps,"
+            << "h264DynamicBitrateUpdateRequests,"
+            << "h264DynamicBitrateUpdateSuccesses,"
+            << "h264DynamicBitrateUpdateFailures,"
+            << "h264EncoderReinitializations,"
+            << "pacingBudgetTargetBitrateKbps,"
+            << "h264VideoBudgetScale,"
+            << "pacingBurstGuardActive,"
+            << "adaptiveRepairBudgetUtilization,"
+            << "adaptiveRepairBorrowedRatio,"
+            << "adaptiveRepairSentBytesDelta,"
+            << "adaptiveRepairBorrowedBytesDelta,"
+            << "adaptiveRepairBudgetGuardActive,"
+            << "adaptiveRepairVideoBudgetPressure,"
+            << "adaptiveRetransmitUsefulRatio,"
+            << "adaptiveLateRepairWasteRatio,"
+            << "adaptiveRetransmitNotArrivedRatio,"
+            << "adaptiveRetransmitAccountingComplete,"
+            << "adaptiveLateRepairWastePressure,"
+            << "adaptiveRetransmitNotArrivedPressure,"
+            << "adaptiveRepairDecisionReason,"
+            << "h264AuChunkCount,"
+            << "h264AuIsIdr,"
+            << "h264AuIsDecoderSync,"
+            << "h264AuProtectionLevel,"
+            << "fecProtectedH264KeyFrames,"
+            << "fecProtectedH264LargeFrames,"
+            << "h264EncoderDelayFrames,"
+            << "h264EncoderDelayMs,"
+            << "h264EncoderPendingFrames,"
+            << "h264EncodedInputFrameId,"
+            << "encodedCameraFrameId,"
+            << "encodedCameraSourceTimestamp100ns,"
+            << "encodedCameraCaptureCompletedTimeUs,"
+            << "encodedCameraFrameAgeMs,"
+            << "jpegEncodeMs,"
+            << "packetizeMs,"
             << "sendFrameIntervalMs,"
             << "cameraFrameReady,"
+            << "cameraFrameId,"
+            << "cameraSourceTimestamp100ns,"
+            << "cameraCaptureCompletedTimeUs,"
+            << "cameraReadSampleMs,"
+            << "cameraFrameAgeMs,"
+            << "cameraFrameCacheUsed,"
             << "receiveJpegDecodeMs,"
             << "receiveDecodeWorkerFps,"
             << "receiveDecodeWorkerFrames,"
@@ -425,6 +746,17 @@ namespace {
             << "receiveDecodeRenderOverwriteFrames,"
             << "receiveDecodeFailures,"
             << "receiveFreshnessDroppedFrames,"
+            << "receiveH264AuInvalidFrames,"
+            << "receiveH264AuCrcMismatches,"
+            << "receiveH264AuPayloadSizeMismatches,"
+            << "receiveH264AuNalCountMismatches,"
+            << "receiveH264AuNoAnnexBNals,"
+            << "receiveH264AuIdrFlagMismatches,"
+            << "receiveH264AuSpsPpsFlagMismatches,"
+            << "receiveH264AuSyncWithoutIdr,"
+            << "receiveH264AuIdrWithoutSpsPps,"
+            << "receiveH264AuForbiddenZeroBit,"
+            << "receiveH264AuLastInvalidReason,"
             << "receiveDecodeInputFrameAgeMs,"
             << "receiveLatestDecodedFrameAgeMs,"
             << "receiveFreshnessDropThresholdMs,"
