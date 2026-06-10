@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 class NetworkManager {
@@ -91,8 +92,24 @@ public:
     uint64_t GetRepairCanceledByCompleteAckPacketCount() const;
     uint64_t GetRepairSkippedByTtlPacketCount() const;
     uint64_t GetRepairQueuedButCanceledPacketCount() const;
+    uint64_t GetRepairSentAfterCompleteAckPacketCount() const;
+    uint64_t GetRepairSentAfterCompleteAckLargePacketCount() const;
     uint64_t GetRepairSuppressedByFecLikelyFrameCount() const;
     uint64_t GetRepairSuppressedByFecLikelyPacketCount() const;
+    uint64_t GetRepairSuppressedByFecLikelyLargeFrameCount() const;
+    uint64_t GetRepairSuppressedByFecLikelyLargePacketCount() const;
+    uint64_t GetRepairBudgetSuppressedFrameCount() const;
+    uint64_t GetRepairBudgetSuppressedPacketCount() const;
+    uint64_t GetRepairBudgetSuppressedLargeFrameCount() const;
+    uint64_t GetRepairBudgetSuppressedLargePacketCount() const;
+    uint64_t GetRepairRaceGuardSuppressedFrameCount() const;
+    uint64_t GetRepairRaceGuardSuppressedPacketCount() const;
+    uint64_t GetRepairRaceGuardSuppressedLargePacketCount() const;
+    std::string GetRepairBudgetProfile() const;
+    uint64_t GetRepairBudgetProfileSwitchCount() const;
+    double GetRepairBudgetSmoothedMissingRate() const;
+    double GetRepairBudgetSmoothedPacingQueueDelayMs() const;
+    double GetRepairBudgetSmoothedDeliveryMs() const;
     uint64_t GetRepairFecLikelySuppressedCompletedFrameCount() const;
     uint64_t GetRepairFecLikelySuppressedCompletedPacketCount() const;
     uint64_t GetRepairFecLikelySuppressedExpiredFrameCount() const;
@@ -135,6 +152,8 @@ public:
         uint64_t feedbackPacketStatuses = 0;
         uint64_t feedbackReceivedPackets = 0;
         uint64_t feedbackMissingPackets = 0;
+        uint64_t feedbackSequenceGapPackets = 0;
+        uint64_t feedbackSequenceGapRecoveredPackets = 0;
         double feedbackLossRate = 0.0;
         double feedbackArrivalJitterMs = 0.0;
         double feedbackQueueDelayTrendMs = 0.0;
@@ -183,6 +202,31 @@ private:
         uint64_t ttlUs = 0;
         uint64_t deadlineUs = 0;
         const char* reason = "unknown";
+    };
+
+    enum class RepairBudgetProfile {
+        Balanced,
+        Clean,
+        Loss,
+        BurstLoss,
+        Jitter,
+        JitterAckLoss,
+        Pacing
+    };
+
+    struct RepairBudgetControllerState {
+        bool initialized = false;
+        RepairBudgetProfile activeProfile = RepairBudgetProfile::Balanced;
+        RepairBudgetProfile candidateProfile = RepairBudgetProfile::Balanced;
+        uint32_t candidateSamples = 0;
+        uint64_t holdUntilUs = 0;
+        uint64_t switchCount = 0;
+        double smoothedMissingRate = 0.0;
+        double smoothedPacingQueueDelayUs = 0.0;
+        double smoothedRepairDeliveryUs = 0.0;
+        double smoothedRttMs = 0.0;
+        double smoothedConfiguredLossRate = 0.0;
+        double smoothedDelaySpreadMs = 0.0;
     };
 
     struct FecLikelySuppressionRecord {
@@ -286,6 +330,29 @@ private:
         uint32_t retransmitAttempt,
         uint64_t nowUs
     );
+    std::vector<uint16_t> LimitRepairChunksByDynamicBudgetLocked(
+        const SentFrameRecord& record,
+        const net::AckPayload& ack,
+        const std::vector<uint16_t>& chunkIndices,
+        uint32_t retransmitAttempt,
+        uint64_t nowUs,
+        uint64_t estimatedRepairDeliveryUs,
+        uint64_t pacingQueueDelayUs,
+        double averageRttMs,
+        const net::NetworkCondition& condition,
+        double missingRate
+    );
+    RepairBudgetProfile UpdateRepairBudgetControllerLocked(
+        uint64_t nowUs,
+        uint64_t estimatedRepairDeliveryUs,
+        uint64_t pacingQueueDelayUs,
+        double averageRttMs,
+        const net::NetworkCondition& condition,
+        double missingRate
+    );
+    const char* ToRepairBudgetProfileString(
+        RepairBudgetProfile profile
+    ) const;
     void RememberFecLikelySuppressionLocked(
         const SentFrameRecord& record,
         uint32_t suppressedPackets,
@@ -445,8 +512,20 @@ private:
     uint64_t repairCanceledByCompleteAckPackets_ = 0;
     uint64_t repairSkippedByTtlPackets_ = 0;
     uint64_t repairQueuedButCanceledPackets_ = 0;
+    uint64_t repairSentAfterCompleteAckPackets_ = 0;
+    uint64_t repairSentAfterCompleteAckLargePackets_ = 0;
     uint64_t repairSuppressedByFecLikelyFrames_ = 0;
     uint64_t repairSuppressedByFecLikelyPackets_ = 0;
+    uint64_t repairSuppressedByFecLikelyLargeFrames_ = 0;
+    uint64_t repairSuppressedByFecLikelyLargePackets_ = 0;
+    uint64_t repairBudgetSuppressedFrames_ = 0;
+    uint64_t repairBudgetSuppressedPackets_ = 0;
+    uint64_t repairBudgetSuppressedLargeFrames_ = 0;
+    uint64_t repairBudgetSuppressedLargePackets_ = 0;
+    uint64_t repairRaceGuardSuppressedFrames_ = 0;
+    uint64_t repairRaceGuardSuppressedPackets_ = 0;
+    uint64_t repairRaceGuardSuppressedLargePackets_ = 0;
+    RepairBudgetControllerState repairBudgetController_{};
     uint64_t repairFecLikelySuppressedCompletedFrames_ = 0;
     uint64_t repairFecLikelySuppressedCompletedPackets_ = 0;
     uint64_t repairFecLikelySuppressedExpiredFrames_ = 0;
@@ -465,6 +544,7 @@ private:
 
     mutable std::mutex transportFeedbackMutex_;
     TransportFeedbackStats transportFeedbackStats_{};
+    std::unordered_set<uint32_t> pendingMissingFeedbackSequences_;
 
     static constexpr size_t kSentFrameHistoryLimit = 24;
     static constexpr size_t kSentPacketHistoryLimit = 2048;

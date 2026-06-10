@@ -26,6 +26,11 @@ namespace {
     constexpr uint64_t kKeyH264RepairExtraTtlUs = 40000;
     constexpr uint64_t kMinRepairTtlUs = 45000;
     constexpr uint64_t kUrgentRepairRemainingUs = 30000;
+    constexpr uint64_t kRepairDeliveryGuardUs = 8000;
+    constexpr uint64_t kReceiverCompleteRaceMinDeliveryUs = 20000;
+    constexpr uint64_t kReceiverCompleteRaceMaxDeliveryUs = 120000;
+    constexpr uint64_t kReceiverCompleteRaceSafeUpperSlackUs = 45000;
+    constexpr uint64_t kReceiverCompleteRaceSafeUpperDeliveryMaxUs = 90000;
     constexpr uint64_t kFecRescueMinRemainingUs = 22000;
     constexpr uint64_t kFecRescueLargeLatestRemainingUs = 75000;
     constexpr uint64_t kFecRescueLargeSingletonLatestRemainingUs = 50000;
@@ -51,6 +56,26 @@ namespace {
         std::ostringstream oss;
         oss << std::put_time(&localTime, "%Y%m%d_%H%M%S");
         return oss.str();
+    }
+
+    std::string EscapeTraceCsv(std::string value) {
+        const bool needsQuote =
+            value.find_first_of(",\"\r\n") != std::string::npos;
+        if (!needsQuote) {
+            return value;
+        }
+
+        std::string escaped;
+        escaped.reserve(value.size() + 2);
+        escaped.push_back('"');
+        for (char ch : value) {
+            if (ch == '"') {
+                escaped.push_back('"');
+            }
+            escaped.push_back(ch);
+        }
+        escaped.push_back('"');
+        return escaped;
     }
 
     std::ofstream& RetransmitTraceFile() {
@@ -92,6 +117,38 @@ namespace {
                 << "context\n";
         }
         return file;
+    }
+
+    bool IsRepairBudgetStatefulEnabled() {
+        char* buffer = nullptr;
+        size_t size = 0;
+        if (_dupenv_s(&buffer, &size, "RNVP_REPAIR_BUDGET_STATEFUL") != 0 ||
+            buffer == nullptr) {
+            return true;
+        }
+
+        const std::string value(buffer);
+        std::free(buffer);
+        return value != "0" && value != "false" && value != "off";
+    }
+
+    bool IsRepairRaceOpportunityTraceForced() {
+        static const bool enabled = []() {
+            char* buffer = nullptr;
+            size_t size = 0;
+            if (_dupenv_s(
+                    &buffer,
+                    &size,
+                    "RNVP_REPAIR_RACE_OPPORTUNITY_TRACE") != 0 ||
+                buffer == nullptr) {
+                return false;
+            }
+
+            const std::string value(buffer);
+            std::free(buffer);
+            return value != "0" && value != "false" && value != "off";
+        }();
+        return enabled;
     }
 
     void WriteRetransmitTrace(
@@ -144,6 +201,183 @@ namespace {
             << repairDeadlineUs << ','
             << (repairPolicy != nullptr ? repairPolicy : "") << ','
             << (context != nullptr ? context : "")
+            << '\n';
+        file.flush();
+    }
+
+    std::ofstream& RepairRaceOpportunityTraceFile() {
+        static std::ofstream file;
+        static bool initialized = false;
+        if (initialized) {
+            return file;
+        }
+
+        initialized = true;
+        std::error_code ec;
+        std::filesystem::create_directories("logs", ec);
+        const std::filesystem::path path =
+            std::filesystem::path("logs") /
+            ("repair_race_opportunity_trace_" + MakeTraceTimestamp() + ".csv");
+        file.open(path, std::ios::out | std::ios::trunc);
+        if (file) {
+            file
+                << "eventTimeUs,"
+                << "eventName,"
+                << "frameId,"
+                << "streamId,"
+                << "codec,"
+                << "keyFrame,"
+                << "largeFrame,"
+                << "chunkIndex,"
+                << "chunkCount,"
+                << "ackLatestSequence,"
+                << "retransmitAttempt,"
+                << "ackMissingChunks,"
+                << "ackRequestedChunks,"
+                << "baseCap,"
+                << "capBeforeRaceGuard,"
+                << "raceGuardCap,"
+                << "capAfterRaceGuard,"
+                << "finalCap,"
+                << "suppressed,"
+                << "guardCandidate,"
+                << "guardApplied,"
+                << "guardSuppressed,"
+                << "guardExclusionReason,"
+                << "deliveryWindow,"
+                << "slackWindow,"
+                << "lowerSlackWindow,"
+                << "upperSafeSlackWindow,"
+                << "missingWindow,"
+                << "fecEnabled,"
+                << "fecGroupChunkCount,"
+                << "fecMissingGroups,"
+                << "fecSingletonMissingGroups,"
+                << "fecMultiMissingGroups,"
+                << "fecLikelyRecoverableChunks,"
+                << "fecRepairNeededChunks,"
+                << "fecLikelyClass,"
+                << "estimatedDeliveryUs,"
+                << "pacingQueueDelayUs,"
+                << "usableSlackUs,"
+                << "tightSlackUs,"
+                << "lowSlackUs,"
+                << "repairTtlUs,"
+                << "repairDeadlineUs,"
+                << "missingRate,"
+                << "profile,"
+                << "budgetReason,"
+                << "context\n";
+        }
+        return file;
+    }
+
+    void WriteRepairRaceOpportunityTrace(
+        uint64_t eventTimeUs,
+        const char* eventName,
+        uint32_t frameId,
+        uint32_t streamId,
+        net::CodecType codecType,
+        bool keyFrame,
+        bool largeFrame,
+        uint16_t chunkIndex,
+        uint16_t chunkCount,
+        uint32_t ackLatestSequence,
+        uint32_t retransmitAttempt,
+        uint32_t ackMissingChunks,
+        uint32_t ackRequestedChunks,
+        uint32_t baseCap,
+        uint32_t capBeforeRaceGuard,
+        uint32_t raceGuardCap,
+        uint32_t capAfterRaceGuard,
+        uint32_t finalCap,
+        bool suppressed,
+        bool guardCandidate,
+        bool guardApplied,
+        bool guardSuppressed,
+        const char* guardExclusionReason,
+        bool deliveryWindow,
+        bool slackWindow,
+        bool lowerSlackWindow,
+        bool upperSafeSlackWindow,
+        bool missingWindow,
+        bool fecEnabled,
+        uint16_t fecGroupChunkCount,
+        uint32_t fecMissingGroups,
+        uint32_t fecSingletonMissingGroups,
+        uint32_t fecMultiMissingGroups,
+        uint32_t fecLikelyRecoverableChunks,
+        uint32_t fecRepairNeededChunks,
+        const char* fecLikelyClass,
+        uint64_t estimatedDeliveryUs,
+        uint64_t pacingQueueDelayUs,
+        uint64_t usableSlackUs,
+        uint64_t tightSlackUs,
+        uint64_t lowSlackUs,
+        uint64_t repairTtlUs,
+        uint64_t repairDeadlineUs,
+        double missingRate,
+        const std::string& profile,
+        const std::string& budgetReason,
+        const char* context
+    ) {
+        std::ofstream& file = RepairRaceOpportunityTraceFile();
+        if (!file) {
+            return;
+        }
+
+        file
+            << eventTimeUs << ','
+            << (eventName != nullptr ? eventName : "unknown") << ','
+            << frameId << ','
+            << streamId << ','
+            << net::ToString(codecType) << ','
+            << (keyFrame ? 1 : 0) << ','
+            << (largeFrame ? 1 : 0) << ','
+            << chunkIndex << ','
+            << chunkCount << ','
+            << ackLatestSequence << ','
+            << retransmitAttempt << ','
+            << ackMissingChunks << ','
+            << ackRequestedChunks << ','
+            << baseCap << ','
+            << capBeforeRaceGuard << ','
+            << raceGuardCap << ','
+            << capAfterRaceGuard << ','
+            << finalCap << ','
+            << (suppressed ? 1 : 0) << ','
+            << (guardCandidate ? 1 : 0) << ','
+            << (guardApplied ? 1 : 0) << ','
+            << (guardSuppressed ? 1 : 0) << ','
+            << EscapeTraceCsv(guardExclusionReason != nullptr
+                ? guardExclusionReason
+                : "unknown") << ','
+            << (deliveryWindow ? 1 : 0) << ','
+            << (slackWindow ? 1 : 0) << ','
+            << (lowerSlackWindow ? 1 : 0) << ','
+            << (upperSafeSlackWindow ? 1 : 0) << ','
+            << (missingWindow ? 1 : 0) << ','
+            << (fecEnabled ? 1 : 0) << ','
+            << fecGroupChunkCount << ','
+            << fecMissingGroups << ','
+            << fecSingletonMissingGroups << ','
+            << fecMultiMissingGroups << ','
+            << fecLikelyRecoverableChunks << ','
+            << fecRepairNeededChunks << ','
+            << EscapeTraceCsv(fecLikelyClass != nullptr
+                ? fecLikelyClass
+                : "unknown") << ','
+            << estimatedDeliveryUs << ','
+            << pacingQueueDelayUs << ','
+            << usableSlackUs << ','
+            << tightSlackUs << ','
+            << lowSlackUs << ','
+            << repairTtlUs << ','
+            << repairDeadlineUs << ','
+            << missingRate << ','
+            << EscapeTraceCsv(profile) << ','
+            << EscapeTraceCsv(budgetReason) << ','
+            << EscapeTraceCsv(context != nullptr ? context : "")
             << '\n';
         file.flush();
     }
@@ -830,6 +1064,35 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                 nowUs,
                 ackMissingChunks,
                 static_cast<uint32_t>(chunkIndices.size()));
+        bool predictedLate = false;
+        uint64_t predictedDeliveryUs = 0;
+        {
+            const net::PacketPacerStats pacingStats = packetPacer_.GetStats();
+            const net::NetworkCondition condition =
+                networkSimulator_.GetCondition();
+            const uint64_t simulatorOneWayDelayUs =
+                condition.enabled
+                ? static_cast<uint64_t>(condition.maxDelayMs) * 1000ull
+                : 0ull;
+            const double averageRttMs = GetAverageRttMs();
+            const uint64_t rttOneWayDelayUs =
+                averageRttMs > 0.0
+                ? static_cast<uint64_t>((averageRttMs * 1000.0) * 0.5)
+                : 0ull;
+            const uint64_t pacingQueueDelayUs =
+                pacingStats.currentQueueDelayMs > 0.0
+                ? static_cast<uint64_t>(
+                    pacingStats.currentQueueDelayMs * 1000.0)
+                : 0ull;
+
+            predictedDeliveryUs =
+                pacingQueueDelayUs +
+                (std::max)(simulatorOneWayDelayUs, rttOneWayDelayUs) +
+                kRepairDeliveryGuardUs;
+            predictedLate =
+                repairPolicy.deadlineUs > 0 &&
+                nowUs + predictedDeliveryUs >= repairPolicy.deadlineUs;
+        }
         {
             std::lock_guard<std::mutex> lock(sentFramesMutex_);
             if (ShouldSkipRepairForFrameLocked(
@@ -847,12 +1110,20 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                 }
             }
         }
+        if (!completedAck && !ttlExpired && predictedLate) {
+            ttlExpired = true;
+            std::lock_guard<std::mutex> lock(sentFramesMutex_);
+            lateRepairSavedPackets_++;
+            repairSkippedByTtlPackets_++;
+        }
         if (completedAck || ttlExpired) {
             WriteRetransmitTrace(
                 nowUs,
                 completedAck
                     ? "retransmit-skipped-complete-ack"
-                    : "retransmit-skipped-ttl",
+                    : (predictedLate
+                        ? "retransmit-skipped-predicted-late"
+                        : "retransmit-skipped-ttl"),
                 0,
                 frameId,
                 streamId,
@@ -872,7 +1143,9 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                 ToRepairPriorityString(repairPolicy.priority),
                 repairPolicy.ttlUs,
                 repairPolicy.deadlineUs,
-                repairPolicy.reason,
+                predictedLate
+                    ? "predicted-delivery-after-deadline"
+                    : repairPolicy.reason,
                 context
             );
             continue;
@@ -1244,6 +1517,10 @@ NetworkManager::FilterRepairChunksForFecLikelyRecoveryLocked(
 
     repairSuppressedByFecLikelyFrames_++;
     repairSuppressedByFecLikelyPackets_ += suppressed.size();
+    if (largeFrame) {
+        repairSuppressedByFecLikelyLargeFrames_++;
+        repairSuppressedByFecLikelyLargePackets_ += suppressed.size();
+    }
     lateRepairSavedPackets_ += suppressed.size();
     RememberFecLikelySuppressionLocked(
         record,
@@ -1287,6 +1564,783 @@ NetworkManager::FilterRepairChunksForFecLikelyRecoveryLocked(
     }
 
     return filtered;
+}
+
+const char*
+NetworkManager::ToRepairBudgetProfileString(
+    RepairBudgetProfile profile
+) const {
+    switch (profile) {
+    case RepairBudgetProfile::Clean:
+        return "clean";
+    case RepairBudgetProfile::Loss:
+        return "loss";
+    case RepairBudgetProfile::BurstLoss:
+        return "burst-loss";
+    case RepairBudgetProfile::Jitter:
+        return "jitter";
+    case RepairBudgetProfile::JitterAckLoss:
+        return "jitter-ack-loss";
+    case RepairBudgetProfile::Pacing:
+        return "pacing";
+    case RepairBudgetProfile::Balanced:
+    default:
+        return "balanced";
+    }
+}
+
+NetworkManager::RepairBudgetProfile
+NetworkManager::UpdateRepairBudgetControllerLocked(
+    uint64_t nowUs,
+    uint64_t estimatedRepairDeliveryUs,
+    uint64_t pacingQueueDelayUs,
+    double averageRttMs,
+    const net::NetworkCondition& condition,
+    double missingRate
+) {
+    auto ewma = [](double previous, double current, double alpha) {
+        return previous + (current - previous) * alpha;
+    };
+
+    const uint32_t delaySpreadMs =
+        condition.maxDelayMs > condition.minDelayMs
+        ? condition.maxDelayMs - condition.minDelayMs
+        : 0u;
+
+    const bool firstSample = !repairBudgetController_.initialized;
+    if (firstSample) {
+        repairBudgetController_.initialized = true;
+        repairBudgetController_.smoothedMissingRate = missingRate;
+        repairBudgetController_.smoothedPacingQueueDelayUs =
+            static_cast<double>(pacingQueueDelayUs);
+        repairBudgetController_.smoothedRepairDeliveryUs =
+            static_cast<double>(estimatedRepairDeliveryUs);
+        repairBudgetController_.smoothedRttMs = averageRttMs;
+        repairBudgetController_.smoothedConfiguredLossRate =
+            condition.enabled ? condition.lossRate : 0.0;
+        repairBudgetController_.smoothedDelaySpreadMs =
+            static_cast<double>(delaySpreadMs);
+    }
+    else {
+        repairBudgetController_.smoothedMissingRate =
+            ewma(repairBudgetController_.smoothedMissingRate, missingRate, 0.25);
+        repairBudgetController_.smoothedPacingQueueDelayUs =
+            ewma(
+                repairBudgetController_.smoothedPacingQueueDelayUs,
+                static_cast<double>(pacingQueueDelayUs),
+                0.25);
+        repairBudgetController_.smoothedRepairDeliveryUs =
+            ewma(
+                repairBudgetController_.smoothedRepairDeliveryUs,
+                static_cast<double>(estimatedRepairDeliveryUs),
+                0.25);
+        repairBudgetController_.smoothedRttMs =
+            ewma(repairBudgetController_.smoothedRttMs, averageRttMs, 0.20);
+        repairBudgetController_.smoothedConfiguredLossRate =
+            ewma(
+                repairBudgetController_.smoothedConfiguredLossRate,
+                condition.enabled ? condition.lossRate : 0.0,
+                0.20);
+        repairBudgetController_.smoothedDelaySpreadMs =
+            ewma(
+                repairBudgetController_.smoothedDelaySpreadMs,
+                static_cast<double>(delaySpreadMs),
+                0.20);
+    }
+
+    const bool lossPressure =
+        condition.enabled &&
+        (repairBudgetController_.smoothedConfiguredLossRate >= 0.08 ||
+            condition.burstLossLength >= 4);
+    const bool ackLossPressure =
+        repairBudgetController_.smoothedMissingRate >= 0.16 ||
+        missingRate >= 0.28;
+    const bool delayJitterPressure =
+        (condition.enabled &&
+            (condition.maxDelayMs >= 80 ||
+                repairBudgetController_.smoothedDelaySpreadMs >= 50.0)) ||
+        repairBudgetController_.smoothedRttMs >= 120.0;
+    const bool reorderPressure =
+        condition.enabled && condition.reorderRate >= 0.04;
+    const bool jitterPressure = delayJitterPressure || reorderPressure;
+    const bool rawPacingPressure =
+        repairBudgetController_.smoothedPacingQueueDelayUs >= 45000.0 ||
+        repairBudgetController_.smoothedRepairDeliveryUs >= 70000.0 ||
+        pacingQueueDelayUs >= 65000 ||
+        estimatedRepairDeliveryUs >= 90000;
+    const bool severePacingPressure =
+        repairBudgetController_.smoothedPacingQueueDelayUs >= 80000.0 ||
+        repairBudgetController_.smoothedRepairDeliveryUs >= 110000.0 ||
+        pacingQueueDelayUs >= 95000 ||
+        estimatedRepairDeliveryUs >= 130000;
+    const bool pacingPressure =
+        (jitterPressure || lossPressure || ackLossPressure)
+        ? severePacingPressure
+        : rawPacingPressure;
+
+    RepairBudgetProfile desiredProfile = RepairBudgetProfile::Balanced;
+    if (pacingPressure) {
+        desiredProfile = RepairBudgetProfile::Pacing;
+    }
+    else if (jitterPressure && ackLossPressure && !lossPressure) {
+        desiredProfile = RepairBudgetProfile::JitterAckLoss;
+    }
+    else if (jitterPressure && !lossPressure) {
+        desiredProfile = RepairBudgetProfile::Jitter;
+    }
+    else if (condition.burstLossLength >= 4) {
+        desiredProfile = RepairBudgetProfile::BurstLoss;
+    }
+    else if (lossPressure || ackLossPressure) {
+        desiredProfile = RepairBudgetProfile::Loss;
+    }
+    else if (!condition.enabled &&
+        repairBudgetController_.smoothedRttMs > 0.0 &&
+        repairBudgetController_.smoothedRttMs < 40.0 &&
+        repairBudgetController_.smoothedMissingRate < 0.08 &&
+        repairBudgetController_.smoothedPacingQueueDelayUs < 30000.0) {
+        desiredProfile = RepairBudgetProfile::Clean;
+    }
+
+    if (firstSample) {
+        repairBudgetController_.activeProfile = desiredProfile;
+        repairBudgetController_.candidateProfile = desiredProfile;
+        repairBudgetController_.candidateSamples = 0;
+        repairBudgetController_.holdUntilUs = nowUs + 120000ull;
+        return repairBudgetController_.activeProfile;
+    }
+
+    if (desiredProfile == repairBudgetController_.activeProfile) {
+        repairBudgetController_.candidateProfile = desiredProfile;
+        repairBudgetController_.candidateSamples = 0;
+        return repairBudgetController_.activeProfile;
+    }
+
+    if (desiredProfile != repairBudgetController_.candidateProfile) {
+        repairBudgetController_.candidateProfile = desiredProfile;
+        repairBudgetController_.candidateSamples = 1;
+    }
+    else {
+        repairBudgetController_.candidateSamples++;
+    }
+
+    uint32_t requiredSamples = 4;
+    if (desiredProfile == RepairBudgetProfile::Pacing ||
+        desiredProfile == RepairBudgetProfile::Loss ||
+        desiredProfile == RepairBudgetProfile::BurstLoss ||
+        desiredProfile == RepairBudgetProfile::JitterAckLoss) {
+        requiredSamples = 3;
+    }
+    else if (desiredProfile == RepairBudgetProfile::Clean) {
+        requiredSamples = 5;
+    }
+
+    const bool urgentSwitch =
+        desiredProfile == RepairBudgetProfile::Pacing &&
+        (pacingQueueDelayUs >= 90000 || estimatedRepairDeliveryUs >= 120000);
+    const bool holdElapsed = nowUs >= repairBudgetController_.holdUntilUs;
+    if ((holdElapsed || urgentSwitch) &&
+        repairBudgetController_.candidateSamples >= requiredSamples) {
+        repairBudgetController_.activeProfile = desiredProfile;
+        repairBudgetController_.switchCount++;
+        repairBudgetController_.holdUntilUs =
+            nowUs + (urgentSwitch ? 100000ull : 250000ull);
+        repairBudgetController_.candidateSamples = 0;
+    }
+
+    return repairBudgetController_.activeProfile;
+}
+
+std::vector<uint16_t>
+NetworkManager::LimitRepairChunksByDynamicBudgetLocked(
+    const SentFrameRecord& record,
+    const net::AckPayload& ack,
+    const std::vector<uint16_t>& chunkIndices,
+    uint32_t retransmitAttempt,
+    uint64_t nowUs,
+    uint64_t estimatedRepairDeliveryUs,
+    uint64_t pacingQueueDelayUs,
+    double averageRttMs,
+    const net::NetworkCondition& condition,
+    double missingRate
+) {
+    if (chunkIndices.empty()) {
+        return chunkIndices;
+    }
+
+    const RepairPacketPolicy repairPolicy =
+        BuildRepairPacketPolicy(
+            record,
+            nowUs,
+            ack.missingChunkCount,
+            static_cast<uint32_t>(chunkIndices.size()));
+
+    const uint64_t deliveryReadyUs = nowUs + estimatedRepairDeliveryUs;
+    uint64_t usableSlackUs = 0;
+    if (repairPolicy.deadlineUs > deliveryReadyUs) {
+        usableSlackUs = repairPolicy.deadlineUs - deliveryReadyUs;
+    }
+
+    const bool largeFrame = IsLargeRepairFrame(record);
+    uint32_t fecMissingGroups = 0;
+    uint32_t fecSingletonMissingGroups = 0;
+    uint32_t fecMultiMissingGroups = 0;
+    uint32_t fecLikelyRecoverableChunks = 0;
+    uint32_t fecRepairNeededChunks = 0;
+    const char* fecLikelyClass = "fec-unavailable";
+    if (record.fecEnabled &&
+        record.fecGroupChunkCount >= 2 &&
+        record.chunkCount > 0 &&
+        record.codecType == net::CodecType::H264) {
+        const uint16_t groupChunkCount = record.fecGroupChunkCount;
+        const uint32_t groupCount =
+            (static_cast<uint32_t>(record.chunkCount) +
+                groupChunkCount - 1) /
+            groupChunkCount;
+        std::vector<uint16_t> missingPerGroup(groupCount, 0);
+        if (groupCount > 0) {
+            for (uint16_t chunkIndex : ack.missingChunkIndices) {
+                if (chunkIndex >= record.chunkCount) {
+                    continue;
+                }
+
+                const uint32_t groupIndex = chunkIndex / groupChunkCount;
+                if (groupIndex < missingPerGroup.size()) {
+                    missingPerGroup[groupIndex]++;
+                }
+            }
+            for (uint16_t missingInGroup : missingPerGroup) {
+                if (missingInGroup == 0) {
+                    continue;
+                }
+
+                fecMissingGroups++;
+                if (missingInGroup == 1) {
+                    fecSingletonMissingGroups++;
+                    fecLikelyRecoverableChunks++;
+                }
+                else {
+                    fecMultiMissingGroups++;
+                    fecRepairNeededChunks += missingInGroup;
+                }
+            }
+        }
+
+        if (fecMissingGroups == 0) {
+            fecLikelyClass = "fec-no-valid-missing";
+        }
+        else if (fecRepairNeededChunks == 0) {
+            fecLikelyClass = "fec-likely-all-singleton";
+        }
+        else if (fecLikelyRecoverableChunks > 0) {
+            fecLikelyClass = "fec-mixed-singleton-and-repair";
+        }
+        else {
+            fecLikelyClass = "fec-unlikely-multimissing";
+        }
+    }
+    const bool statefulBudgetEnabled = IsRepairBudgetStatefulEnabled();
+    const RepairBudgetProfile activeProfile =
+        statefulBudgetEnabled
+        ? UpdateRepairBudgetControllerLocked(
+              nowUs,
+              estimatedRepairDeliveryUs,
+              pacingQueueDelayUs,
+              averageRttMs,
+              condition,
+              missingRate)
+        : RepairBudgetProfile::Balanced;
+    const bool configuredLossPressure =
+        statefulBudgetEnabled
+        ? (
+            activeProfile == RepairBudgetProfile::Loss ||
+            activeProfile == RepairBudgetProfile::BurstLoss ||
+            (condition.enabled &&
+                (condition.lossRate >= 0.08 || condition.burstLossLength >= 4)))
+        : (
+            condition.enabled &&
+            (condition.lossRate >= 0.08 || condition.burstLossLength >= 4));
+    const bool ackLossPressure =
+        missingRate >= 0.18 ||
+        (statefulBudgetEnabled &&
+            repairBudgetController_.smoothedMissingRate >= 0.14);
+
+    uint32_t keyFrameCap = 8;
+    uint32_t largeFrameCap = 4;
+    uint32_t deltaFrameCap = 2;
+    uint64_t tightSlackUs = 20000;
+    uint64_t lowSlackUs = 35000;
+    uint64_t pacingPressureUs = 45000;
+    uint64_t heavyPacingUs = 70000;
+    std::string budgetProfile =
+        statefulBudgetEnabled
+        ? ToRepairBudgetProfileString(activeProfile)
+        : "instant";
+
+    const bool instantPacingPressure =
+        !statefulBudgetEnabled &&
+        (pacingQueueDelayUs >= 45000 ||
+            estimatedRepairDeliveryUs >= 70000);
+    const bool instantJitterPressure =
+        !statefulBudgetEnabled &&
+        condition.enabled &&
+        (condition.maxDelayMs >= 80 || condition.reorderRate >= 0.04);
+    const bool instantLossPressure =
+        !statefulBudgetEnabled &&
+        (configuredLossPressure || ackLossPressure);
+
+    if (activeProfile == RepairBudgetProfile::Pacing ||
+        instantPacingPressure) {
+        keyFrameCap = 6;
+        largeFrameCap = 3;
+        deltaFrameCap = (configuredLossPressure || ackLossPressure) ? 2u : 1u;
+        tightSlackUs = 32000;
+        lowSlackUs = 55000;
+        pacingPressureUs = 30000;
+        heavyPacingUs = 50000;
+    }
+    else if (activeProfile == RepairBudgetProfile::JitterAckLoss) {
+        keyFrameCap = 10;
+        largeFrameCap = 7;
+        deltaFrameCap = 4;
+        tightSlackUs = 16000;
+        lowSlackUs = 28000;
+        pacingPressureUs = 70000;
+        heavyPacingUs = 100000;
+    }
+    else if (activeProfile == RepairBudgetProfile::Jitter ||
+        (instantJitterPressure && !instantLossPressure)) {
+        keyFrameCap = 8;
+        largeFrameCap = 4;
+        deltaFrameCap = 2;
+        tightSlackUs = 22000;
+        lowSlackUs = 40000;
+        pacingPressureUs = 50000;
+        heavyPacingUs = 80000;
+    }
+    else if (activeProfile == RepairBudgetProfile::Loss ||
+        activeProfile == RepairBudgetProfile::BurstLoss ||
+        instantLossPressure) {
+        keyFrameCap =
+            activeProfile == RepairBudgetProfile::BurstLoss ? 12u : 10u;
+        largeFrameCap =
+            activeProfile == RepairBudgetProfile::BurstLoss ? 8u : 6u;
+        deltaFrameCap =
+            activeProfile == RepairBudgetProfile::BurstLoss ? 4u : 3u;
+        tightSlackUs =
+            activeProfile == RepairBudgetProfile::BurstLoss ? 12000ull : 16000ull;
+        lowSlackUs =
+            activeProfile == RepairBudgetProfile::BurstLoss ? 25000ull : 30000ull;
+        pacingPressureUs =
+            activeProfile == RepairBudgetProfile::BurstLoss ? 65000ull : 55000ull;
+        heavyPacingUs =
+            activeProfile == RepairBudgetProfile::BurstLoss ? 95000ull : 85000ull;
+    }
+    else if (activeProfile == RepairBudgetProfile::Clean) {
+        keyFrameCap = 7;
+        largeFrameCap = 3;
+        deltaFrameCap = 1;
+        tightSlackUs = 24000;
+        lowSlackUs = 42000;
+        pacingPressureUs = 38000;
+        heavyPacingUs = 62000;
+        budgetProfile = "clean";
+    }
+
+    const uint32_t baseCap =
+        record.keyFrame
+        ? keyFrameCap
+        : (largeFrame ? largeFrameCap : deltaFrameCap);
+    uint32_t cap = baseCap;
+    std::string budgetReason = "dynamic-budget-" + budgetProfile + "-frame-cap";
+    bool receiverCompleteRaceGuard = false;
+    uint32_t capBeforeRaceGuard = baseCap;
+    uint32_t receiverCompleteRaceGuardCap = baseCap;
+    uint32_t capAfterRaceGuard = baseCap;
+    bool receiverCompleteRaceCandidate = false;
+    bool receiverCompleteRaceDeliveryWindow = false;
+    bool receiverCompleteRaceSlackWindow = false;
+    bool receiverCompleteRaceLowerSlackWindow = false;
+    bool receiverCompleteRaceUpperSafeSlackWindow = false;
+    bool receiverCompleteRaceMissingWindow = false;
+    const char* receiverCompleteRaceExclusionReason = "not-evaluated";
+    const bool forceRepairRaceOpportunityTrace =
+        IsRepairRaceOpportunityTraceForced();
+    const bool receiverCompleteRacePolicyProfile =
+        activeProfile == RepairBudgetProfile::JitterAckLoss;
+    const bool receiverCompleteRaceTraceProfile =
+        receiverCompleteRacePolicyProfile || forceRepairRaceOpportunityTrace;
+    const bool largeFiveToThirteenMissing =
+        largeFrame &&
+        ack.missingChunkCount >= 5 &&
+        ack.missingChunkCount <= 13;
+    const bool fecMixedSingletonAndRepair =
+        std::strcmp(
+            fecLikelyClass,
+            "fec-mixed-singleton-and-repair") == 0;
+    const bool fecUnlikelyMultiMissing =
+        std::strcmp(
+            fecLikelyClass,
+            "fec-unlikely-multimissing") == 0;
+
+    if (usableSlackUs == 0) {
+        cap = 0;
+        budgetReason =
+            "dynamic-budget-" + budgetProfile + "-no-delivery-slack";
+    }
+    else if (usableSlackUs <= tightSlackUs) {
+        cap = (std::min)(cap, record.keyFrame ? 3u : 1u);
+        budgetReason =
+            "dynamic-budget-" + budgetProfile + "-tight-slack";
+    }
+    else if (usableSlackUs <= lowSlackUs) {
+        uint32_t lowSlackCap =
+            record.keyFrame ? 5u : (largeFrame ? 2u : 1u);
+        if (activeProfile == RepairBudgetProfile::JitterAckLoss &&
+            largeFrame) {
+            lowSlackCap = 3u;
+        }
+        cap = (std::min)(
+            cap,
+            lowSlackCap);
+        budgetReason =
+            "dynamic-budget-" + budgetProfile + "-low-slack";
+    }
+
+    if ((configuredLossPressure || ackLossPressure) &&
+        usableSlackUs > lowSlackUs) {
+        cap = (std::max)(
+            cap,
+            record.keyFrame ? 8u : (largeFrame ? 4u : 2u));
+        cap = (std::min)(cap, baseCap);
+        budgetReason =
+            "dynamic-budget-" + budgetProfile + "-loss-recovery";
+    }
+
+    const uint32_t raceMissingCap =
+        (std::clamp<uint32_t>)(record.chunkCount / 2u, 12u, 64u);
+    receiverCompleteRaceDeliveryWindow =
+        estimatedRepairDeliveryUs >= kReceiverCompleteRaceMinDeliveryUs &&
+        estimatedRepairDeliveryUs <= kReceiverCompleteRaceMaxDeliveryUs;
+    receiverCompleteRaceLowerSlackWindow =
+        usableSlackUs > tightSlackUs &&
+        usableSlackUs <= lowSlackUs;
+    receiverCompleteRaceUpperSafeSlackWindow =
+        largeFrame &&
+        usableSlackUs > lowSlackUs &&
+        usableSlackUs <= kReceiverCompleteRaceSafeUpperSlackUs &&
+        estimatedRepairDeliveryUs <=
+            kReceiverCompleteRaceSafeUpperDeliveryMaxUs;
+    receiverCompleteRaceSlackWindow =
+        receiverCompleteRaceLowerSlackWindow ||
+        receiverCompleteRaceUpperSafeSlackWindow;
+    receiverCompleteRaceMissingWindow =
+        ack.missingChunkCount <= raceMissingCap &&
+        (!largeFiveToThirteenMissing || !fecUnlikelyMultiMissing);
+    receiverCompleteRaceCandidate =
+        receiverCompleteRaceTraceProfile &&
+        !record.keyFrame &&
+        receiverCompleteRaceDeliveryWindow &&
+        receiverCompleteRaceSlackWindow &&
+        receiverCompleteRaceMissingWindow;
+    if (receiverCompleteRaceCandidate) {
+        receiverCompleteRaceExclusionReason = "candidate";
+    }
+    else if (!receiverCompleteRaceTraceProfile) {
+        receiverCompleteRaceExclusionReason = "profile-not-jitter-ack-loss";
+    }
+    else if (record.keyFrame) {
+        if (!receiverCompleteRaceDeliveryWindow) {
+            receiverCompleteRaceExclusionReason = "keyframe-delivery-window";
+        }
+        else if (!receiverCompleteRaceSlackWindow) {
+            if (usableSlackUs <= tightSlackUs) {
+                receiverCompleteRaceExclusionReason =
+                    "keyframe-slack-too-tight";
+            }
+            else if (largeFrame &&
+                usableSlackUs > kReceiverCompleteRaceSafeUpperSlackUs) {
+                receiverCompleteRaceExclusionReason =
+                    "keyframe-slack-too-wide";
+            }
+            else if (!largeFrame && usableSlackUs > lowSlackUs) {
+                receiverCompleteRaceExclusionReason =
+                    "keyframe-upper-slack-small-frame";
+            }
+            else {
+                receiverCompleteRaceExclusionReason =
+                    "keyframe-slack-window";
+            }
+        }
+        else if (!receiverCompleteRaceMissingWindow) {
+            receiverCompleteRaceExclusionReason = "keyframe-missing-window";
+        }
+        else {
+            receiverCompleteRaceExclusionReason = "keyframe";
+        }
+    }
+    else if (!receiverCompleteRaceDeliveryWindow) {
+        receiverCompleteRaceExclusionReason = "delivery-window";
+    }
+    else if (!receiverCompleteRaceSlackWindow) {
+        if (usableSlackUs <= tightSlackUs) {
+            receiverCompleteRaceExclusionReason = "slack-too-tight";
+        }
+        else if (largeFrame &&
+            usableSlackUs > kReceiverCompleteRaceSafeUpperSlackUs) {
+            receiverCompleteRaceExclusionReason = "slack-too-wide";
+        }
+        else if (!largeFrame && usableSlackUs > lowSlackUs) {
+            receiverCompleteRaceExclusionReason = "upper-slack-small-frame";
+        }
+        else {
+            receiverCompleteRaceExclusionReason = "slack-window";
+        }
+    }
+    else if (!receiverCompleteRaceMissingWindow) {
+        receiverCompleteRaceExclusionReason =
+            largeFiveToThirteenMissing && fecUnlikelyMultiMissing
+            ? "fec-unlikely-maintain-repair"
+            : "missing-window";
+    }
+    else {
+        receiverCompleteRaceExclusionReason = "unknown";
+    }
+    capBeforeRaceGuard = cap;
+    if (receiverCompleteRacePolicyProfile && receiverCompleteRaceCandidate) {
+        const bool retryRace = retransmitAttempt >= 2;
+        uint32_t raceGuardCap = cap;
+        if (largeFiveToThirteenMissing) {
+            raceGuardCap =
+                fecMixedSingletonAndRepair && cap > 4
+                ? cap - 1u
+                : cap;
+        }
+        else if (receiverCompleteRaceUpperSafeSlackWindow) {
+            raceGuardCap =
+                cap > 4
+                ? cap - 1u
+                : cap;
+        }
+        else {
+            raceGuardCap =
+                retryRace
+                ? (largeFrame ? 2u : 1u)
+                : (
+                    ack.missingChunkCount <= 2
+                    ? 1u
+                    : (
+                        ack.missingChunkCount <= 4
+                        ? (largeFrame ? 2u : 1u)
+                        : (
+                            ack.missingChunkCount <= 12
+                            ? (largeFrame ? 3u : 1u)
+                            : (largeFrame ? 4u : 2u))));
+        }
+        receiverCompleteRaceGuardCap = raceGuardCap;
+        if (raceGuardCap < cap) {
+            cap = raceGuardCap;
+            receiverCompleteRaceGuard = true;
+            budgetReason =
+                "dynamic-budget-" + budgetProfile +
+                "-receiver-complete-race";
+        }
+    }
+    capAfterRaceGuard = cap;
+
+    const bool lossPressure =
+        configuredLossPressure || ackLossPressure;
+    const uint32_t heavyPacingCap =
+        lossPressure
+        ? (record.keyFrame ? 6u : (largeFrame ? 3u : 3u))
+        : (record.keyFrame ? 4u : 1u);
+    if (estimatedRepairDeliveryUs >= heavyPacingUs ||
+        pacingQueueDelayUs >= heavyPacingUs) {
+        cap = (std::min)(cap, heavyPacingCap);
+        budgetReason =
+            "dynamic-budget-" + budgetProfile + "-heavy-pacing";
+    }
+    else if (estimatedRepairDeliveryUs >= pacingPressureUs ||
+        pacingQueueDelayUs >= pacingPressureUs) {
+        const uint32_t pacingPressureCap =
+            activeProfile == RepairBudgetProfile::JitterAckLoss
+            ? (
+                record.keyFrame
+                ? 6u
+                : (largeFrame ? 4u : 1u))
+            : (
+                record.keyFrame
+                ? 6u
+                : (largeFrame ? 3u : 1u));
+        cap = (std::min)(
+            cap,
+            pacingPressureCap);
+        budgetReason =
+            "dynamic-budget-" + budgetProfile + "-pacing-pressure";
+    }
+
+    if (retransmitAttempt >= 2 && !record.keyFrame) {
+        const bool jitterAckLossRecovery =
+            activeProfile == RepairBudgetProfile::JitterAckLoss &&
+            usableSlackUs > lowSlackUs;
+        const uint32_t retryCap =
+            jitterAckLossRecovery
+            ? (largeFrame ? 3u : 2u)
+            :
+            lossPressure && usableSlackUs > lowSlackUs
+            ? (largeFrame ? 3u : 2u)
+            : (largeFrame ? 3u : 1u);
+        cap = (std::min)(cap, retryCap);
+    }
+
+    const bool pacingQueuePressure =
+        pacingQueueDelayUs >= 60000 ||
+        estimatedRepairDeliveryUs >= 85000;
+    if (pacingQueuePressure) {
+        const bool hardPacingQueuePressure =
+            pacingQueueDelayUs >= 90000 ||
+            estimatedRepairDeliveryUs >= 120000;
+        const uint32_t queuePressureCap =
+            record.keyFrame
+            ? (hardPacingQueuePressure ? 5u : 7u)
+            : (largeFrame
+                ? (hardPacingQueuePressure ? 1u : 2u)
+                : 1u);
+        cap = (std::min)(cap, queuePressureCap);
+        budgetReason =
+            "dynamic-budget-" + budgetProfile +
+            (hardPacingQueuePressure
+                ? "-hard-pacing-queue-pressure"
+                : "-pacing-queue-pressure");
+    }
+
+    if (receiverCompleteRacePolicyProfile ||
+        forceRepairRaceOpportunityTrace) {
+        const uint32_t finalCap =
+            (std::min<uint32_t>)(
+                cap,
+                static_cast<uint32_t>(chunkIndices.size()));
+        for (size_t i = 0; i < chunkIndices.size(); ++i) {
+            const bool suppressed = i >= finalCap;
+            const bool guardSuppressed =
+                receiverCompleteRaceGuard && suppressed;
+            const char* eventName =
+                guardSuppressed
+                ? "repair-race-guard-suppressed"
+                : (
+                    suppressed
+                    ? "repair-race-budget-suppressed"
+                    : (
+                        receiverCompleteRaceGuard
+                        ? "repair-race-guard-passed"
+                        : "repair-race-opportunity-sent"));
+            WriteRepairRaceOpportunityTrace(
+                nowUs,
+                eventName,
+                record.frameId,
+                record.streamId,
+                record.codecType,
+                record.keyFrame,
+                largeFrame,
+                chunkIndices[i],
+                record.chunkCount,
+                ack.latestSequence,
+                retransmitAttempt,
+                ack.missingChunkCount,
+                static_cast<uint32_t>(chunkIndices.size()),
+                baseCap,
+                capBeforeRaceGuard,
+                receiverCompleteRaceGuardCap,
+                capAfterRaceGuard,
+                finalCap,
+                suppressed,
+                receiverCompleteRaceCandidate,
+                receiverCompleteRaceGuard,
+                guardSuppressed,
+                receiverCompleteRaceExclusionReason,
+                receiverCompleteRaceDeliveryWindow,
+                receiverCompleteRaceSlackWindow,
+                receiverCompleteRaceLowerSlackWindow,
+                receiverCompleteRaceUpperSafeSlackWindow,
+                receiverCompleteRaceMissingWindow,
+                record.fecEnabled,
+                record.fecGroupChunkCount,
+                fecMissingGroups,
+                fecSingletonMissingGroups,
+                fecMultiMissingGroups,
+                fecLikelyRecoverableChunks,
+                fecRepairNeededChunks,
+                fecLikelyClass,
+                estimatedRepairDeliveryUs,
+                pacingQueueDelayUs,
+                usableSlackUs,
+                tightSlackUs,
+                lowSlackUs,
+                repairPolicy.ttlUs,
+                repairPolicy.deadlineUs,
+                missingRate,
+                budgetProfile,
+                budgetReason,
+                "RNVP ACK repair race opportunity");
+        }
+    }
+
+    if (cap >= chunkIndices.size()) {
+        return chunkIndices;
+    }
+
+    std::vector<uint16_t> limited;
+    limited.reserve((std::min<size_t>)(chunkIndices.size(), cap));
+    for (size_t i = 0; i < chunkIndices.size() && i < cap; ++i) {
+        limited.push_back(chunkIndices[i]);
+    }
+
+    const size_t suppressedCount = chunkIndices.size() - limited.size();
+    if (suppressedCount == 0) {
+        return chunkIndices;
+    }
+
+    repairBudgetSuppressedFrames_++;
+    repairBudgetSuppressedPackets_ += suppressedCount;
+    if (largeFrame) {
+        repairBudgetSuppressedLargeFrames_++;
+        repairBudgetSuppressedLargePackets_ += suppressedCount;
+    }
+    if (receiverCompleteRaceGuard) {
+        repairRaceGuardSuppressedFrames_++;
+        repairRaceGuardSuppressedPackets_ += suppressedCount;
+        if (largeFrame) {
+            repairRaceGuardSuppressedLargePackets_ += suppressedCount;
+        }
+    }
+    lateRepairSavedPackets_ += suppressedCount;
+
+    for (size_t i = limited.size(); i < chunkIndices.size(); ++i) {
+        WriteRetransmitTrace(
+            nowUs,
+            "retransmit-suppressed-budget",
+            0,
+            record.frameId,
+            record.streamId,
+            record.codecType,
+            record.keyFrame,
+            chunkIndices[i],
+            record.chunkCount,
+            0,
+            record.sendTimeUs,
+            nowUs,
+            ack.latestSequence,
+            retransmitAttempt,
+            ack.missingChunkCount,
+            static_cast<uint32_t>(chunkIndices.size()),
+            ToRepairPriorityString(repairPolicy.priority),
+            repairPolicy.ttlUs,
+            repairPolicy.deadlineUs,
+            budgetReason.c_str(),
+            "RNVP ACK dynamic repair budget");
+    }
+
+    return limited;
 }
 
 void NetworkManager::RememberFecLikelySuppressionLocked(
@@ -2017,8 +3071,15 @@ void NetworkManager::HandleAckControl(
         averageRttMs > 0.0
         ? static_cast<uint64_t>((averageRttMs * 1000.0) * 0.5)
         : 0ull;
-    const uint64_t estimatedRetransmitDeliveryUs =
-        (std::max)(simulatorOneWayDelayUs, rttOneWayDelayUs);
+    const net::PacketPacerStats pacingStats = packetPacer_.GetStats();
+    const uint64_t pacingQueueDelayUs =
+        pacingStats.currentQueueDelayMs > 0.0
+        ? static_cast<uint64_t>(pacingStats.currentQueueDelayMs * 1000.0)
+        : 0ull;
+    const uint64_t estimatedRepairDeliveryUs =
+        pacingQueueDelayUs +
+        (std::max)(simulatorOneWayDelayUs, rttOneWayDelayUs) +
+        kRepairDeliveryGuardUs;
 
     {
         std::lock_guard<std::mutex> lock(sentFramesMutex_);
@@ -2074,7 +3135,7 @@ void NetworkManager::HandleAckControl(
             const bool staleByAge =
                 nowUs > record->sendTimeUs &&
                 nowUs - record->sendTimeUs +
-                    estimatedRetransmitDeliveryUs > retransmitDeadlineUs;
+                    estimatedRepairDeliveryUs > retransmitDeadlineUs;
 
             const bool retransmitBudgetExhausted =
                 record->retransmitCount >= kMaxRetransmitsPerFrame;
@@ -2124,6 +3185,18 @@ void NetworkManager::HandleAckControl(
                           ack,
                           record->retransmitCount + 1,
                           nowUs);
+                resendChunkIndices =
+                    LimitRepairChunksByDynamicBudgetLocked(
+                        *record,
+                        ack,
+                        resendChunkIndices,
+                        record->retransmitCount + 1,
+                        nowUs,
+                        estimatedRepairDeliveryUs,
+                        pacingQueueDelayUs,
+                        averageRttMs,
+                        condition,
+                        missingRate);
                 if (!resendChunkIndices.empty()) {
                     record->retransmitCount++;
                     retransmitAttempt = record->retransmitCount;
@@ -2230,6 +3303,8 @@ void NetworkManager::HandleRnvpTransportFeedback(
 
     uint64_t receivedCount = 0;
     uint64_t missingCount = 0;
+    std::vector<uint32_t> receivedFeedbackSequences;
+    std::vector<uint32_t> missingFeedbackSequences;
     double jitterSumMs = 0.0;
     uint32_t jitterSamples = 0;
     double queueTrendSumMs = 0.0;
@@ -2254,6 +3329,7 @@ void NetworkManager::HandleRnvpTransportFeedback(
 
             if (missing && !received) {
                 missingCount++;
+                missingFeedbackSequences.push_back(sequence);
                 net::BandwidthFeedbackPacket bandwidthPacket{};
                 bandwidthPacket.sequence = sequence;
                 bandwidthPacket.received = false;
@@ -2266,6 +3342,7 @@ void NetworkManager::HandleRnvpTransportFeedback(
             }
 
             receivedCount++;
+            receivedFeedbackSequences.push_back(sequence);
 
             const auto sentIt = std::find_if(
                 sentPackets_.begin(),
@@ -2334,11 +3411,43 @@ void NetworkManager::HandleRnvpTransportFeedback(
 
     {
         std::lock_guard<std::mutex> lock(transportFeedbackMutex_);
+        uint64_t newlyMissingCount = 0;
+        uint64_t recoveredMissingCount = 0;
+
+        for (uint32_t sequence : missingFeedbackSequences) {
+            if (pendingMissingFeedbackSequences_.insert(sequence).second) {
+                newlyMissingCount++;
+            }
+        }
+        for (uint32_t sequence : receivedFeedbackSequences) {
+            if (pendingMissingFeedbackSequences_.erase(sequence) > 0) {
+                recoveredMissingCount++;
+            }
+        }
+
         transportFeedbackStats_.feedbackPackets++;
         transportFeedbackStats_.feedbackPacketStatuses += statusCount;
         transportFeedbackStats_.feedbackReceivedPackets += receivedCount;
-        transportFeedbackStats_.feedbackMissingPackets += missingCount;
-        transportFeedbackStats_.feedbackLossRate = lossRate;
+        transportFeedbackStats_.feedbackMissingPackets += newlyMissingCount;
+        const uint64_t appliedRecoveredMissing =
+            (std::min)(
+                transportFeedbackStats_.feedbackMissingPackets,
+                recoveredMissingCount);
+        transportFeedbackStats_.feedbackMissingPackets -=
+            appliedRecoveredMissing;
+        transportFeedbackStats_.feedbackSequenceGapPackets +=
+            newlyMissingCount;
+        transportFeedbackStats_.feedbackSequenceGapRecoveredPackets +=
+            appliedRecoveredMissing;
+        const uint64_t unresolvedStatusCount =
+            transportFeedbackStats_.feedbackReceivedPackets +
+            transportFeedbackStats_.feedbackMissingPackets;
+        transportFeedbackStats_.feedbackLossRate =
+            unresolvedStatusCount > 0
+            ? static_cast<double>(
+                transportFeedbackStats_.feedbackMissingPackets) /
+                static_cast<double>(unresolvedStatusCount)
+            : lossRate;
         transportFeedbackStats_.feedbackArrivalJitterMs = arrivalJitterMs;
         transportFeedbackStats_.feedbackQueueDelayTrendMs = queueDelayTrendMs;
         transportFeedbackStats_.lastFeedbackSequence =
@@ -2476,6 +3585,17 @@ uint64_t NetworkManager::GetRepairQueuedButCanceledPacketCount() const {
     return repairQueuedButCanceledPackets_;
 }
 
+uint64_t NetworkManager::GetRepairSentAfterCompleteAckPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairSentAfterCompleteAckPackets_;
+}
+
+uint64_t
+NetworkManager::GetRepairSentAfterCompleteAckLargePacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairSentAfterCompleteAckLargePackets_;
+}
+
 uint64_t NetworkManager::GetRepairSuppressedByFecLikelyFrameCount() const {
     std::lock_guard<std::mutex> lock(sentFramesMutex_);
     return repairSuppressedByFecLikelyFrames_;
@@ -2484,6 +3604,79 @@ uint64_t NetworkManager::GetRepairSuppressedByFecLikelyFrameCount() const {
 uint64_t NetworkManager::GetRepairSuppressedByFecLikelyPacketCount() const {
     std::lock_guard<std::mutex> lock(sentFramesMutex_);
     return repairSuppressedByFecLikelyPackets_;
+}
+
+uint64_t
+NetworkManager::GetRepairSuppressedByFecLikelyLargeFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairSuppressedByFecLikelyLargeFrames_;
+}
+
+uint64_t
+NetworkManager::GetRepairSuppressedByFecLikelyLargePacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairSuppressedByFecLikelyLargePackets_;
+}
+
+uint64_t NetworkManager::GetRepairBudgetSuppressedFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetSuppressedFrames_;
+}
+
+uint64_t NetworkManager::GetRepairBudgetSuppressedPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetSuppressedPackets_;
+}
+
+uint64_t NetworkManager::GetRepairBudgetSuppressedLargeFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetSuppressedLargeFrames_;
+}
+
+uint64_t NetworkManager::GetRepairBudgetSuppressedLargePacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetSuppressedLargePackets_;
+}
+
+uint64_t NetworkManager::GetRepairRaceGuardSuppressedFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairRaceGuardSuppressedFrames_;
+}
+
+uint64_t NetworkManager::GetRepairRaceGuardSuppressedPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairRaceGuardSuppressedPackets_;
+}
+
+uint64_t NetworkManager::GetRepairRaceGuardSuppressedLargePacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairRaceGuardSuppressedLargePackets_;
+}
+
+std::string NetworkManager::GetRepairBudgetProfile() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return ToRepairBudgetProfileString(
+        repairBudgetController_.activeProfile);
+}
+
+uint64_t NetworkManager::GetRepairBudgetProfileSwitchCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetController_.switchCount;
+}
+
+double NetworkManager::GetRepairBudgetSmoothedMissingRate() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetController_.smoothedMissingRate;
+}
+
+double NetworkManager::GetRepairBudgetSmoothedPacingQueueDelayMs() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetController_.smoothedPacingQueueDelayUs / 1000.0;
+}
+
+double NetworkManager::GetRepairBudgetSmoothedDeliveryMs() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return repairBudgetController_.smoothedRepairDeliveryUs / 1000.0;
 }
 
 uint64_t
@@ -3355,8 +4548,20 @@ void NetworkManager::ResetStats() {
         repairCanceledByCompleteAckPackets_ = 0;
         repairSkippedByTtlPackets_ = 0;
         repairQueuedButCanceledPackets_ = 0;
+        repairSentAfterCompleteAckPackets_ = 0;
+        repairSentAfterCompleteAckLargePackets_ = 0;
         repairSuppressedByFecLikelyFrames_ = 0;
         repairSuppressedByFecLikelyPackets_ = 0;
+        repairSuppressedByFecLikelyLargeFrames_ = 0;
+        repairSuppressedByFecLikelyLargePackets_ = 0;
+        repairBudgetSuppressedFrames_ = 0;
+        repairBudgetSuppressedPackets_ = 0;
+        repairBudgetSuppressedLargeFrames_ = 0;
+        repairBudgetSuppressedLargePackets_ = 0;
+        repairRaceGuardSuppressedFrames_ = 0;
+        repairRaceGuardSuppressedPackets_ = 0;
+        repairRaceGuardSuppressedLargePackets_ = 0;
+        repairBudgetController_ = RepairBudgetControllerState{};
         repairFecLikelySuppressedCompletedFrames_ = 0;
         repairFecLikelySuppressedCompletedPackets_ = 0;
         repairFecLikelySuppressedExpiredFrames_ = 0;
@@ -3379,6 +4584,7 @@ void NetworkManager::ResetStats() {
     {
         std::lock_guard<std::mutex> lock(transportFeedbackMutex_);
         transportFeedbackStats_ = TransportFeedbackStats{};
+        pendingMissingFeedbackSequences_.clear();
     }
 
     bandwidthEstimator_.Reset();
@@ -3518,6 +4724,28 @@ void NetworkManager::TrackSentRnvpDataPacket(
     if (!net::IsMediaPacket(
         static_cast<net::PacketType>(header.packetType))) {
         return;
+    }
+
+    if (static_cast<net::PacketType>(header.packetType) ==
+            net::PacketType::Data &&
+        net::HasPacketFlag(header.flags, net::PacketFlag_Retransmit)) {
+        std::lock_guard<std::mutex> frameLock(sentFramesMutex_);
+        if (IsFrameCompleteAckedLocked(header.streamId, header.frameId)) {
+            repairSentAfterCompleteAckPackets_++;
+
+            const auto frameIt = std::find_if(
+                sentFrames_.begin(),
+                sentFrames_.end(),
+                [streamId = header.streamId, frameId = header.frameId](
+                    const SentFrameRecord& candidate) {
+                    return candidate.streamId == streamId &&
+                        candidate.frameId == frameId;
+                });
+            if (frameIt != sentFrames_.end() &&
+                IsLargeRepairFrame(*frameIt)) {
+                repairSentAfterCompleteAckLargePackets_++;
+            }
+        }
     }
 
     std::lock_guard<std::mutex> lock(sentPacketsMutex_);

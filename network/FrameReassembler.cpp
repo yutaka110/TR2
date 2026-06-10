@@ -76,12 +76,23 @@ namespace net {
                     parsed,
                     receiveTimeUs);
             }
-            if (stats_) {
-                stats_->OnDuplicatePacket();
+            if (stats_ && !parsed.isFec) {
+                DuplicatePacketKind duplicateKind =
+                    parsed.isRetransmit
+                        ? DuplicatePacketKind::LateRetransmitAfterCompleted
+                        : DuplicatePacketKind::LateOriginalAfterCompleted;
+                if (retired->outcome == RetiredFrameOutcome::Expired) {
+                    duplicateKind = DuplicatePacketKind::LateAfterExpired;
+                }
+                else if (retired->outcome == RetiredFrameOutcome::Rejected) {
+                    duplicateKind = DuplicatePacketKind::LateAfterRejected;
+                }
+                stats_->OnDuplicatePacket(duplicateKind);
             }
 
             if (outAckInfo &&
                 parsed.isRnvp &&
+                !parsed.isFec &&
                 retired->outcome == RetiredFrameOutcome::Completed) {
                 FrameAckInfo ack{};
                 ack.valid = true;
@@ -234,7 +245,10 @@ namespace net {
                     true);
             }
             if (stats_) {
-                stats_->OnDuplicatePacket();
+                stats_->OnDuplicatePacket(
+                    parsed.isRetransmit
+                        ? DuplicatePacketKind::Retransmit
+                        : DuplicatePacketKind::Original);
             }
 
             if (outAckInfo && parsed.isRnvp) {
@@ -404,6 +418,7 @@ namespace net {
             }
 
             const uint64_t effectiveNackDeadlineUs = nackDeadlineUs;
+            const uint64_t effectiveNackIntervalUs = nackIntervalUs;
             const uint32_t effectiveMaxNacksPerFrame =
                 protectedH264Frame
                 ? maxNacksPerFrame
@@ -463,7 +478,7 @@ namespace net {
 
             if (frame.lastNackTimeUs != 0 &&
                 nowUs > frame.lastNackTimeUs &&
-                nowUs - frame.lastNackTimeUs < nackIntervalUs) {
+                nowUs - frame.lastNackTimeUs < effectiveNackIntervalUs) {
                 ++it;
                 continue;
             }
@@ -495,9 +510,9 @@ namespace net {
                     "pending",
                     ackInfo.missingChunkCount,
                     nowUs);
-                if (nackIntervalUs > kNackFecGraceUs) {
+                if (effectiveNackIntervalUs > kNackFecGraceUs) {
                     frame.lastNackTimeUs =
-                        nowUs - nackIntervalUs + kNackFecGraceUs;
+                        nowUs - effectiveNackIntervalUs + kNackFecGraceUs;
                 }
                 ++it;
                 continue;
@@ -530,9 +545,10 @@ namespace net {
                     "pending",
                     ackInfo.missingChunkCount,
                     nowUs);
-                if (nackIntervalUs > kNackLikelyArrivalGraceUs) {
+                if (effectiveNackIntervalUs > kNackLikelyArrivalGraceUs) {
                     frame.lastNackTimeUs =
-                        nowUs - nackIntervalUs + kNackLikelyArrivalGraceUs;
+                        nowUs - effectiveNackIntervalUs +
+                            kNackLikelyArrivalGraceUs;
                 }
                 ++it;
                 continue;
@@ -635,11 +651,13 @@ namespace net {
 
         hasLastRnvpSequence_ = false;
         lastRnvpSequence_ = 0;
+        pendingMissingRnvpSequences_.clear();
     }
 
     bool FrameReassembler::RefreshNackAckInfo(
         const FrameAckInfo& candidate,
         uint64_t nowUs,
+        uint64_t minRecoverySlackUs,
         FrameAckInfo& outAckInfo
     ) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -682,6 +700,53 @@ namespace net {
             stats_->OnNackSuppressed(
                 "preflight-shrunk",
                 candidate.missingChunkCount - outAckInfo.missingChunkCount);
+        }
+
+        if (ShouldSuppressNackForFecGrace(
+                frame,
+                outAckInfo,
+                nowUs,
+                minRecoverySlackUs)) {
+            frame.fecGraceSuppressionCount++;
+            frame.lastNackTimeUs = nowUs;
+            if (stats_) {
+                stats_->OnNackSuppressed(
+                    "preflight-fec-grace",
+                    outAckInfo.missingChunkCount);
+            }
+            EmitFrameRecoveryOutcome(
+                frame,
+                "nack-suppressed-preflight-fec-grace",
+                "pending",
+                outAckInfo.missingChunkCount,
+                nowUs);
+            return false;
+        }
+
+        if (ShouldDeferNackForLikelyArrival(
+                frame,
+                outAckInfo,
+                nowUs,
+                minRecoverySlackUs)) {
+            frame.likelyArrivalSuppressionCount++;
+            frame.lastNackTimeUs = nowUs;
+            if (stats_) {
+                stats_->OnNackSuppressed(
+                    "preflight-likely-arrival",
+                    outAckInfo.missingChunkCount);
+                stats_->OnNackShapingDecision(
+                    "preflight-deferred-likely-arrival",
+                    outAckInfo.missingChunkCount,
+                    0,
+                    false);
+            }
+            EmitFrameRecoveryOutcome(
+                frame,
+                "nack-deferred-preflight-likely-arrival",
+                "pending",
+                outAckInfo.missingChunkCount,
+                nowUs);
+            return false;
         }
 
         return true;
@@ -902,7 +967,8 @@ namespace net {
             return false;
         }
 
-        if (auHeader.magic == kH264AccessUnitPayloadMagicV2) {
+        if (auHeader.magic == kH264AccessUnitPayloadMagicV2 ||
+            auHeader.magic == kH264AccessUnitPayloadMagicV3) {
             const uint8_t* accessUnit =
                 frame.data.data() + auHeader.headerBytes;
             const uint32_t calculatedCrc =
@@ -1208,6 +1274,14 @@ namespace net {
             outcome = "rejected";
         }
 
+        if (retired.outcome == RetiredFrameOutcome::Completed) {
+            stats_->OnRetransmitLateAfterCompletedTiming(
+                retired.largeFrame,
+                packet.sendTimeUs,
+                retired.eventTimeUs,
+                receiveTimeUs);
+        }
+
         const uint32_t missingChunks =
             retired.chunkCount > retired.receivedCount
             ? static_cast<uint32_t>(
@@ -1490,6 +1564,9 @@ namespace net {
         if (packet.sequence <= lastRnvpSequence_) {
             if (stats_) {
                 stats_->OnReorderedPacket();
+                if (pendingMissingRnvpSequences_.erase(packet.sequence) > 0) {
+                    stats_->OnMissingPacketsRecovered(1);
+                }
             }
 
             return;
@@ -1505,11 +1582,24 @@ namespace net {
         const uint32_t expectedNext = lastRnvpSequence_ + 1;
 
         if (packet.sequence > expectedNext) {
-            const uint64_t missingCount =
-                static_cast<uint64_t>(packet.sequence - expectedNext);
+            const uint32_t gapCount = packet.sequence - expectedNext;
 
-            if (stats_) {
-                stats_->OnMissingPackets(missingCount);
+            if (gapCount <= kMaxTrackedRnvpSequenceGap) {
+                uint64_t newlyMissing = 0;
+                for (uint32_t sequence = expectedNext;
+                    sequence < packet.sequence;
+                    ++sequence) {
+                    if (pendingMissingRnvpSequences_.insert(sequence).second) {
+                        newlyMissing++;
+                    }
+                }
+
+                if (stats_) {
+                    stats_->OnMissingPackets(newlyMissing);
+                }
+            }
+            else {
+                pendingMissingRnvpSequences_.clear();
             }
         }
 

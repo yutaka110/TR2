@@ -130,7 +130,9 @@ namespace net {
             std::vector<TimeSeriesSample> timeSeriesSamples;
 
             NetworkStatsSnapshot lastStats{};
+            NetworkStatsSnapshot startBaselineStats{};
             NetworkStatsSnapshot measurementBaselineStats{};
+            bool hasStartBaselineStats = false;
             bool hasMeasurementBaselineStats = false;
         };
 
@@ -164,6 +166,9 @@ namespace net {
             uint64_t displayedFrames = 0;
             uint64_t droppedFrames = 0;
             uint64_t deadlineDroppedFrames = 0;
+            uint64_t warmupOutputQueueDroppedFrames = 0;
+            uint64_t warmupOutputQueueDropEvents = 0;
+            uint64_t warmupOutputQueueDropBurstEvents = 0;
             uint64_t outputQueueDroppedFrames = 0;
             uint64_t outputQueueDropEvents = 0;
             uint64_t outputQueueDropBurstEvents = 0;

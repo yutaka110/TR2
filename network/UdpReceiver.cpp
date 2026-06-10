@@ -157,6 +157,7 @@ namespace {
         }
 
         running_ = false;
+        frameQueueCondition_.notify_all();
 
         if (socket_ != INVALID_SOCKET) {
             shutdown(socket_, SD_BOTH);
@@ -176,31 +177,88 @@ namespace {
     }
 
     bool UdpReceiver::TryPopFrame(CompletedFrame& outFrame) {
-        DrainReadyJitterBuffer(NowMicroseconds());
+        return TryPopFrameInternal(outFrame, true);
+    }
 
-        std::lock_guard<std::mutex> lock(frameQueueMutex_);
+    bool UdpReceiver::WaitPopFrame(
+        CompletedFrame& outFrame,
+        uint32_t timeoutMs
+    ) {
+        if (TryPopFrameInternal(outFrame, false)) {
+            return true;
+        }
 
+        {
+            std::unique_lock<std::mutex> lock(frameQueueMutex_);
+            frameQueueCondition_.wait_for(
+                lock,
+                std::chrono::milliseconds(timeoutMs),
+                [&]() {
+                    return !completedFrames_.empty() || !running_.load();
+                });
+        }
+
+        return TryPopFrameInternal(outFrame, true);
+    }
+
+    bool UdpReceiver::TryPopFrameInternal(
+        CompletedFrame& outFrame,
+        bool recordEmptyPoll
+    ) {
+        const uint64_t nowUs = NowMicroseconds();
+        DrainReadyJitterBuffer(nowUs);
+
+        bool emptyPoll = false;
+        bool poppedFrame = false;
+        uint32_t queueSizeAfterPop = 0;
         uint32_t droppedByDeadline = 0;
-        while (!completedFrames_.empty() &&
-            IsFramePastReceiverSafetyDeadline(
-                completedFrames_.front(),
-                NowMicroseconds())) {
-            completedFrames_.pop_front();
-            droppedByDeadline++;
+
+        {
+            std::lock_guard<std::mutex> lock(frameQueueMutex_);
+
+            while (!completedFrames_.empty() &&
+                IsFramePastReceiverSafetyDeadline(
+                    completedFrames_.front(),
+                    nowUs)) {
+                completedFrames_.pop_front();
+                droppedByDeadline++;
+            }
+
+            if (completedFrames_.empty()) {
+                if (recordEmptyPoll) {
+                    completedQueueEmptyPolls_++;
+                }
+                emptyPoll = true;
+            }
+            else {
+                outFrame = std::move(completedFrames_.front());
+                completedFrames_.pop_front();
+                completedQueuePops_++;
+                completedQueueLastPopUs_ = nowUs;
+                queueSizeAfterPop =
+                    static_cast<uint32_t>(completedFrames_.size());
+                poppedFrame = true;
+            }
         }
 
         if (droppedByDeadline > 0) {
             stats_.OnDeadlineDroppedFrames(droppedByDeadline);
         }
 
-        if (completedFrames_.empty()) {
+        if (emptyPoll && recordEmptyPoll) {
+            stats_.OnCompletedQueueEmptyPoll();
             return false;
         }
 
-        outFrame = std::move(completedFrames_.front());
-        completedFrames_.pop_front();
+        if (emptyPoll) {
+            return false;
+        }
 
-        return true;
+        if (poppedFrame) {
+            stats_.OnCompletedQueuePop(queueSizeAfterPop);
+        }
+
+        return poppedFrame;
     }
 
     NetworkStatsSnapshot UdpReceiver::GetStats() const {
@@ -225,6 +283,12 @@ namespace {
         while (!completedFrames_.empty()) {
             completedFrames_.pop_front();
         }
+        completedQueueLastPushUs_ = 0;
+        completedQueueLastPopUs_ = 0;
+        completedQueuePushes_ = 0;
+        completedQueuePops_ = 0;
+        completedQueueEmptyPolls_ = 0;
+        frameQueueCondition_.notify_all();
     }
 
     void UdpReceiver::SetJitterBufferTargetDelayMs(uint32_t delayMs) {
@@ -344,7 +408,11 @@ namespace {
 
             uint32_t droppedByOutputQueue = 0;
             uint32_t queueSizeBeforeDrop = 0;
+            uint32_t queueSizeAfterPush = 0;
+            double completedQueuePopAgeMs = 0.0;
+            double completedQueuePushIntervalMs = 0.0;
             double oldestDroppedAgeMs = 0.0;
+            bool shouldNotifyCompletedQueue = false;
             const double newestFrameAgeMs =
                 CalculateFrameAgeMs(readyFrame, nowUs);
             const char* outputDropReason =
@@ -357,6 +425,18 @@ namespace {
 
                 queueSizeBeforeDrop =
                     static_cast<uint32_t>(completedFrames_.size());
+                completedQueuePopAgeMs =
+                    completedQueueLastPopUs_ != 0 &&
+                    nowUs >= completedQueueLastPopUs_
+                    ? static_cast<double>(
+                        nowUs - completedQueueLastPopUs_) / 1000.0
+                    : 0.0;
+                completedQueuePushIntervalMs =
+                    completedQueueLastPushUs_ != 0 &&
+                    nowUs >= completedQueueLastPushUs_
+                    ? static_cast<double>(
+                        nowUs - completedQueueLastPushUs_) / 1000.0
+                    : 0.0;
 
                 while (!completedFrames_.empty()) {
                     oldestDroppedAgeMs =
@@ -379,7 +459,22 @@ namespace {
                 }
 
                 completedFrames_.push_back(std::move(readyFrame));
+                completedQueuePushes_++;
+                completedQueueLastPushUs_ = nowUs;
+                queueSizeAfterPush =
+                    static_cast<uint32_t>(completedFrames_.size());
+                shouldNotifyCompletedQueue = true;
             }
+
+            if (shouldNotifyCompletedQueue) {
+                frameQueueCondition_.notify_one();
+            }
+
+            stats_.OnCompletedQueuePush(
+                queueSizeAfterPush,
+                completedQueuePopAgeMs,
+                completedQueuePushIntervalMs
+            );
 
             if (droppedByOutputQueue > 0) {
                 stats_.OnOutputQueueDropEvent(
@@ -387,7 +482,9 @@ namespace {
                     queueSizeBeforeDrop,
                     oldestDroppedAgeMs,
                     newestFrameAgeMs,
-                    outputDropReason
+                    outputDropReason,
+                    completedQueuePopAgeMs,
+                    completedQueuePushIntervalMs
                 );
             }
 
@@ -1154,6 +1251,7 @@ namespace {
             if (!reassembler_.RefreshNackAckInfo(
                     candidateAckInfo,
                     NowMicroseconds(),
+                    kFrameNackMinRecoverySlackUs,
                     ackInfo)) {
                 continue;
             }

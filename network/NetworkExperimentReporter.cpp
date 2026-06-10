@@ -844,6 +844,8 @@ namespace {
             current_.startTimeSec = appTimeSec;
             current_.measurementStartTimeSec = appTimeSec;
             current_.warmupSec = (std::max)(0.0, warmupSec);
+            current_.startBaselineStats = stats;
+            current_.hasStartBaselineStats = true;
             current_.minDisplayFps = (std::numeric_limits<double>::max)();
             current_.minTargetFps = (std::numeric_limits<int>::max)();
             current_.minTargetJpegQuality = (std::numeric_limits<int>::max)();
@@ -1336,6 +1338,9 @@ namespace {
             << "displayedFrames,"
             << "droppedFrames,"
             << "deadlineDroppedFrames,"
+            << "warmupOutputQueueDroppedFrames,"
+            << "warmupOutputQueueDropEvents,"
+            << "warmupOutputQueueDropBurstEvents,"
             << "outputQueueDroppedFrames,"
             << "outputQueueDropEvents,"
             << "outputQueueDropBurstEvents,"
@@ -1415,6 +1420,9 @@ namespace {
                 << summary.displayedFrames << ','
                 << summary.droppedFrames << ','
                 << summary.deadlineDroppedFrames << ','
+                << summary.warmupOutputQueueDroppedFrames << ','
+                << summary.warmupOutputQueueDropEvents << ','
+                << summary.warmupOutputQueueDropBurstEvents << ','
                 << summary.outputQueueDroppedFrames << ','
                 << summary.outputQueueDropEvents << ','
                 << summary.outputQueueDropBurstEvents << ','
@@ -1486,6 +1494,11 @@ namespace {
                 << summary.deadlineDroppedFrames << " / "
                 << summary.outputQueueDroppedFrames << " / "
                 << summary.droppedFrames << "\n";
+            textFile_ << "  warmup output drops frames/events/burst: "
+                << summary.warmupOutputQueueDroppedFrames << " / "
+                << summary.warmupOutputQueueDropEvents << " / "
+                << summary.warmupOutputQueueDropBurstEvents
+                << " (excluded from evaluation)\n";
             textFile_ << "  output drop events/burst/maxAge/reason: "
                 << summary.outputQueueDropEvents << " / "
                 << summary.outputQueueDropBurstEvents << " / "
@@ -1673,8 +1686,8 @@ namespace {
 
         file << "## Scenario Results\n\n";
         file
-            << "| Scenario | Verdict | Runtime | Adaptive Mode | Congestion Mode | FEC | Cause | Warmup s | Measured Samples | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Output Drops | NACK Sent | NACK Recovered | FEC Recovered | FEC Guard | NACK Expired | Notes |\n"
-            << "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
+            << "| Scenario | Verdict | Runtime | Adaptive Mode | Congestion Mode | FEC | Cause | Warmup s | Measured Samples | Avg FPS | Min FPS | Avg Latency ms | P95 Latency ms | Deadline Drops | Warmup Output Drops | Measured Output Drops | NACK Sent | NACK Recovered | FEC Recovered | FEC Guard | NACK Expired | Notes |\n"
+            << "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n";
 
         for (const ScenarioSummary& summary : summaries_) {
             file << "| "
@@ -1709,6 +1722,7 @@ namespace {
                 << FormatDouble(summary.avgLatencyMs) << " | "
                 << FormatDouble(summary.p95LatencyMs) << " | "
                 << summary.deadlineDroppedFrames << " | "
+                << summary.warmupOutputQueueDroppedFrames << " | "
                 << summary.outputQueueDroppedFrames << " | "
                 << summary.deadlineNackSentFrames << " | "
                 << summary.deadlineNackRecoveredFrames << " | "
@@ -3844,6 +3858,15 @@ namespace {
                 ParseUint64OrDefault(getCell(row, "droppedFrames"));
             summary.deadlineDroppedFrames =
                 ParseUint64OrDefault(getCell(row, "deadlineDroppedFrames"));
+            summary.warmupOutputQueueDroppedFrames =
+                ParseUint64OrDefault(
+                    getCell(row, "warmupOutputQueueDroppedFrames"));
+            summary.warmupOutputQueueDropEvents =
+                ParseUint64OrDefault(
+                    getCell(row, "warmupOutputQueueDropEvents"));
+            summary.warmupOutputQueueDropBurstEvents =
+                ParseUint64OrDefault(
+                    getCell(row, "warmupOutputQueueDropBurstEvents"));
             summary.outputQueueDroppedFrames =
                 ParseUint64OrDefault(getCell(row, "outputQueueDroppedFrames"));
             summary.outputQueueDropEvents =
@@ -4062,6 +4085,22 @@ namespace {
             SubtractCounter(
                 current.lastStats.deadlineDroppedFrames,
                 baseline.deadlineDroppedFrames);
+        const NetworkStatsSnapshot& startBaseline =
+            current.hasStartBaselineStats
+            ? current.startBaselineStats
+            : baseline;
+        summary.warmupOutputQueueDroppedFrames =
+            SubtractCounter(
+                baseline.outputQueueDroppedFrames,
+                startBaseline.outputQueueDroppedFrames);
+        summary.warmupOutputQueueDropEvents =
+            SubtractCounter(
+                baseline.outputQueueDropEvents,
+                startBaseline.outputQueueDropEvents);
+        summary.warmupOutputQueueDropBurstEvents =
+            SubtractCounter(
+                baseline.outputQueueDropBurstEvents,
+                startBaseline.outputQueueDropBurstEvents);
         summary.outputQueueDroppedFrames =
             SubtractCounter(
                 current.lastStats.outputQueueDroppedFrames,
@@ -4439,6 +4478,9 @@ namespace {
             else {
                 notes.push_back("output queue drops observed");
             }
+        }
+        else if (summary.warmupOutputQueueDroppedFrames > 0) {
+            notes.push_back("startup-only output drops excluded from evaluation");
         }
 
         if (summary.minTargetFps > 0 &&

@@ -56,6 +56,8 @@ namespace net {
         uint64_t ackStaleDroppedFrames = 0;
         uint64_t ackKeyFrameRequests = 0;
         uint64_t receiveFreshnessDroppedFrames = 0;
+        uint64_t receiveDecodeQueueDroppedFrames = 0;
+        uint64_t receiveDecodeRenderOverwriteFrames = 0;
         double receiveDecodeInputFrameAgeMs = 0.0;
         double receiveLatestDecodedFrameAgeMs = 0.0;
         double receiveFreshnessDropThresholdMs = 0.0;
@@ -330,6 +332,9 @@ namespace net {
         uint64_t lastAckKeyFrameRequests_ = 0;
         bool hasFreshnessCounters_ = false;
         uint64_t lastReceiveFreshnessDroppedFrames_ = 0;
+        bool hasReceiveDecodeDropCounters_ = false;
+        uint64_t lastReceiveDecodeQueueDroppedFrames_ = 0;
+        uint64_t lastReceiveDecodeRenderOverwriteFrames_ = 0;
         bool hasPacingCounters_ = false;
         uint64_t lastPacingDeadlineDroppedPackets_ = 0;
         uint64_t lastPacingHighPriorityDeadlineDroppedPackets_ = 0;

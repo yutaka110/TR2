@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 
 namespace net {
 
@@ -11,11 +12,31 @@ namespace net {
             return (std::max)(0.0, (std::min)(1.0, value));
         }
 
+        uint32_t ReadSeedOverride() {
+            char* buffer = nullptr;
+            size_t size = 0;
+            if (_dupenv_s(&buffer, &size, "TR2_NETWORK_SIM_SEED") != 0 ||
+                buffer == nullptr) {
+                return 0;
+            }
+
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(buffer, &end, 10);
+            const bool parsedOk = end != buffer;
+            std::free(buffer);
+            return parsedOk ? static_cast<uint32_t>(parsed) : 0;
+        }
+
     } // namespace
 
     NetworkConditionSimulator::NetworkConditionSimulator()
-        : rng_(static_cast<uint32_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count())) {
+        : rng_([]() {
+            const uint32_t seed = ReadSeedOverride();
+            return seed != 0
+                ? seed
+                : static_cast<uint32_t>(
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+        }()) {
     }
 
     void NetworkConditionSimulator::SetCondition(

@@ -12,6 +12,7 @@
 #include <propvarutil.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -40,6 +41,13 @@ DEFINE_GUID(MF_VIDEO_ENCODER_HEADER_INSERTION_MODE,
 using Microsoft::WRL::ComPtr;
 
 namespace {
+using EncoderClock = std::chrono::steady_clock;
+
+double ElapsedMs(EncoderClock::time_point start) {
+    return std::chrono::duration<double, std::milli>(
+        EncoderClock::now() - start).count();
+}
+
 void LogLine(const std::string& message) {
     OutputDebugStringA(message.c_str());
     OutputDebugStringA("\n");
@@ -907,7 +915,10 @@ bool H264Encoder::ProcessAvailableOutput(std::vector<BYTE>& outH264Data) {
     DWORD status = 0;
 
     for (uint32_t outputAttempt = 0; outputAttempt < 3; ++outputAttempt) {
-    hr = encoder_->ProcessOutput(0, 1, &outputData, &status);
+        const auto processOutputStart = EncoderClock::now();
+        hr = encoder_->ProcessOutput(0, 1, &outputData, &status);
+        lastFrameTiming_.processOutputMs += ElapsedMs(processOutputStart);
+        lastFrameTiming_.processOutputAttempts++;
     ComPtr<IMFCollection> outputEvents;
     if (outputData.pEvents) {
         outputEvents.Attach(outputData.pEvents);
@@ -1009,6 +1020,7 @@ bool H264Encoder::ProcessAvailableOutput(std::vector<BYTE>& outH264Data) {
 
     BYTE* data = nullptr;
     DWORD len = 0;
+    const auto outputCopyStart = EncoderClock::now();
     hr = resultBuffer->Lock(&data, nullptr, &len);
     if (FAILED(hr)) {
         LogHr("Lock async output buffer failed", hr);
@@ -1017,6 +1029,8 @@ bool H264Encoder::ProcessAvailableOutput(std::vector<BYTE>& outH264Data) {
 
     outH264Data.assign(data, data + len);
     resultBuffer->Unlock();
+    lastFrameTiming_.outputCopyMs += ElapsedMs(outputCopyStart);
+    lastFrameTiming_.outputProduced = !outH264Data.empty();
     ExtractSpsPps(outH264Data);
     return true;
 }
@@ -1084,6 +1098,7 @@ bool H264Encoder::PumpHardwareEncoderEvents(
         }
 
         sawEvent = true;
+        lastFrameTiming_.asyncEventCount++;
         MediaEventType type = MEUnknown;
         hr = event->GetType(&type);
         if (FAILED(hr)) {
@@ -1130,29 +1145,51 @@ bool H264Encoder::PumpHardwareEncoderEvents(
     }
 }
 
-bool H264Encoder::EncodeHardwareFrameAsync(
-    const BYTE* data,
-    UINT dataSize,
-    std::vector<BYTE>& outH264Data) {
+bool H264Encoder::DrainOutput(std::vector<BYTE>& outH264Data, DWORD timeoutMs) {
+    const auto callStart = EncoderClock::now();
+    lastFrameTiming_ = {};
+    lastFrameTiming_.hardware = usingHardwareEncoder_;
+    lastFrameTiming_.async = asyncHardwareEncoder_;
     outH264Data.clear();
-    if (!encoder_ || !asyncEventGenerator_) {
+
+    if (!encoder_) {
+        return false;
+    }
+    if (!asyncHardwareEncoder_) {
+        lastFrameTiming_.callMs = ElapsedMs(callStart);
+        return true;
+    }
+
+    const auto pollStart = EncoderClock::now();
+    const bool ok = PumpHardwareEncoderEvents(timeoutMs, &outH264Data);
+    lastFrameTiming_.preInputPollMs = ElapsedMs(pollStart);
+    lastFrameTiming_.outputProduced = !outH264Data.empty();
+    lastFrameTiming_.outputProducedBeforeInput = !outH264Data.empty();
+    lastFrameTiming_.needInputSignaled = hardwareNeedsInput_;
+    lastFrameTiming_.callMs = ElapsedMs(callStart);
+    return ok;
+}
+
+bool H264Encoder::SubmitFrameNoWait(const BYTE* data, UINT dataSize) {
+    const auto callStart = EncoderClock::now();
+    lastFrameTiming_ = {};
+    lastFrameTiming_.hardware = usingHardwareEncoder_;
+    lastFrameTiming_.async = asyncHardwareEncoder_;
+
+    if (!encoder_ || !asyncHardwareEncoder_) {
+        return false;
+    }
+    if (data == nullptr || dataSize == 0) {
+        return false;
+    }
+    if (!hardwareNeedsInput_) {
+        lastFrameTiming_.callMs = ElapsedMs(callStart);
         return false;
     }
 
-    if (!hardwareNeedsInput_) {
-        PumpHardwareEncoderEvents(10, &outH264Data);
-    }
-
-    if (!hardwareNeedsInput_) {
-        static uint32_t notReadyLogCount = 0;
-        if (notReadyLogCount < 12) {
-            LogLine("[H264Encoder] Async hardware encoder did not signal NeedInput.");
-            ++notReadyLogCount;
-        }
-        return false;
-    }
-
+    lastFrameTiming_.needInputSignaled = true;
     ComPtr<IMFSample> sample;
+    const auto sampleCreateStart = EncoderClock::now();
     if (!CreateD3D11Nv12InputSample(
             d3d11Device_.Get(),
             data,
@@ -1163,11 +1200,14 @@ bool H264Encoder::EncodeHardwareFrameAsync(
         LogLine("[H264Encoder] Failed to create async hardware input sample.");
         return false;
     }
+    lastFrameTiming_.sampleCreateMs = ElapsedMs(sampleCreateStart);
 
     sample->SetSampleTime(frameCount_ * 10000000 / fps_);
     sample->SetSampleDuration(10000000 / fps_);
 
+    const auto processInputStart = EncoderClock::now();
     HRESULT hr = encoder_->ProcessInput(0, sample.Get(), 0);
+    lastFrameTiming_.processInputMs = ElapsedMs(processInputStart);
     if (FAILED(hr)) {
         LogHr("Async hardware ProcessInput failed", hr);
         return false;
@@ -1175,7 +1215,80 @@ bool H264Encoder::EncodeHardwareFrameAsync(
 
     hardwareNeedsInput_ = false;
     ++frameCount_;
-    PumpHardwareEncoderEvents(ResolveAsyncOutputWaitMs(), &outH264Data);
+    lastFrameTiming_.callMs = ElapsedMs(callStart);
+    return true;
+}
+
+bool H264Encoder::CanAcceptInput() const {
+    return !asyncHardwareEncoder_ || hardwareNeedsInput_;
+}
+
+bool H264Encoder::IsAsyncHardware() const {
+    return asyncHardwareEncoder_;
+}
+
+bool H264Encoder::EncodeHardwareFrameAsync(
+    const BYTE* data,
+    UINT dataSize,
+    std::vector<BYTE>& outH264Data) {
+    const auto callStart = EncoderClock::now();
+    lastFrameTiming_ = {};
+    lastFrameTiming_.hardware = usingHardwareEncoder_;
+    lastFrameTiming_.async = asyncHardwareEncoder_;
+    outH264Data.clear();
+    if (!encoder_ || !asyncEventGenerator_) {
+        return false;
+    }
+
+    if (!hardwareNeedsInput_) {
+        const auto preInputPollStart = EncoderClock::now();
+        PumpHardwareEncoderEvents(10, &outH264Data);
+        lastFrameTiming_.preInputPollMs = ElapsedMs(preInputPollStart);
+        lastFrameTiming_.outputProducedBeforeInput = !outH264Data.empty();
+    }
+
+    if (!hardwareNeedsInput_) {
+        static uint32_t notReadyLogCount = 0;
+        if (notReadyLogCount < 12) {
+            LogLine("[H264Encoder] Async hardware encoder did not signal NeedInput.");
+            ++notReadyLogCount;
+        }
+        return false;
+    }
+    lastFrameTiming_.needInputSignaled = true;
+
+    ComPtr<IMFSample> sample;
+    const auto sampleCreateStart = EncoderClock::now();
+    if (!CreateD3D11Nv12InputSample(
+            d3d11Device_.Get(),
+            data,
+            dataSize,
+            width_,
+            height_,
+            sample)) {
+        LogLine("[H264Encoder] Failed to create async hardware input sample.");
+        return false;
+    }
+    lastFrameTiming_.sampleCreateMs = ElapsedMs(sampleCreateStart);
+
+    sample->SetSampleTime(frameCount_ * 10000000 / fps_);
+    sample->SetSampleDuration(10000000 / fps_);
+
+    const auto processInputStart = EncoderClock::now();
+    HRESULT hr = encoder_->ProcessInput(0, sample.Get(), 0);
+    lastFrameTiming_.processInputMs = ElapsedMs(processInputStart);
+    if (FAILED(hr)) {
+        LogHr("Async hardware ProcessInput failed", hr);
+        return false;
+    }
+
+    hardwareNeedsInput_ = false;
+    ++frameCount_;
+    const auto postInputWaitStart = EncoderClock::now();
+    PumpHardwareEncoderEvents(0, &outH264Data);
+    lastFrameTiming_.postInputWaitMs = ElapsedMs(postInputWaitStart);
+    lastFrameTiming_.outputProduced = !outH264Data.empty();
+    lastFrameTiming_.callMs = ElapsedMs(callStart);
     return true;
 }
 
@@ -1299,6 +1412,11 @@ bool H264Encoder::EncodeFrame(const BYTE* rgbData, UINT dataSize, std::vector<BY
         return false;
     }
 
+    const auto callStart = EncoderClock::now();
+    lastFrameTiming_ = {};
+    lastFrameTiming_.hardware = usingHardwareEncoder_;
+    lastFrameTiming_.async = asyncHardwareEncoder_;
+
     if (asyncHardwareEncoder_) {
         return EncodeHardwareFrameAsync(rgbData, dataSize, outH264Data);
     }
@@ -1307,6 +1425,7 @@ bool H264Encoder::EncodeFrame(const BYTE* rgbData, UINT dataSize, std::vector<BY
 
     // 入力サンプルの作成
     ComPtr<IMFSample> sample;
+    const auto sampleCreateStart = EncoderClock::now();
     if (usingHardwareEncoder_) {
         if (!CreateD3D11Nv12InputSample(
                 d3d11Device_.Get(),
@@ -1372,11 +1491,14 @@ bool H264Encoder::EncodeFrame(const BYTE* rgbData, UINT dataSize, std::vector<BY
 
     }
 
+    lastFrameTiming_.sampleCreateMs = ElapsedMs(sampleCreateStart);
     sample->SetSampleTime(frameCount_ * 10000000 / fps_);
     sample->SetSampleDuration(10000000 / fps_);
     frameCount_++;
 
+    const auto processInputStart = EncoderClock::now();
     hr = encoder_->ProcessInput(0, sample.Get(), 0);
+    lastFrameTiming_.processInputMs = ElapsedMs(processInputStart);
     if (FAILED(hr)) {
 #ifdef _DEBUG
         LogHr("ProcessInput failed", hr);
@@ -1420,13 +1542,18 @@ bool H264Encoder::EncodeFrame(const BYTE* rgbData, UINT dataSize, std::vector<BY
    // outputData.dwStreamID = 0;
     DWORD status = 0;
 
+    const auto processOutputStart = EncoderClock::now();
     hr = encoder_->ProcessOutput(0, 1, &outputData, &status);
+    lastFrameTiming_.processOutputMs = ElapsedMs(processOutputStart);
+    lastFrameTiming_.processOutputAttempts = 1;
     ComPtr<IMFCollection> outputEvents;
     if (outputData.pEvents) {
         outputEvents.Attach(outputData.pEvents);
         outputData.pEvents = nullptr;
     }
     if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        lastFrameTiming_.needInputSignaled = true;
+        lastFrameTiming_.callMs = ElapsedMs(callStart);
 #ifdef _DEBUG
         static uint32_t needMoreInputLogCount = 0;
         if (needMoreInputLogCount < 12) {
@@ -1468,6 +1595,7 @@ bool H264Encoder::EncodeFrame(const BYTE* rgbData, UINT dataSize, std::vector<BY
 
     BYTE* data = nullptr;
     DWORD len = 0;
+    const auto outputCopyStart = EncoderClock::now();
     hr = resultBuffer->Lock(&data, nullptr, &len);
     if (FAILED(hr)) {
 #ifdef _DEBUG
@@ -1478,6 +1606,9 @@ bool H264Encoder::EncodeFrame(const BYTE* rgbData, UINT dataSize, std::vector<BY
 
     outH264Data.assign(data, data + len);
     resultBuffer->Unlock();
+    lastFrameTiming_.outputCopyMs = ElapsedMs(outputCopyStart);
+    lastFrameTiming_.outputProduced = !outH264Data.empty();
+    lastFrameTiming_.callMs = ElapsedMs(callStart);
 
     // SPS/PPS 抽出
     if (spsPpsBuffer_.empty()) {
@@ -1531,6 +1662,10 @@ void H264Encoder::Shutdown() {
 
 std::vector<uint8_t> H264Encoder::GetSpsPps() const {
     return spsPpsBuffer_;
+}
+
+H264Encoder::FrameTiming H264Encoder::GetLastFrameTiming() const {
+    return lastFrameTiming_;
 }
 
 //bool H264Encoder::EncodeSample(IMFSample* inputSample, std::vector<uint8_t>& outData) {

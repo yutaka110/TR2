@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -73,6 +74,33 @@ namespace {
         return static_cast<int>(std::lround(ratio * 100.0));
     }
 
+    double StartupWarmupSecFromEnv() {
+        char* text = nullptr;
+        size_t textLength = 0;
+        if (_dupenv_s(&text, &textLength, "RNVP_STARTUP_WARMUP_SEC") != 0 ||
+            text == nullptr ||
+            textLength == 0) {
+            if (text != nullptr) {
+                std::free(text);
+            }
+            return 5.0;
+        }
+
+        char* end = nullptr;
+        const double value = std::strtod(text, &end);
+        const bool parsed = end != text;
+        std::free(text);
+        if (!parsed || !std::isfinite(value)) {
+            return 5.0;
+        }
+
+        return (std::max)(0.0, (std::min)(value, 30.0));
+    }
+
+    uint64_t CounterDelta(uint64_t current, uint64_t previous) {
+        return current >= previous ? current - previous : current;
+    }
+
 } // namespace
 
     bool NetworkCsvLogger::Start(const std::string& directory) {
@@ -96,6 +124,16 @@ namespace {
 
         filePath_ = path.string();
         headerWritten_ = false;
+        startupWarmupSec_ = StartupWarmupSecFromEnv();
+        previousOutputQueueDroppedFrames_ = 0;
+        previousOutputQueueDropEvents_ = 0;
+        previousOutputQueueDropBurstEvents_ = 0;
+        startupOutputQueueDroppedFrames_ = 0;
+        startupOutputQueueDropEvents_ = 0;
+        startupOutputQueueDropBurstEvents_ = 0;
+        steadyOutputQueueDroppedFrames_ = 0;
+        steadyOutputQueueDropEvents_ = 0;
+        steadyOutputQueueDropBurstEvents_ = 0;
         WriteHeader();
         return true;
     }
@@ -129,6 +167,43 @@ namespace {
             WriteHeader();
         }
 
+        const bool startupWarmupActive = appTimeSec < startupWarmupSec_;
+        const uint64_t outputQueueDroppedFramesDelta =
+            CounterDelta(
+                stats.outputQueueDroppedFrames,
+                previousOutputQueueDroppedFrames_);
+        const uint64_t outputQueueDropEventsDelta =
+            CounterDelta(
+                stats.outputQueueDropEvents,
+                previousOutputQueueDropEvents_);
+        const uint64_t outputQueueDropBurstEventsDelta =
+            CounterDelta(
+                stats.outputQueueDropBurstEvents,
+                previousOutputQueueDropBurstEvents_);
+        previousOutputQueueDroppedFrames_ =
+            stats.outputQueueDroppedFrames;
+        previousOutputQueueDropEvents_ =
+            stats.outputQueueDropEvents;
+        previousOutputQueueDropBurstEvents_ =
+            stats.outputQueueDropBurstEvents;
+
+        if (startupWarmupActive) {
+            startupOutputQueueDroppedFrames_ +=
+                outputQueueDroppedFramesDelta;
+            startupOutputQueueDropEvents_ +=
+                outputQueueDropEventsDelta;
+            startupOutputQueueDropBurstEvents_ +=
+                outputQueueDropBurstEventsDelta;
+        }
+        else {
+            steadyOutputQueueDroppedFrames_ +=
+                outputQueueDroppedFramesDelta;
+            steadyOutputQueueDropEvents_ +=
+                outputQueueDropEventsDelta;
+            steadyOutputQueueDropBurstEvents_ +=
+                outputQueueDropBurstEventsDelta;
+        }
+
         file_ << std::fixed << std::setprecision(3)
             << appTimeSec << ','
             << EscapeCsv(ResolveScenarioName(stats)) << ','
@@ -154,7 +229,16 @@ namespace {
             << stats.frameDropRate << ','
             << stats.receivedPackets << ','
             << stats.missingPackets << ','
+            << stats.sequenceGapPackets << ','
+            << stats.sequenceGapRecoveredPackets << ','
             << stats.duplicatePackets << ','
+            << stats.duplicateOriginalPackets << ','
+            << stats.duplicateRetransmitPackets << ','
+            << stats.duplicateLateAfterCompletedPackets << ','
+            << stats.duplicateLateAfterCompletedOriginalPackets << ','
+            << stats.duplicateLateAfterCompletedRetransmitPackets << ','
+            << stats.duplicateLateAfterExpiredPackets << ','
+            << stats.duplicateLateAfterRejectedPackets << ','
             << stats.reorderedPackets << ','
             << stats.completedFrames << ','
             << stats.droppedFrames << ','
@@ -162,12 +246,37 @@ namespace {
             << stats.outputQueueDroppedFrames << ','
             << stats.outputQueueDropEvents << ','
             << stats.outputQueueDropBurstEvents << ','
+            << startupWarmupSec_ << ','
+            << (startupWarmupActive ? 1 : 0) << ','
+            << outputQueueDroppedFramesDelta << ','
+            << outputQueueDropEventsDelta << ','
+            << outputQueueDropBurstEventsDelta << ','
+            << startupOutputQueueDroppedFrames_ << ','
+            << startupOutputQueueDropEvents_ << ','
+            << startupOutputQueueDropBurstEvents_ << ','
+            << steadyOutputQueueDroppedFrames_ << ','
+            << steadyOutputQueueDropEvents_ << ','
+            << steadyOutputQueueDropBurstEvents_ << ','
+            << steadyOutputQueueDroppedFrames_ << ','
+            << steadyOutputQueueDropEvents_ << ','
+            << steadyOutputQueueDropBurstEvents_ << ','
             << stats.lastOutputQueueDropFrameCount << ','
             << stats.lastOutputQueueDropQueueSize << ','
             << stats.lastOutputQueueDropOldestAgeMs << ','
             << stats.lastOutputQueueDropNewestAgeMs << ','
             << stats.maxOutputQueueDropOldestAgeMs << ','
             << EscapeCsv(stats.lastOutputQueueDropReason) << ','
+            << stats.completedQueuePushes << ','
+            << stats.completedQueuePops << ','
+            << stats.completedQueueEmptyPolls << ','
+            << stats.completedQueueSize << ','
+            << stats.maxCompletedQueueSize << ','
+            << stats.completedQueueLastPopAgeMs << ','
+            << stats.completedQueueMaxPopAgeMs << ','
+            << stats.completedQueueLastPushIntervalMs << ','
+            << stats.completedQueueMaxPushIntervalMs << ','
+            << stats.lastOutputQueueDropPopAgeMs << ','
+            << stats.lastOutputQueueDropPushIntervalMs << ','
             << stats.decodedFrames << ','
             << stats.displayedFrames << ','
             << stats.frameRecoveryOutcomeEvents << ','
@@ -204,6 +313,12 @@ namespace {
             << stats.retransmitUsefulChunks << ','
             << stats.retransmitDuplicatePackets << ','
             << stats.retransmitLateAfterCompletedPackets << ','
+            << stats.retransmitLateAfterCompletedLargePackets << ','
+            << stats.retransmitLateAfterCompletedSentBeforeCompletePackets << ','
+            << stats.retransmitLateAfterCompletedSentAfterCompletePackets << ','
+            << stats.retransmitLateAfterCompletedAvgSendToCompleteMs << ','
+            << stats.retransmitLateAfterCompletedAvgDelayMs << ','
+            << stats.retransmitLateAfterCompletedMaxDelayMs << ','
             << stats.retransmitLateAfterExpiredPackets << ','
             << stats.retransmitLateAfterRejectedPackets << ','
             << stats.retransmitClassifiedPackets << ','
@@ -244,8 +359,24 @@ namespace {
             << stats.repairCanceledByCompleteAckPackets << ','
             << stats.repairSkippedByTtlPackets << ','
             << stats.repairQueuedButCanceledPackets << ','
+            << stats.repairSentAfterCompleteAckPackets << ','
+            << stats.repairSentAfterCompleteAckLargePackets << ','
             << stats.repairSuppressedByFecLikelyFrames << ','
             << stats.repairSuppressedByFecLikelyPackets << ','
+            << stats.repairSuppressedByFecLikelyLargeFrames << ','
+            << stats.repairSuppressedByFecLikelyLargePackets << ','
+            << stats.repairBudgetSuppressedFrames << ','
+            << stats.repairBudgetSuppressedPackets << ','
+            << stats.repairBudgetSuppressedLargeFrames << ','
+            << stats.repairBudgetSuppressedLargePackets << ','
+            << stats.repairRaceGuardSuppressedFrames << ','
+            << stats.repairRaceGuardSuppressedPackets << ','
+            << stats.repairRaceGuardSuppressedLargePackets << ','
+            << EscapeCsv(stats.repairBudgetProfile) << ','
+            << stats.repairBudgetProfileSwitches << ','
+            << stats.repairBudgetSmoothedMissingRate << ','
+            << stats.repairBudgetSmoothedPacingQueueDelayMs << ','
+            << stats.repairBudgetSmoothedDeliveryMs << ','
             << stats.repairFecLikelySuppressedCompletedFrames << ','
             << stats.repairFecLikelySuppressedCompletedPackets << ','
             << stats.repairFecLikelySuppressedExpiredFrames << ','
@@ -284,6 +415,8 @@ namespace {
             << stats.transportFeedbackPacketStatuses << ','
             << stats.transportFeedbackReceivedPackets << ','
             << stats.transportFeedbackMissingPackets << ','
+            << stats.transportFeedbackSequenceGapPackets << ','
+            << stats.transportFeedbackSequenceGapRecoveredPackets << ','
             << stats.transportFeedbackLossRate << ','
             << stats.transportFeedbackArrivalJitterMs << ','
             << stats.transportFeedbackQueueDelayTrendMs << ','
@@ -344,6 +477,10 @@ namespace {
             << stats.adaptiveEncodedFrameBytes << ','
             << stats.adaptiveCompressionRatio << ','
             << stats.captureFps << ','
+            << EscapeCsv(stats.cameraCaptureSubtype) << ','
+            << stats.cameraCaptureWidth << ','
+            << stats.cameraCaptureHeight << ','
+            << stats.cameraCaptureFormatFps << ','
             << stats.encodeMs << ','
             << stats.sendResizeMs << ','
             << stats.sendNv12PrepareMs << ','
@@ -375,29 +512,87 @@ namespace {
             << (stats.h264AuIsIdr ? 1 : 0) << ','
             << (stats.h264AuIsDecoderSync ? 1 : 0) << ','
             << EscapeCsv(stats.h264AuProtectionLevel) << ','
+            << (stats.h264AuDroppedBeforeSend ? 1 : 0) << ','
+            << EscapeCsv(stats.h264AuDropReason) << ','
+            << stats.h264AuDroppedBytes << ','
+            << stats.h264AuDroppedChunks << ','
+            << stats.h264AuPacingQueueDelayMs << ','
+            << stats.h264AuEstimatedSendMs << ','
+            << (stats.h264InputGatedByPacing ? 1 : 0) << ','
+            << EscapeCsv(stats.h264InputGateReason) << ','
+            << stats.h264InputGateQueueDelayMs << ','
+            << stats.h264InputGateVideoCreditBytes << ','
+            << stats.h264InputGateFrameBudgetBytes << ','
+            << stats.h264InputGateDurationMs << ','
+            << stats.h264InputGateConsecutiveFrames << ','
+            << stats.h264InputGateSkippedInputFrames << ','
+            << (stats.h264InputGateForcedOpen ? 1 : 0) << ','
+            << EscapeCsv(stats.h264InputGateReleaseReason) << ','
             << stats.fecProtectedH264KeyFrames << ','
             << stats.fecProtectedH264LargeFrames << ','
             << stats.h264EncoderDelayFrames << ','
             << stats.h264EncoderDelayMs << ','
             << stats.h264EncoderPendingFrames << ','
             << stats.h264EncodedInputFrameId << ','
+            << stats.h264EncoderCallMs << ','
+            << stats.h264EncoderSampleCreateMs << ','
+            << stats.h264EncoderProcessInputMs << ','
+            << stats.h264EncoderPreInputPollMs << ','
+            << stats.h264EncoderPostInputWaitMs << ','
+            << stats.h264EncoderProcessOutputMs << ','
+            << stats.h264EncoderOutputCopyMs << ','
+            << stats.h264EncoderProcessOutputAttempts << ','
+            << stats.h264EncoderAsyncEventCount << ','
+            << (stats.h264EncoderHardware ? 1 : 0) << ','
+            << (stats.h264EncoderAsync ? 1 : 0) << ','
+            << (stats.h264EncoderNeedInputSignaled ? 1 : 0) << ','
+            << (stats.h264EncoderOutputProduced ? 1 : 0) << ','
+            << (stats.h264EncoderOutputProducedBeforeInput ? 1 : 0) << ','
+            << (stats.h264SubmittedNewInput ? 1 : 0) << ','
+            << (stats.h264AsyncSubmittedWithoutOutput ? 1 : 0) << ','
+            << (stats.h264AsyncPendingNoOutput ? 1 : 0) << ','
+            << (stats.h264AsyncCadenceHoldActive ? 1 : 0) << ','
+            << stats.h264AsyncPendingNoOutputStreak << ','
+            << stats.h264AsyncCadenceScale << ','
+            << stats.h264AsyncCadenceHoldRemainingMs << ','
+            << stats.h264AsyncOutputPollBackoffMs << ','
+            << stats.h264InputCadenceFps << ','
+            << (stats.h264NeedInputSubmitWake ? 1 : 0) << ','
+            << stats.h264NeedInputSubmitLeadMs << ','
             << stats.encodedCameraFrameId << ','
             << stats.encodedCameraSourceTimestamp100ns << ','
             << stats.encodedCameraCaptureCompletedTimeUs << ','
             << stats.encodedCameraFrameAgeMs << ','
+            << stats.encodedCameraReadSampleMs << ','
+            << stats.encodedCameraReadSampleEndToCaptureMs << ','
+            << stats.encodedCameraCaptureToPublishMs << ','
+            << stats.encodedCameraPublishToAcquireMs << ','
+            << stats.encodedCameraAcquireToEncoderInputMs << ','
             << stats.sendJpegEncodeMs << ','
             << stats.sendPacketizeMs << ','
             << stats.sendFrameIntervalMs << ','
             << (stats.cameraFrameReady ? 1 : 0) << ','
             << stats.cameraFrameId << ','
             << stats.cameraSourceTimestamp100ns << ','
+            << stats.cameraReadSampleStartTimeUs << ','
+            << stats.cameraReadSampleEndTimeUs << ','
             << stats.cameraCaptureCompletedTimeUs << ','
+            << stats.cameraFramePublishedTimeUs << ','
+            << stats.cameraSenderAcquireTimeUs << ','
             << stats.cameraReadSampleMs << ','
+            << stats.cameraReadSampleEndToCaptureMs << ','
+            << stats.cameraCaptureToPublishMs << ','
+            << stats.cameraPublishToAcquireMs << ','
+            << stats.cameraAcquireToSendMs << ','
             << stats.cameraFrameAgeMs << ','
             << (stats.cameraFrameCacheUsed ? 1 : 0) << ','
             << stats.receiveJpegDecodeMs << ','
             << stats.receiveDecodeWorkerFps << ','
             << stats.receiveDecodeWorkerFrames << ','
+            << stats.receiveDecodePopSuccesses << ','
+            << stats.receiveDecodePopEmptyPolls << ','
+            << stats.receiveDecodeLoopLastPopGapMs << ','
+            << stats.receiveDecodeLoopMaxPopGapMs << ','
             << stats.receiveDecodeOverwrittenFrames << ','
             << stats.receiveDecodeQueueDroppedFrames << ','
             << stats.receiveDecodeRenderOverwriteFrames << ','
@@ -415,10 +610,18 @@ namespace {
             << stats.receiveH264AuForbiddenZeroBit << ','
             << EscapeCsv(stats.receiveH264AuLastInvalidReason) << ','
             << stats.receiveDecodeInputFrameAgeMs << ','
+            << stats.receiveDecodeInputCameraFrameAgeMs << ','
+            << stats.receiveDecodeInputEncoderOutputAgeMs << ','
             << stats.receiveLatestDecodedFrameAgeMs << ','
+            << stats.receiveLatestDecodedCameraFrameAgeMs << ','
+            << stats.receiveLatestDecodedEncoderOutputAgeMs << ','
             << stats.receiveFreshnessDropThresholdMs << ','
             << EscapeCsv(stats.receiveDecodeLastDropReason) << ','
             << stats.receiveUploadBufferWaitMs << ','
+            << stats.receiveDisplayFrameId << ','
+            << stats.receiveDisplayCameraFrameAgeMs << ','
+            << stats.receiveDisplayEncoderOutputAgeMs << ','
+            << stats.receiveDisplayDecodedFrameAgeMs << ','
             << stats.textureUploadMs << ','
             << stats.presentGpuWaitMs << ','
             << stats.renderFramePacingWaitMs << ','
@@ -497,7 +700,16 @@ namespace {
             << "frameDropRate,"
             << "receivedPackets,"
             << "missingPackets,"
+            << "sequenceGapPackets,"
+            << "sequenceGapRecoveredPackets,"
             << "duplicatePackets,"
+            << "duplicateOriginalPackets,"
+            << "duplicateRetransmitPackets,"
+            << "duplicateLateAfterCompletedPackets,"
+            << "duplicateLateAfterCompletedOriginalPackets,"
+            << "duplicateLateAfterCompletedRetransmitPackets,"
+            << "duplicateLateAfterExpiredPackets,"
+            << "duplicateLateAfterRejectedPackets,"
             << "reorderedPackets,"
             << "completedFrames,"
             << "droppedFrames,"
@@ -505,12 +717,37 @@ namespace {
             << "outputQueueDroppedFrames,"
             << "outputQueueDropEvents,"
             << "outputQueueDropBurstEvents,"
+            << "startupWarmupSec,"
+            << "startupWarmupActive,"
+            << "outputQueueDroppedFramesDelta,"
+            << "outputQueueDropEventsDelta,"
+            << "outputQueueDropBurstEventsDelta,"
+            << "startupOutputQueueDroppedFrames,"
+            << "startupOutputQueueDropEvents,"
+            << "startupOutputQueueDropBurstEvents,"
+            << "steadyOutputQueueDroppedFrames,"
+            << "steadyOutputQueueDropEvents,"
+            << "steadyOutputQueueDropBurstEvents,"
+            << "evaluationOutputQueueDroppedFrames,"
+            << "evaluationOutputQueueDropEvents,"
+            << "evaluationOutputQueueDropBurstEvents,"
             << "lastOutputQueueDropFrameCount,"
             << "lastOutputQueueDropQueueSize,"
             << "lastOutputQueueDropOldestAgeMs,"
             << "lastOutputQueueDropNewestAgeMs,"
             << "maxOutputQueueDropOldestAgeMs,"
             << "lastOutputQueueDropReason,"
+            << "completedQueuePushes,"
+            << "completedQueuePops,"
+            << "completedQueueEmptyPolls,"
+            << "completedQueueSize,"
+            << "maxCompletedQueueSize,"
+            << "completedQueueLastPopAgeMs,"
+            << "completedQueueMaxPopAgeMs,"
+            << "completedQueueLastPushIntervalMs,"
+            << "completedQueueMaxPushIntervalMs,"
+            << "lastOutputQueueDropPopAgeMs,"
+            << "lastOutputQueueDropPushIntervalMs,"
             << "decodedFrames,"
             << "displayedFrames,"
             << "frameRecoveryOutcomeEvents,"
@@ -547,6 +784,12 @@ namespace {
             << "retransmitUsefulChunks,"
             << "retransmitDuplicatePackets,"
             << "retransmitLateAfterCompletedPackets,"
+            << "retransmitLateAfterCompletedLargePackets,"
+            << "retransmitLateAfterCompletedSentBeforeCompletePackets,"
+            << "retransmitLateAfterCompletedSentAfterCompletePackets,"
+            << "retransmitLateAfterCompletedAvgSendToCompleteMs,"
+            << "retransmitLateAfterCompletedAvgDelayMs,"
+            << "retransmitLateAfterCompletedMaxDelayMs,"
             << "retransmitLateAfterExpiredPackets,"
             << "retransmitLateAfterRejectedPackets,"
             << "retransmitClassifiedPackets,"
@@ -587,8 +830,24 @@ namespace {
             << "repairCanceledByCompleteAckPackets,"
             << "repairSkippedByTtlPackets,"
             << "repairQueuedButCanceledPackets,"
+            << "repairSentAfterCompleteAckPackets,"
+            << "repairSentAfterCompleteAckLargePackets,"
             << "repairSuppressedByFecLikelyFrames,"
             << "repairSuppressedByFecLikelyPackets,"
+            << "repairSuppressedByFecLikelyLargeFrames,"
+            << "repairSuppressedByFecLikelyLargePackets,"
+            << "repairBudgetSuppressedFrames,"
+            << "repairBudgetSuppressedPackets,"
+            << "repairBudgetSuppressedLargeFrames,"
+            << "repairBudgetSuppressedLargePackets,"
+            << "repairRaceGuardSuppressedFrames,"
+            << "repairRaceGuardSuppressedPackets,"
+            << "repairRaceGuardSuppressedLargePackets,"
+            << "repairBudgetProfile,"
+            << "repairBudgetProfileSwitches,"
+            << "repairBudgetSmoothedMissingRate,"
+            << "repairBudgetSmoothedPacingQueueDelayMs,"
+            << "repairBudgetSmoothedDeliveryMs,"
             << "repairFecLikelySuppressedCompletedFrames,"
             << "repairFecLikelySuppressedCompletedPackets,"
             << "repairFecLikelySuppressedExpiredFrames,"
@@ -627,6 +886,8 @@ namespace {
             << "transportFeedbackPacketStatuses,"
             << "transportFeedbackReceivedPackets,"
             << "transportFeedbackMissingPackets,"
+            << "transportFeedbackSequenceGapPackets,"
+            << "transportFeedbackSequenceGapRecoveredPackets,"
             << "transportFeedbackLossRate,"
             << "transportFeedbackArrivalJitterMs,"
             << "transportFeedbackQueueDelayTrendMs,"
@@ -687,6 +948,10 @@ namespace {
             << "encodedFrameBytes,"
             << "compressionRatio,"
             << "captureFps,"
+            << "cameraCaptureSubtype,"
+            << "cameraCaptureWidth,"
+            << "cameraCaptureHeight,"
+            << "cameraCaptureFormatFps,"
             << "encodeMs,"
             << "resizeMs,"
             << "nv12PrepareMs,"
@@ -718,29 +983,87 @@ namespace {
             << "h264AuIsIdr,"
             << "h264AuIsDecoderSync,"
             << "h264AuProtectionLevel,"
+            << "h264AuDroppedBeforeSend,"
+            << "h264AuDropReason,"
+            << "h264AuDroppedBytes,"
+            << "h264AuDroppedChunks,"
+            << "h264AuPacingQueueDelayMs,"
+            << "h264AuEstimatedSendMs,"
+            << "h264InputGatedByPacing,"
+            << "h264InputGateReason,"
+            << "h264InputGateQueueDelayMs,"
+            << "h264InputGateVideoCreditBytes,"
+            << "h264InputGateFrameBudgetBytes,"
+            << "h264InputGateDurationMs,"
+            << "h264InputGateConsecutiveFrames,"
+            << "h264InputGateSkippedInputFrames,"
+            << "h264InputGateForcedOpen,"
+            << "h264InputGateReleaseReason,"
             << "fecProtectedH264KeyFrames,"
             << "fecProtectedH264LargeFrames,"
             << "h264EncoderDelayFrames,"
             << "h264EncoderDelayMs,"
             << "h264EncoderPendingFrames,"
             << "h264EncodedInputFrameId,"
+            << "h264EncoderCallMs,"
+            << "h264EncoderSampleCreateMs,"
+            << "h264EncoderProcessInputMs,"
+            << "h264EncoderPreInputPollMs,"
+            << "h264EncoderPostInputWaitMs,"
+            << "h264EncoderProcessOutputMs,"
+            << "h264EncoderOutputCopyMs,"
+            << "h264EncoderProcessOutputAttempts,"
+            << "h264EncoderAsyncEventCount,"
+            << "h264EncoderHardware,"
+            << "h264EncoderAsync,"
+            << "h264EncoderNeedInputSignaled,"
+            << "h264EncoderOutputProduced,"
+            << "h264EncoderOutputProducedBeforeInput,"
+            << "h264SubmittedNewInput,"
+            << "h264AsyncSubmittedWithoutOutput,"
+            << "h264AsyncPendingNoOutput,"
+            << "h264AsyncCadenceHoldActive,"
+            << "h264AsyncPendingNoOutputStreak,"
+            << "h264AsyncCadenceScale,"
+            << "h264AsyncCadenceHoldRemainingMs,"
+            << "h264AsyncOutputPollBackoffMs,"
+            << "h264InputCadenceFps,"
+            << "h264NeedInputSubmitWake,"
+            << "h264NeedInputSubmitLeadMs,"
             << "encodedCameraFrameId,"
             << "encodedCameraSourceTimestamp100ns,"
             << "encodedCameraCaptureCompletedTimeUs,"
             << "encodedCameraFrameAgeMs,"
+            << "encodedCameraReadSampleMs,"
+            << "encodedCameraReadSampleEndToCaptureMs,"
+            << "encodedCameraCaptureToPublishMs,"
+            << "encodedCameraPublishToAcquireMs,"
+            << "encodedCameraAcquireToEncoderInputMs,"
             << "jpegEncodeMs,"
             << "packetizeMs,"
             << "sendFrameIntervalMs,"
             << "cameraFrameReady,"
             << "cameraFrameId,"
             << "cameraSourceTimestamp100ns,"
+            << "cameraReadSampleStartTimeUs,"
+            << "cameraReadSampleEndTimeUs,"
             << "cameraCaptureCompletedTimeUs,"
+            << "cameraFramePublishedTimeUs,"
+            << "cameraSenderAcquireTimeUs,"
             << "cameraReadSampleMs,"
+            << "cameraReadSampleEndToCaptureMs,"
+            << "cameraCaptureToPublishMs,"
+            << "cameraPublishToAcquireMs,"
+            << "cameraAcquireToSendMs,"
             << "cameraFrameAgeMs,"
             << "cameraFrameCacheUsed,"
             << "receiveJpegDecodeMs,"
             << "receiveDecodeWorkerFps,"
             << "receiveDecodeWorkerFrames,"
+            << "receiveDecodePopSuccesses,"
+            << "receiveDecodePopEmptyPolls,"
+            << "receiveDecodeLoopLastPopGapMs,"
+            << "receiveDecodeLoopMaxPopGapMs,"
             << "receiveDecodeOverwrittenFrames,"
             << "receiveDecodeQueueDroppedFrames,"
             << "receiveDecodeRenderOverwriteFrames,"
@@ -758,10 +1081,18 @@ namespace {
             << "receiveH264AuForbiddenZeroBit,"
             << "receiveH264AuLastInvalidReason,"
             << "receiveDecodeInputFrameAgeMs,"
+            << "receiveDecodeInputCameraFrameAgeMs,"
+            << "receiveDecodeInputEncoderOutputAgeMs,"
             << "receiveLatestDecodedFrameAgeMs,"
+            << "receiveLatestDecodedCameraFrameAgeMs,"
+            << "receiveLatestDecodedEncoderOutputAgeMs,"
             << "receiveFreshnessDropThresholdMs,"
             << "receiveDecodeLastDropReason,"
             << "receiveUploadBufferWaitMs,"
+            << "receiveDisplayFrameId,"
+            << "receiveDisplayCameraFrameAgeMs,"
+            << "receiveDisplayEncoderOutputAgeMs,"
+            << "receiveDisplayDecodedFrameAgeMs,"
             << "textureUploadMs,"
             << "presentGpuWaitMs,"
             << "renderFramePacingWaitMs,"

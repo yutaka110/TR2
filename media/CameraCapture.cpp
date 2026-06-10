@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 #include <dshow.h>
+#include <dvdmedia.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
@@ -31,6 +32,9 @@ const char* VideoSubtypeName(const GUID& subtype) {
     if (subtype == MFVideoFormat_RGB32) {
         return "RGB32";
     }
+    if (subtype == MFVideoFormat_RGB24) {
+        return "RGB24";
+    }
     if (subtype == MFVideoFormat_MJPG) {
         return "MJPG";
     }
@@ -38,6 +42,18 @@ const char* VideoSubtypeName(const GUID& subtype) {
         return "I420";
     }
     return "unknown";
+}
+
+void FreeDirectShowMediaType(AM_MEDIA_TYPE& mediaType) {
+    if (mediaType.cbFormat != 0 && mediaType.pbFormat != nullptr) {
+        CoTaskMemFree(mediaType.pbFormat);
+        mediaType.cbFormat = 0;
+        mediaType.pbFormat = nullptr;
+    }
+    if (mediaType.pUnk != nullptr) {
+        mediaType.pUnk->Release();
+        mediaType.pUnk = nullptr;
+    }
 }
 
 uint8_t ClampByte(int value) {
@@ -159,6 +175,163 @@ void CameraCapture::LogDirectShowVideoDevices() const {
             LogHr("DirectShow BindToStorage(IPropertyBag) failed", hr);
         }
 
+        IBaseFilter* filter = nullptr;
+        hr = moniker->BindToObject(nullptr, nullptr, IID_PPV_ARGS(&filter));
+        if (SUCCEEDED(hr) && filter != nullptr) {
+            IEnumPins* enumPins = nullptr;
+            hr = filter->EnumPins(&enumPins);
+            if (SUCCEEDED(hr) && enumPins != nullptr) {
+                uint32_t pinIndex = 0;
+                IPin* pin = nullptr;
+                ULONG pinFetched = 0;
+                while (enumPins->Next(1, &pin, &pinFetched) == S_OK &&
+                    pin != nullptr) {
+                    PIN_DIRECTION direction = PINDIR_INPUT;
+                    if (SUCCEEDED(pin->QueryDirection(&direction)) &&
+                        direction == PINDIR_OUTPUT) {
+                        IAMStreamConfig* streamConfig = nullptr;
+                        hr = pin->QueryInterface(IID_PPV_ARGS(&streamConfig));
+                        if (SUCCEEDED(hr) && streamConfig != nullptr) {
+                            int capsCount = 0;
+                            int capsSize = 0;
+                            hr = streamConfig->GetNumberOfCapabilities(
+                                &capsCount,
+                                &capsSize);
+                            if (SUCCEEDED(hr) &&
+                                capsCount > 0 &&
+                                capsSize > 0) {
+                                std::vector<BYTE> capsBuffer(
+                                    static_cast<size_t>(capsSize));
+                                for (int capIndex = 0;
+                                    capIndex < capsCount;
+                                    ++capIndex) {
+                                    AM_MEDIA_TYPE* mediaType = nullptr;
+                                    hr = streamConfig->GetStreamCaps(
+                                        capIndex,
+                                        &mediaType,
+                                        capsBuffer.data());
+                                    if (FAILED(hr) || mediaType == nullptr) {
+                                        continue;
+                                    }
+
+                                    UINT32 streamWidth = 0;
+                                    UINT32 streamHeight = 0;
+                                    LONGLONG avgFrameTime100ns = 0;
+                                    if (mediaType->formattype == FORMAT_VideoInfo &&
+                                        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER) &&
+                                        mediaType->pbFormat != nullptr) {
+                                        const auto* videoInfo =
+                                            reinterpret_cast<const VIDEOINFOHEADER*>(
+                                                mediaType->pbFormat);
+                                        streamWidth =
+                                            static_cast<UINT32>(
+                                                std::abs(
+                                                    videoInfo->bmiHeader.biWidth));
+                                        streamHeight =
+                                            static_cast<UINT32>(
+                                                std::abs(
+                                                    videoInfo->bmiHeader.biHeight));
+                                        avgFrameTime100ns =
+                                            videoInfo->AvgTimePerFrame;
+                                    }
+                                    else if (
+                                        mediaType->formattype == FORMAT_VideoInfo2 &&
+                                        mediaType->cbFormat >= sizeof(VIDEOINFOHEADER2) &&
+                                        mediaType->pbFormat != nullptr) {
+                                        const auto* videoInfo =
+                                            reinterpret_cast<const VIDEOINFOHEADER2*>(
+                                                mediaType->pbFormat);
+                                        streamWidth =
+                                            static_cast<UINT32>(
+                                                std::abs(
+                                                    videoInfo->bmiHeader.biWidth));
+                                        streamHeight =
+                                            static_cast<UINT32>(
+                                                std::abs(
+                                                    videoInfo->bmiHeader.biHeight));
+                                        avgFrameTime100ns =
+                                            videoInfo->AvgTimePerFrame;
+                                    }
+
+                                    double defaultFps = 0.0;
+                                    if (avgFrameTime100ns > 0) {
+                                        defaultFps =
+                                            10000000.0 /
+                                            static_cast<double>(
+                                                avgFrameTime100ns);
+                                    }
+
+                                    double minFps = 0.0;
+                                    double maxFps = 0.0;
+                                    if (capsSize >=
+                                        static_cast<int>(
+                                            sizeof(VIDEO_STREAM_CONFIG_CAPS))) {
+                                        const auto* caps =
+                                            reinterpret_cast<
+                                                const VIDEO_STREAM_CONFIG_CAPS*>(
+                                                capsBuffer.data());
+                                        if (caps->MaxFrameInterval > 0) {
+                                            minFps =
+                                                10000000.0 /
+                                                static_cast<double>(
+                                                    caps->MaxFrameInterval);
+                                        }
+                                        if (caps->MinFrameInterval > 0) {
+                                            maxFps =
+                                                10000000.0 /
+                                                static_cast<double>(
+                                                    caps->MinFrameInterval);
+                                        }
+                                    }
+
+                                    std::ostringstream capOss;
+                                    capOss
+                                        << "[CameraCapture] DirectShow stream cap"
+                                        << "[device=" << count - 1
+                                        << " pin=" << pinIndex
+                                        << " cap=" << capIndex
+                                        << "]: "
+                                        << VideoSubtypeName(mediaType->subtype)
+                                        << " "
+                                        << streamWidth
+                                        << "x"
+                                        << streamHeight
+                                        << " default="
+                                        << std::fixed
+                                        << std::setprecision(2)
+                                        << defaultFps
+                                        << "fps range="
+                                        << minFps
+                                        << "-"
+                                        << maxFps
+                                        << "fps";
+                                    Log(capOss.str());
+
+                                    FreeDirectShowMediaType(*mediaType);
+                                    CoTaskMemFree(mediaType);
+                                }
+                            }
+                            else {
+                                LogHr("DirectShow IAMStreamConfig GetNumberOfCapabilities failed", hr);
+                            }
+                            streamConfig->Release();
+                        }
+                    }
+                    pin->Release();
+                    pin = nullptr;
+                    ++pinIndex;
+                }
+                enumPins->Release();
+            }
+            else {
+                LogHr("DirectShow EnumPins failed", hr);
+            }
+            filter->Release();
+        }
+        else {
+            LogHr("DirectShow BindToObject(IBaseFilter) failed", hr);
+        }
+
         moniker->Release();
         moniker = nullptr;
     }
@@ -190,6 +363,7 @@ bool CameraCapture::Initialize(UINT32 width, UINT32 height) {
     }
     mfStarted_ = true;
     Log("[CameraCapture] MFStartup succeeded.");
+    LogDirectShowVideoDevices();
 
     if (!OpenReader(width, height)) {
         Shutdown();
@@ -334,9 +508,11 @@ bool CameraCapture::ConfigureLowLatencyOutput(UINT32 width, UINT32 height) {
     }
 
     IMFMediaType* bestType = nullptr;
-    int bestScore = (std::numeric_limits<int>::min)();
+    long long bestScore = (std::numeric_limits<long long>::min)();
     UINT32 bestWidth = 0;
     UINT32 bestHeight = 0;
+    UINT32 bestFpsNum = 0;
+    UINT32 bestFpsDen = 0;
     GUID bestSubtype = GUID_NULL;
 
     for (DWORD index = 0;; ++index) {
@@ -383,34 +559,41 @@ bool CameraCapture::ConfigureLowLatencyOutput(UINT32 width, UINT32 height) {
 
         int subtypeScore = 0;
         if (subtype == MFVideoFormat_NV12) {
-            subtypeScore = 300000;
+            subtypeScore = 3000000;
         }
         else if (subtype == MFVideoFormat_YUY2) {
-            subtypeScore = 200000;
+            subtypeScore = 2000000;
+        }
+        else if (subtype == MFVideoFormat_RGB32) {
+            subtypeScore = 1000000;
         }
         else {
             nativeType->Release();
             continue;
         }
 
-        const int sizeScore =
-            (nativeWidth == width && nativeHeight == height)
-            ? 50000
-            : -static_cast<int>(
-                std::abs(
-                    static_cast<long long>(nativeWidth) *
-                    static_cast<long long>(nativeHeight) -
-                    static_cast<long long>(width) *
-                    static_cast<long long>(height)) /
-                1024);
-        const int fpsScore =
+        const double fps =
             (fpsNum != 0 && fpsDen != 0)
-            ? static_cast<int>(
-                (std::min<double>)(
-                    120.0,
-                    static_cast<double>(fpsNum) / static_cast<double>(fpsDen)))
-            : 0;
-        const int score = subtypeScore + sizeScore + fpsScore;
+            ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen)
+            : 0.0;
+        const long long targetArea =
+            static_cast<long long>(width) * static_cast<long long>(height);
+        const long long nativeArea =
+            static_cast<long long>(nativeWidth) * static_cast<long long>(nativeHeight);
+        const long long areaDiff =
+            std::llabs(nativeArea - targetArea);
+        const long long fpsTierScore = fps >= 59.5 ? 100000000LL : 0LL;
+        const long long fpsScore =
+            static_cast<long long>((std::min<double>)(120.0, fps) * 10000.0);
+        const long long sizeScore =
+            (nativeWidth == width && nativeHeight == height)
+            ? 200000LL
+            : -static_cast<long long>(areaDiff / 512LL);
+        const long long score =
+            fpsTierScore +
+            static_cast<long long>(subtypeScore) +
+            fpsScore +
+            sizeScore;
 
         if (score > bestScore) {
             if (bestType) {
@@ -420,6 +603,8 @@ bool CameraCapture::ConfigureLowLatencyOutput(UINT32 width, UINT32 height) {
             bestScore = score;
             bestWidth = nativeWidth;
             bestHeight = nativeHeight;
+            bestFpsNum = fpsNum;
+            bestFpsDen = fpsDen;
             bestSubtype = subtype;
         }
         else {
@@ -428,7 +613,7 @@ bool CameraCapture::ConfigureLowLatencyOutput(UINT32 width, UINT32 height) {
     }
 
     if (!bestType) {
-        Log("[CameraCapture] No native NV12/YUY2 format found; RGB32 fallback will be used.");
+        Log("[CameraCapture] No native NV12/YUY2/RGB32 format found; RGB32 fallback will be used.");
         return false;
     }
 
@@ -438,7 +623,7 @@ bool CameraCapture::ConfigureLowLatencyOutput(UINT32 width, UINT32 height) {
         bestType);
     bestType->Release();
     if (FAILED(hr)) {
-        LogHr("SetCurrentMediaType native NV12/YUY2 failed", hr);
+        LogHr("SetCurrentMediaType native low-latency failed", hr);
         return false;
     }
 
@@ -449,7 +634,17 @@ bool CameraCapture::ConfigureLowLatencyOutput(UINT32 width, UINT32 height) {
         << " "
         << bestWidth
         << "x"
-        << bestHeight
+        << bestHeight;
+    if (bestFpsNum != 0 && bestFpsDen != 0) {
+        oss
+            << " @ "
+            << std::fixed
+            << std::setprecision(2)
+            << (static_cast<double>(bestFpsNum) /
+                static_cast<double>(bestFpsDen))
+            << "fps";
+    }
+    oss
         << " -> "
         << width
         << "x"
@@ -514,10 +709,13 @@ bool CameraCapture::UpdateCurrentFrameSize() {
 
     UINT32 width = 0;
     UINT32 height = 0;
+    UINT32 fpsNum = 0;
+    UINT32 fpsDen = 0;
     GUID subtype = GUID_NULL;
     LONG stride = 0;
     currentType->GetGUID(MF_MT_SUBTYPE, &subtype);
     hr = MFGetAttributeSize(currentType, MF_MT_FRAME_SIZE, &width, &height);
+    MFGetAttributeRatio(currentType, MF_MT_FRAME_RATE, &fpsNum, &fpsDen);
     UINT32 strideAttribute = 0;
     if (SUCCEEDED(currentType->GetUINT32(
             MF_MT_DEFAULT_STRIDE,
@@ -545,6 +743,12 @@ bool CameraCapture::UpdateCurrentFrameSize() {
         captureHeight_ = height;
         captureSubtype_ = subtype;
         captureStride_ = stride;
+        captureFpsNumerator_ = fpsNum;
+        captureFpsDenominator_ = fpsDen == 0 ? 1 : fpsDen;
+        captureFormatFps_ =
+            (fpsNum != 0 && fpsDen != 0)
+            ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen)
+            : 0.0;
         std::ostringstream oss;
         oss
             << "[CameraCapture] Current media type: "
@@ -552,7 +756,16 @@ bool CameraCapture::UpdateCurrentFrameSize() {
             << " "
             << width
             << "x"
-            << height
+            << height;
+        if (captureFormatFps_ > 0.0) {
+            oss
+                << " @ "
+                << std::fixed
+                << std::setprecision(2)
+                << captureFormatFps_
+                << "fps";
+        }
+        oss
             << " stride="
             << captureStride_;
         Log(oss.str());
@@ -573,7 +786,9 @@ uint64_t CameraCapture::NowMicroseconds() {
 bool CameraCapture::GetFrame(
     IMFSample** outSample,
     int64_t* outSourceTimestamp100ns,
-    double* outReadSampleMs) {
+    double* outReadSampleMs,
+    uint64_t* outReadSampleStartTimeUs,
+    uint64_t* outReadSampleEndTimeUs) {
     if (!reader_ || !outSample) {
         return false;
     }
@@ -585,10 +800,17 @@ bool CameraCapture::GetFrame(
     if (outReadSampleMs) {
         *outReadSampleMs = 0.0;
     }
+    if (outReadSampleStartTimeUs) {
+        *outReadSampleStartTimeUs = 0;
+    }
+    if (outReadSampleEndTimeUs) {
+        *outReadSampleEndTimeUs = 0;
+    }
 
     DWORD streamIndex = 0;
     DWORD flags = 0;
     LONGLONG timestamp = 0;
+    const uint64_t readStartUs = NowMicroseconds();
     const auto readStart = std::chrono::steady_clock::now();
     HRESULT hr = reader_->ReadSample(
         static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
@@ -598,6 +820,7 @@ bool CameraCapture::GetFrame(
         &timestamp,
         outSample
     );
+    const uint64_t readEndUs = NowMicroseconds();
     const double readMs =
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - readStart
@@ -607,6 +830,12 @@ bool CameraCapture::GetFrame(
     }
     if (outReadSampleMs) {
         *outReadSampleMs = readMs;
+    }
+    if (outReadSampleStartTimeUs) {
+        *outReadSampleStartTimeUs = readStartUs;
+    }
+    if (outReadSampleEndTimeUs) {
+        *outReadSampleEndTimeUs = readEndUs;
     }
     if (readMs > 250.0 && frameFailureLogCount_ < 30) {
         std::ostringstream oss;
@@ -690,7 +919,14 @@ bool CameraCapture::TryGetRgbaFrame(
     IMFSample* sample = nullptr;
     int64_t sourceTimestamp100ns = 0;
     double readSampleMs = 0.0;
-    if (!GetFrame(&sample, &sourceTimestamp100ns, &readSampleMs) ||
+    uint64_t readSampleStartTimeUs = 0;
+    uint64_t readSampleEndTimeUs = 0;
+    if (!GetFrame(
+            &sample,
+            &sourceTimestamp100ns,
+            &readSampleMs,
+            &readSampleStartTimeUs,
+            &readSampleEndTimeUs) ||
         sample == nullptr) {
         return false;
     }
@@ -897,7 +1133,11 @@ bool CameraCapture::TryGetRgbaFrame(
 
     frameFailureLogCount_ = 0;
     outMetadata.sourceTimestamp100ns = sourceTimestamp100ns;
+    outMetadata.readSampleStartTimeUs = readSampleStartTimeUs;
+    outMetadata.readSampleEndTimeUs = readSampleEndTimeUs;
     outMetadata.captureCompletedTimeUs = NowMicroseconds();
+    outMetadata.framePublishedTimeUs = outMetadata.captureCompletedTimeUs;
+    outMetadata.senderAcquireTimeUs = outMetadata.captureCompletedTimeUs;
     outMetadata.readSampleMs = readSampleMs;
     return true;
 }
@@ -912,7 +1152,14 @@ bool CameraCapture::TryGetNv12Frame(Nv12Frame& outFrame) {
     IMFSample* sample = nullptr;
     int64_t sourceTimestamp100ns = 0;
     double readSampleMs = 0.0;
-    if (!GetFrame(&sample, &sourceTimestamp100ns, &readSampleMs) ||
+    uint64_t readSampleStartTimeUs = 0;
+    uint64_t readSampleEndTimeUs = 0;
+    if (!GetFrame(
+            &sample,
+            &sourceTimestamp100ns,
+            &readSampleMs,
+            &readSampleStartTimeUs,
+            &readSampleEndTimeUs) ||
         sample == nullptr) {
         return false;
     }
@@ -1002,7 +1249,13 @@ bool CameraCapture::TryGetNv12Frame(Nv12Frame& outFrame) {
 
     frameFailureLogCount_ = 0;
     outFrame.metadata.sourceTimestamp100ns = sourceTimestamp100ns;
+    outFrame.metadata.readSampleStartTimeUs = readSampleStartTimeUs;
+    outFrame.metadata.readSampleEndTimeUs = readSampleEndTimeUs;
     outFrame.metadata.captureCompletedTimeUs = NowMicroseconds();
+    outFrame.metadata.framePublishedTimeUs =
+        outFrame.metadata.captureCompletedTimeUs;
+    outFrame.metadata.senderAcquireTimeUs =
+        outFrame.metadata.captureCompletedTimeUs;
     outFrame.metadata.readSampleMs = readSampleMs;
     return true;
 }
@@ -1032,6 +1285,7 @@ void CameraCapture::StartAsyncCapture() {
 
 void CameraCapture::StopAsyncCapture() {
     asyncRunning_.store(false);
+    latestFrameCondition_.notify_all();
 
     if (asyncThread_.joinable()) {
         asyncThread_.join();
@@ -1066,6 +1320,7 @@ bool CameraCapture::TryGetLatestRgbaFrame(
 
     outRgba = latestFrame_;
     outMetadata = latestFrameMetadata_;
+    outMetadata.senderAcquireTimeUs = NowMicroseconds();
     return true;
 }
 
@@ -1080,7 +1335,23 @@ bool CameraCapture::TryGetLatestNv12Frame(Nv12Frame& outFrame) {
     }
 
     outFrame = latestNv12Frame_;
+    outFrame.metadata.senderAcquireTimeUs = NowMicroseconds();
     return true;
+}
+
+bool CameraCapture::WaitForFrameAfter(
+    uint64_t frameId,
+    std::chrono::steady_clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(latestFrameMutex_);
+    return latestFrameCondition_.wait_until(
+        lock,
+        deadline,
+        [&]() {
+            return !asyncRunning_.load() ||
+                (latestFrameReady_ && latestFrameId_ > frameId);
+        }) &&
+        latestFrameReady_ &&
+        latestFrameId_ > frameId;
 }
 
 bool CameraCapture::ConvertLatestNv12ToRgbaLocked(
@@ -1142,12 +1413,29 @@ bool CameraCapture::ConvertLatestNv12ToRgbaLocked(
     }
 
     outMetadata = latestNv12Frame_.metadata;
+    outMetadata.senderAcquireTimeUs = NowMicroseconds();
     return true;
 }
 
 double CameraCapture::GetAsyncCaptureFps() const {
     std::lock_guard<std::mutex> lock(latestFrameMutex_);
     return asyncCaptureFps_;
+}
+
+std::string CameraCapture::GetCaptureSubtypeName() const {
+    return VideoSubtypeName(captureSubtype_);
+}
+
+UINT32 CameraCapture::GetCaptureWidth() const {
+    return captureWidth_;
+}
+
+UINT32 CameraCapture::GetCaptureHeight() const {
+    return captureHeight_;
+}
+
+double CameraCapture::GetCaptureFormatFps() const {
+    return captureFormatFps_;
 }
 
 void CameraCapture::AsyncCaptureLoop() {
@@ -1180,21 +1468,26 @@ void CameraCapture::AsyncCaptureLoop() {
             lastFrameTime = now;
             consecutiveFailures = 0;
 
-            std::lock_guard<std::mutex> lock(latestFrameMutex_);
-            latestFrameId_++;
-            metadata.frameId = latestFrameId_;
-            latestFrameMetadata_ = metadata;
-            if (capturedNv12) {
-                nv12Frame.metadata = metadata;
-                latestNv12Frame_ = std::move(nv12Frame);
-                latestFrame_.clear();
+            {
+                std::lock_guard<std::mutex> lock(latestFrameMutex_);
+                latestFrameId_++;
+                metadata.frameId = latestFrameId_;
+                metadata.framePublishedTimeUs = NowMicroseconds();
+                metadata.senderAcquireTimeUs = 0;
+                latestFrameMetadata_ = metadata;
+                if (capturedNv12) {
+                    nv12Frame.metadata = metadata;
+                    latestNv12Frame_ = std::move(nv12Frame);
+                    latestFrame_.clear();
+                }
+                else {
+                    latestFrame_ = std::move(frame);
+                    latestNv12Frame_ = {};
+                }
+                latestFrameReady_ = true;
+                asyncCapturedFrames_++;
             }
-            else {
-                latestFrame_ = std::move(frame);
-                latestNv12Frame_ = {};
-            }
-            latestFrameReady_ = true;
-            asyncCapturedFrames_++;
+            latestFrameCondition_.notify_all();
 
             const double elapsedSec =
                 std::chrono::duration<double>(
