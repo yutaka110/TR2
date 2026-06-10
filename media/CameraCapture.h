@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -17,7 +18,11 @@ public:
     struct FrameMetadata {
         uint64_t frameId = 0;
         int64_t sourceTimestamp100ns = 0;
+        uint64_t readSampleStartTimeUs = 0;
+        uint64_t readSampleEndTimeUs = 0;
         uint64_t captureCompletedTimeUs = 0;
+        uint64_t framePublishedTimeUs = 0;
+        uint64_t senderAcquireTimeUs = 0;
         double readSampleMs = 0.0;
     };
 
@@ -35,7 +40,9 @@ public:
     bool GetFrame(
         IMFSample** outSample,
         int64_t* outSourceTimestamp100ns = nullptr,
-        double* outReadSampleMs = nullptr
+        double* outReadSampleMs = nullptr,
+        uint64_t* outReadSampleStartTimeUs = nullptr,
+        uint64_t* outReadSampleEndTimeUs = nullptr
     );
     bool TryGetRgbaFrame(std::vector<uint8_t>& outRgba);
     bool TryGetRgbaFrame(
@@ -54,7 +61,15 @@ public:
         FrameMetadata& outMetadata
     );
     bool TryGetLatestNv12Frame(Nv12Frame& outFrame);
+    bool WaitForFrameAfter(
+        uint64_t frameId,
+        std::chrono::steady_clock::time_point deadline
+    );
     double GetAsyncCaptureFps() const;
+    std::string GetCaptureSubtypeName() const;
+    UINT32 GetCaptureWidth() const;
+    UINT32 GetCaptureHeight() const;
+    double GetCaptureFormatFps() const;
     void Shutdown();
 
 private:
@@ -80,6 +95,9 @@ private:
     UINT32 captureHeight_ = 0;
     GUID captureSubtype_ = GUID_NULL;
     LONG captureStride_ = 0;
+    UINT32 captureFpsNumerator_ = 0;
+    UINT32 captureFpsDenominator_ = 1;
+    double captureFormatFps_ = 0.0;
     UINT32 outputWidth_ = 0;
     UINT32 outputHeight_ = 0;
     mutable uint32_t frameFailureLogCount_ = 0;
@@ -87,6 +105,7 @@ private:
     std::atomic<bool> asyncRunning_{ false };
     std::thread asyncThread_;
     mutable std::mutex latestFrameMutex_;
+    std::condition_variable latestFrameCondition_;
     std::vector<uint8_t> latestFrame_;
     Nv12Frame latestNv12Frame_{};
     FrameMetadata latestFrameMetadata_{};

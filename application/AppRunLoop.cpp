@@ -30,6 +30,19 @@ double ElapsedMs(std::chrono::steady_clock::time_point start) {
         std::chrono::steady_clock::now() - start).count();
 }
 
+uint64_t NowMicroseconds() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+double AgeMs(uint64_t nowUs, uint64_t thenUs) {
+    if (thenUs == 0 || nowUs < thenUs) {
+        return 0.0;
+    }
+    return static_cast<double>(nowUs - thenUs) / 1000.0;
+}
+
 void UpdateTimingEwma(double& value, bool& hasValue, double sampleMs) {
     constexpr double kAlpha = 0.20;
     if (!hasValue) {
@@ -414,6 +427,11 @@ void AppRunLoop::SetReceivedVideoNv12Textures(
 void AppRunLoop::PopulateNetworkRenderTimings(
     net::NetworkStatsSnapshot& stats) const {
     stats.receiveUploadBufferWaitMs = receiveUploadBufferWaitMs_;
+    stats.receiveDisplayFrameId = receiveDisplayFrameId_;
+    stats.receiveDisplayCameraFrameAgeMs = receiveDisplayCameraFrameAgeMs_;
+    stats.receiveDisplayEncoderOutputAgeMs =
+        receiveDisplayEncoderOutputAgeMs_;
+    stats.receiveDisplayDecodedFrameAgeMs = receiveDisplayDecodedFrameAgeMs_;
     stats.textureUploadMs = textureUploadMs_;
     stats.presentGpuWaitMs = presentGpuWaitMs_;
     stats.renderFramePacingWaitMs = renderFramePacingWaitMs_;
@@ -620,6 +638,27 @@ void AppRunLoop::UploadReceivedVideoFrame(
     net::DecodedVideoFrame frame{};
     if (!receivedFrameProvider_(frame)) {
         return;
+    }
+
+    const uint64_t displaySampleUs = NowMicroseconds();
+    receiveDisplayFrameId_ = frame.frameId;
+    if (frame.cameraCaptureCompletedTimeUs != 0) {
+        UpdateTimingEwma(
+            receiveDisplayCameraFrameAgeMs_,
+            hasReceiveDisplayCameraFrameAgeMs_,
+            AgeMs(displaySampleUs, frame.cameraCaptureCompletedTimeUs));
+    }
+    if (frame.encoderOutputTimeUs != 0) {
+        UpdateTimingEwma(
+            receiveDisplayEncoderOutputAgeMs_,
+            hasReceiveDisplayEncoderOutputAgeMs_,
+            AgeMs(displaySampleUs, frame.encoderOutputTimeUs));
+    }
+    if (frame.decodedTimeUs != 0) {
+        UpdateTimingEwma(
+            receiveDisplayDecodedFrameAgeMs_,
+            hasReceiveDisplayDecodedFrameAgeMs_,
+            AgeMs(displaySampleUs, frame.decodedTimeUs));
     }
 
     if (frame.format == net::DecodedVideoFrameFormat::Nv12) {

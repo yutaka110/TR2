@@ -94,6 +94,9 @@ namespace net {
         lastAckKeyFrameRequests_ = 0;
         hasFreshnessCounters_ = false;
         lastReceiveFreshnessDroppedFrames_ = 0;
+        hasReceiveDecodeDropCounters_ = false;
+        lastReceiveDecodeQueueDroppedFrames_ = 0;
+        lastReceiveDecodeRenderOverwriteFrames_ = 0;
         hasPacingCounters_ = false;
         lastPacingDeadlineDroppedPackets_ = 0;
         lastPacingHighPriorityDeadlineDroppedPackets_ = 0;
@@ -267,6 +270,8 @@ namespace net {
         uint64_t recoveryDeadlineDropDelta = 0;
         uint64_t retransmitStaleDropDelta = 0;
         uint64_t freshnessDropDelta = 0;
+        uint64_t receiveDecodeQueueDropDelta = 0;
+        uint64_t receiveDecodeRenderOverwriteDelta = 0;
         uint64_t pacingDeadlineDropDelta = 0;
         uint64_t pacingHighPriorityDeadlineDropDelta = 0;
 
@@ -327,6 +332,27 @@ namespace net {
         hasFreshnessCounters_ = true;
         lastReceiveFreshnessDroppedFrames_ =
             input.receiveFreshnessDroppedFrames;
+
+        if (hasReceiveDecodeDropCounters_) {
+            if (input.receiveDecodeQueueDroppedFrames >=
+                lastReceiveDecodeQueueDroppedFrames_) {
+                receiveDecodeQueueDropDelta =
+                    input.receiveDecodeQueueDroppedFrames -
+                    lastReceiveDecodeQueueDroppedFrames_;
+            }
+            if (input.receiveDecodeRenderOverwriteFrames >=
+                lastReceiveDecodeRenderOverwriteFrames_) {
+                receiveDecodeRenderOverwriteDelta =
+                    input.receiveDecodeRenderOverwriteFrames -
+                    lastReceiveDecodeRenderOverwriteFrames_;
+            }
+        }
+
+        hasReceiveDecodeDropCounters_ = true;
+        lastReceiveDecodeQueueDroppedFrames_ =
+            input.receiveDecodeQueueDroppedFrames;
+        lastReceiveDecodeRenderOverwriteFrames_ =
+            input.receiveDecodeRenderOverwriteFrames;
 
         if (hasPacingCounters_ &&
             input.pacingDeadlineDroppedPackets >=
@@ -714,24 +740,89 @@ namespace net {
 
         if (!enabled_ ||
             controlMode_ == AdaptiveControlMode::FixedQuality) {
+            const bool fixedPacingQueuePressure =
+                enabled_ &&
+                controlMode_ == AdaptiveControlMode::FixedQuality &&
+                input.pacingEnabled &&
+                (input.pacingCurrentQueueDelayMs >= 35.0 ||
+                    (input.pacingMaxQueueDelayMs >= 90.0 &&
+                        input.pacingCurrentQueueDelayMs >= 18.0) ||
+                    input.latencyMs >= 80.0);
+            if (fixedPacingQueuePressure) {
+                const bool hardFixedPacingQueuePressure =
+                    input.pacingCurrentQueueDelayMs >= 70.0 ||
+                    (input.pacingMaxQueueDelayMs >= 110.0 &&
+                        input.pacingCurrentQueueDelayMs >= 30.0) ||
+                    input.latencyMs >= 90.0;
+                pacingBurstPressureSec_ += positiveDeltaSec;
+                pacingBurstGuardSec_ =
+                    (std::max)(
+                        pacingBurstGuardSec_,
+                        hardFixedPacingQueuePressure ? 1.25 : 0.80);
+                pacingBurstVideoBudgetScale_ =
+                    (std::min)(
+                        pacingBurstVideoBudgetScale_,
+                        hardFixedPacingQueuePressure ? 0.68 : 0.82);
+                state_.h264VideoBudgetScale =
+                    std::clamp(pacingBurstVideoBudgetScale_, 0.55, 1.0);
+                state_.lastPacingBurstGuardActive = true;
+                state_.lastRepairBudgetGuardActive = true;
+                state_.lastRepairVideoBudgetPressure = false;
+                state_.lastLateRepairWastePressure = false;
+                state_.lastRetransmitNotArrivedPressure = false;
+                state_.lastRepairDecisionReason =
+                    hardFixedPacingQueuePressure
+                    ? "fixed-pacing-queue-hard-pressure"
+                    : "fixed-pacing-queue-pressure";
+                stableTimeSec_ = 0.0;
+                badTimeSec_ = 0.0;
+                lossOnlyBadTimeSec_ = 0.0;
+                return;
+            }
+
             stableTimeSec_ = 0.0;
             badTimeSec_ = 0.0;
             lossOnlyBadTimeSec_ = 0.0;
-            pacingBurstGuardSec_ = 0.0;
-            pacingBurstPressureSec_ = 0.0;
-            pacingBurstVideoBudgetScale_ = 1.0;
+            pacingBurstPressureSec_ =
+                (std::max)(0.0, pacingBurstPressureSec_ - positiveDeltaSec);
+            const bool fixedReceiveQueuePressure =
+                outputQueueDropDelta > 0 ||
+                freshnessDropDelta > 0 ||
+                receiveDecodeQueueDropDelta > 0 ||
+                receiveDecodeRenderOverwriteDelta > 0;
+            if (pacingBurstGuardSec_ > 0.0) {
+                pacingBurstGuardSec_ =
+                    (std::max)(0.0, pacingBurstGuardSec_ - positiveDeltaSec);
+            }
+            else {
+                const double fixedRecoveryRate =
+                    fixedReceiveQueuePressure ? 0.10 : 0.25;
+                pacingBurstVideoBudgetScale_ =
+                    (std::min)(
+                        1.0,
+                        pacingBurstVideoBudgetScale_ +
+                            positiveDeltaSec * fixedRecoveryRate);
+            }
             repairBudgetGuardSec_ = 0.0;
             repairBorrowPressureSec_ = 0.0;
             retransmitNotArrivedPressureSec_ = 0.0;
             lateRepairWasteGuardSec_ = 0.0;
             repairTelemetryHoldSec_ = 0.0;
-            state_.h264VideoBudgetScale = 1.0;
-            state_.lastPacingBurstGuardActive = false;
+            state_.h264VideoBudgetScale =
+                std::clamp(pacingBurstVideoBudgetScale_, 0.55, 1.0);
+            state_.lastPacingBurstGuardActive =
+                pacingBurstGuardSec_ > 0.0 || pacingBurstVideoBudgetScale_ < 0.999;
             state_.lastRepairBudgetGuardActive = false;
             state_.lastRepairVideoBudgetPressure = false;
             state_.lastLateRepairWastePressure = false;
             state_.lastRetransmitNotArrivedPressure = false;
-            state_.lastRepairDecisionReason = "disabled";
+            state_.lastRepairDecisionReason =
+                state_.lastPacingBurstGuardActive
+                ? (
+                    fixedReceiveQueuePressure
+                    ? "fixed-pacing-receive-queue-hold"
+                    : "fixed-pacing-queue-hold")
+                : "disabled";
             return;
         }
 
@@ -1639,7 +1730,8 @@ namespace net {
         return input.pacingEnabled &&
             (pacingDeadlineDropDelta > 0 ||
                 input.pacingCurrentQueueDelayMs >= 30.0 ||
-                input.pacingMaxQueueDelayMs >= 100.0);
+                (input.pacingMaxQueueDelayMs >= 100.0 &&
+                    input.pacingCurrentQueueDelayMs >= 20.0));
     }
 
     bool AdaptiveStreamingController::HasDelayPressure(

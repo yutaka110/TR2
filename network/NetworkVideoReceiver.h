@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -18,6 +19,10 @@ struct NetworkVideoReceiverStats {
     double jpegDecodeMs = 0.0;
     double decodeWorkerFps = 0.0;
     uint64_t decodedFrames = 0;
+    uint64_t decodePopSuccesses = 0;
+    uint64_t decodePopEmptyPolls = 0;
+    double decodeLoopLastPopGapMs = 0.0;
+    double decodeLoopMaxPopGapMs = 0.0;
     uint64_t overwrittenFrames = 0;
     uint64_t decodeQueueDroppedFrames = 0;
     uint64_t decodeRenderOverwriteFrames = 0;
@@ -35,7 +40,11 @@ struct NetworkVideoReceiverStats {
     uint64_t h264AuForbiddenZeroBit = 0;
     std::string h264AuLastInvalidReason;
     double decodeInputFrameAgeMs = 0.0;
+    double decodeInputCameraFrameAgeMs = 0.0;
+    double decodeInputEncoderOutputAgeMs = 0.0;
     double latestDecodedFrameAgeMs = 0.0;
+    double latestDecodedCameraFrameAgeMs = 0.0;
+    double latestDecodedEncoderOutputAgeMs = 0.0;
     double freshnessDropThresholdMs = 0.0;
     std::string lastDropReason;
 };
@@ -53,6 +62,8 @@ struct DecodedVideoFrame {
     uint64_t sendTimeUs = 0;
     uint64_t receiveTimeUs = 0;
     uint64_t decodedTimeUs = 0;
+    uint64_t cameraCaptureCompletedTimeUs = 0;
+    uint64_t encoderOutputTimeUs = 0;
     DecodedVideoFrameFormat format = DecodedVideoFrameFormat::Rgba8;
     std::vector<uint8_t> rgba;
     std::vector<uint8_t> nv12Y;
@@ -77,10 +88,23 @@ public:
     NetworkVideoReceiverStats GetStats() const;
 
 private:
+    struct PendingDecodedFrame {
+        DecodedVideoFrame frame;
+        uint64_t storedTimeUs = 0;
+    };
+
     void DecodeLoop();
+    bool ShouldPredecodeCoalesceFrame(
+        const CompletedFrame& frame,
+        uint64_t nowUs,
+        const char** outReason
+    ) const;
+    void RecordPredecodeCoalescedFrame(const char* reason);
     void StoreDecodedFrame(DecodedVideoFrame frame, double jpegDecodeMs);
     void UpdateDecodeMs(double sampleMs);
     void UpdateInputFrameAge(double sampleMs);
+    void UpdateInputCameraFrameAge(double sampleMs);
+    void UpdateInputEncoderOutputAge(double sampleMs);
     void UpdateDecodeWorkerFpsLocked(uint64_t nowUs);
     void RecordDropLocked(const char* reason, bool queueDrop);
     void RecordH264AuInvalidLocked(const char* reason);
@@ -92,14 +116,15 @@ private:
     std::thread workerThread_;
 
     mutable std::mutex mutex_;
-    DecodedVideoFrame latestDecodedFrame_{};
-    bool hasLatestDecodedFrame_ = false;
-    uint64_t latestDecodedFrameTimeUs_ = 0;
+    std::deque<PendingDecodedFrame> decodedFrameQueue_;
     NetworkVideoReceiverStats stats_{};
     bool hasJpegDecodeMs_ = false;
     bool hasInputFrameAgeMs_ = false;
+    bool hasInputCameraFrameAgeMs_ = false;
+    bool hasInputEncoderOutputAgeMs_ = false;
     uint64_t lastFpsUpdateTimeUs_ = 0;
     uint64_t decodedFramesAtLastFpsUpdate_ = 0;
+    uint64_t lastDecodePopTimeUs_ = 0;
 };
 
 } // namespace net

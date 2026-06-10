@@ -135,8 +135,15 @@ namespace net {
         (static_cast<uint32_t>('U') << 8) |
         static_cast<uint32_t>('2');
 
+    static constexpr uint32_t kH264AccessUnitPayloadMagicV3 =
+        (static_cast<uint32_t>('H') << 24) |
+        (static_cast<uint32_t>('A') << 16) |
+        (static_cast<uint32_t>('U') << 8) |
+        static_cast<uint32_t>('3');
+
     static constexpr size_t kH264AccessUnitPayloadHeaderSize = 32;
     static constexpr size_t kH264AccessUnitPayloadHeaderV2Size = 40;
+    static constexpr size_t kH264AccessUnitPayloadHeaderV3Size = 56;
 
     enum H264AccessUnitFlags : uint8_t {
         H264AccessUnitFlag_None = 0,
@@ -160,6 +167,8 @@ namespace net {
 
         uint16_t headerBytes = kH264AccessUnitPayloadHeaderSize;
         uint32_t accessUnitCrc32 = 0;
+        uint64_t cameraCaptureCompletedTimeUs = 0;
+        uint64_t encoderOutputTimeUs = 0;
     };
 
     enum class ControlCommand : uint8_t {
@@ -426,6 +435,26 @@ namespace net {
         WriteU32BE(dst + 36, 0);
     }
 
+    inline void EncodeH264AccessUnitPayloadHeaderV3(
+        uint8_t* dst,
+        const H264AccessUnitPayloadHeader& header
+    ) {
+        WriteU32BE(dst + 0, kH264AccessUnitPayloadMagicV3);
+        WriteU32BE(dst + 4, header.frameId);
+        WriteU64BE(dst + 8, header.ptsUs);
+        WriteU32BE(dst + 16, header.codecConfigId);
+        WriteU16BE(dst + 20, header.width);
+        WriteU16BE(dst + 22, header.height);
+        dst[24] = header.flags;
+        dst[25] = header.reserved0;
+        WriteU16BE(dst + 26, header.nalUnitCount);
+        WriteU32BE(dst + 28, header.accessUnitBytes);
+        WriteU32BE(dst + 32, header.accessUnitCrc32);
+        WriteU32BE(dst + 36, 0);
+        WriteU64BE(dst + 40, header.cameraCaptureCompletedTimeUs);
+        WriteU64BE(dst + 48, header.encoderOutputTimeUs);
+    }
+
     inline bool DecodeH264AccessUnitPayloadHeader(
         const uint8_t* src,
         size_t size,
@@ -438,17 +467,27 @@ namespace net {
         outHeader.magic = ReadU32BE(src + 0);
         outHeader.headerBytes = kH264AccessUnitPayloadHeaderSize;
         outHeader.accessUnitCrc32 = 0;
+        outHeader.cameraCaptureCompletedTimeUs = 0;
+        outHeader.encoderOutputTimeUs = 0;
 
         if (outHeader.magic != kH264AccessUnitPayloadMagic &&
-            outHeader.magic != kH264AccessUnitPayloadMagicV2) {
+            outHeader.magic != kH264AccessUnitPayloadMagicV2 &&
+            outHeader.magic != kH264AccessUnitPayloadMagicV3) {
             return false;
         }
 
-        if (outHeader.magic == kH264AccessUnitPayloadMagicV2) {
+        if (outHeader.magic == kH264AccessUnitPayloadMagicV2 ||
+            outHeader.magic == kH264AccessUnitPayloadMagicV3) {
             if (size < kH264AccessUnitPayloadHeaderV2Size) {
                 return false;
             }
             outHeader.headerBytes = kH264AccessUnitPayloadHeaderV2Size;
+        }
+        if (outHeader.magic == kH264AccessUnitPayloadMagicV3) {
+            if (size < kH264AccessUnitPayloadHeaderV3Size) {
+                return false;
+            }
+            outHeader.headerBytes = kH264AccessUnitPayloadHeaderV3Size;
         }
 
         outHeader.frameId = ReadU32BE(src + 4);
@@ -460,8 +499,13 @@ namespace net {
         outHeader.reserved0 = src[25];
         outHeader.nalUnitCount = ReadU16BE(src + 26);
         outHeader.accessUnitBytes = ReadU32BE(src + 28);
-        if (outHeader.magic == kH264AccessUnitPayloadMagicV2) {
+        if (outHeader.magic == kH264AccessUnitPayloadMagicV2 ||
+            outHeader.magic == kH264AccessUnitPayloadMagicV3) {
             outHeader.accessUnitCrc32 = ReadU32BE(src + 32);
+        }
+        if (outHeader.magic == kH264AccessUnitPayloadMagicV3) {
+            outHeader.cameraCaptureCompletedTimeUs = ReadU64BE(src + 40);
+            outHeader.encoderOutputTimeUs = ReadU64BE(src + 48);
         }
 
         if (outHeader.width == 0 ||

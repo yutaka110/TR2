@@ -339,7 +339,7 @@ namespace {
 		double budgetRatio =
 			ReadEnvDoubleClamped(
 				"RNVP_H264_VIDEO_BUDGET_RATIO",
-				0.74,
+				0.95,
 				0.35,
 				0.95);
 		if (fecEnabled && fecGroupChunkCount > 0) {
@@ -1282,7 +1282,9 @@ namespace {
 		uint32_t frameId,
 		uint32_t width,
 		uint32_t height,
-		uint64_t ptsUs) {
+		uint64_t ptsUs,
+		uint64_t cameraCaptureCompletedTimeUs,
+		uint64_t encoderOutputTimeUs) {
 		if (accessUnit.empty() || width == 0 || height == 0) {
 			return {};
 		}
@@ -1374,7 +1376,7 @@ namespace {
 			flags);
 
 		std::vector<uint8_t> payload(
-			net::kH264AccessUnitPayloadHeaderV2Size + normalizedAccessUnit.size());
+			net::kH264AccessUnitPayloadHeaderV3Size + normalizedAccessUnit.size());
 
 		net::H264AccessUnitPayloadHeader header{};
 		header.frameId = frameId;
@@ -1386,13 +1388,15 @@ namespace {
 		header.nalUnitCount =
 			static_cast<uint16_t>((std::min<size_t>)(nals.size(), 0xFFFFu));
 		header.accessUnitBytes = static_cast<uint32_t>(normalizedAccessUnit.size());
-		header.headerBytes = static_cast<uint16_t>(net::kH264AccessUnitPayloadHeaderV2Size);
+		header.headerBytes = static_cast<uint16_t>(net::kH264AccessUnitPayloadHeaderV3Size);
 		header.accessUnitCrc32 =
 			net::ComputeCrc32(normalizedAccessUnit.data(), normalizedAccessUnit.size());
+		header.cameraCaptureCompletedTimeUs = cameraCaptureCompletedTimeUs;
+		header.encoderOutputTimeUs = encoderOutputTimeUs;
 
-		net::EncodeH264AccessUnitPayloadHeaderV2(payload.data(), header);
+		net::EncodeH264AccessUnitPayloadHeaderV3(payload.data(), header);
 		std::memcpy(
-			payload.data() + net::kH264AccessUnitPayloadHeaderV2Size,
+			payload.data() + net::kH264AccessUnitPayloadHeaderV3Size,
 			normalizedAccessUnit.data(),
 			normalizedAccessUnit.size());
 
@@ -2195,6 +2199,10 @@ int AppMain::Run() {
 		uint64_t actualRawFrameBytes = 0;
 		uint64_t actualEncodedFrameBytes = 0;
 		double captureFps = 0.0;
+		std::string cameraCaptureSubtype;
+		uint32_t cameraCaptureWidth = 0;
+		uint32_t cameraCaptureHeight = 0;
+		double cameraCaptureFormatFps = 0.0;
 		double encodeMs = 0.0;
 		double resizeMs = 0.0;
 		double nv12PrepareMs = 0.0;
@@ -2211,24 +2219,78 @@ int AppMain::Run() {
 		bool h264AuIsIdr = false;
 		bool h264AuIsDecoderSync = false;
 		std::string h264AuProtectionLevel;
+		bool h264AuDroppedBeforeSend = false;
+		std::string h264AuDropReason;
+		uint64_t h264AuDroppedBytes = 0;
+		uint32_t h264AuDroppedChunks = 0;
+		double h264AuPacingQueueDelayMs = 0.0;
+		double h264AuEstimatedSendMs = 0.0;
+		bool h264InputGatedByPacing = false;
+		std::string h264InputGateReason;
+		double h264InputGateQueueDelayMs = 0.0;
+		double h264InputGateVideoCreditBytes = 0.0;
+		double h264InputGateFrameBudgetBytes = 0.0;
+		double h264InputGateDurationMs = 0.0;
+		uint32_t h264InputGateConsecutiveFrames = 0;
+		uint64_t h264InputGateSkippedInputFrames = 0;
+		bool h264InputGateForcedOpen = false;
+		std::string h264InputGateReleaseReason;
 		uint64_t fecProtectedH264KeyFrames = 0;
 		uint64_t fecProtectedH264LargeFrames = 0;
 		uint32_t h264EncoderDelayFrames = 0;
 		double h264EncoderDelayMs = 0.0;
 		uint32_t h264EncoderPendingFrames = 0;
 		uint32_t h264EncodedInputFrameId = 0;
+		double h264EncoderCallMs = 0.0;
+		double h264EncoderSampleCreateMs = 0.0;
+		double h264EncoderProcessInputMs = 0.0;
+		double h264EncoderPreInputPollMs = 0.0;
+		double h264EncoderPostInputWaitMs = 0.0;
+		double h264EncoderProcessOutputMs = 0.0;
+		double h264EncoderOutputCopyMs = 0.0;
+		uint32_t h264EncoderProcessOutputAttempts = 0;
+		uint32_t h264EncoderAsyncEventCount = 0;
+		bool h264EncoderHardware = false;
+		bool h264EncoderAsync = false;
+		bool h264EncoderNeedInputSignaled = false;
+		bool h264EncoderOutputProduced = false;
+		bool h264EncoderOutputProducedBeforeInput = false;
+		bool h264SubmittedNewInput = false;
+		bool h264AsyncSubmittedWithoutOutput = false;
+		bool h264AsyncPendingNoOutput = false;
+		bool h264AsyncCadenceHoldActive = false;
+		uint32_t h264AsyncPendingNoOutputStreak = 0;
+		double h264AsyncCadenceScale = 1.0;
+		double h264AsyncCadenceHoldRemainingMs = 0.0;
+		double h264AsyncOutputPollBackoffMs = 0.0;
+		uint32_t h264InputCadenceFps = 0;
+		bool h264NeedInputSubmitWake = false;
+		double h264NeedInputSubmitLeadMs = 0.0;
 		uint64_t encodedCameraFrameId = 0;
 		int64_t encodedCameraSourceTimestamp100ns = 0;
 		uint64_t encodedCameraCaptureCompletedTimeUs = 0;
 		double encodedCameraFrameAgeMs = 0.0;
+		double encodedCameraReadSampleMs = 0.0;
+		double encodedCameraReadSampleEndToCaptureMs = 0.0;
+		double encodedCameraCaptureToPublishMs = 0.0;
+		double encodedCameraPublishToAcquireMs = 0.0;
+		double encodedCameraAcquireToEncoderInputMs = 0.0;
 		double jpegEncodeMs = 0.0;
 		double packetizeMs = 0.0;
 		double sendFrameIntervalMs = 0.0;
 		bool cameraFrameReady = false;
 		uint64_t cameraFrameId = 0;
 		int64_t cameraSourceTimestamp100ns = 0;
+		uint64_t cameraReadSampleStartTimeUs = 0;
+		uint64_t cameraReadSampleEndTimeUs = 0;
 		uint64_t cameraCaptureCompletedTimeUs = 0;
+		uint64_t cameraFramePublishedTimeUs = 0;
+		uint64_t cameraSenderAcquireTimeUs = 0;
 		double cameraReadSampleMs = 0.0;
+		double cameraReadSampleEndToCaptureMs = 0.0;
+		double cameraCaptureToPublishMs = 0.0;
+		double cameraPublishToAcquireMs = 0.0;
+		double cameraAcquireToSendMs = 0.0;
 		double cameraFrameAgeMs = 0.0;
 		bool cameraFrameCacheUsed = false;
 		uint64_t cameraReadyFrames = 0;
@@ -2298,10 +2360,42 @@ int AppMain::Run() {
 				sender->GetRepairSkippedByTtlPacketCount();
 			stats.repairQueuedButCanceledPackets =
 				sender->GetRepairQueuedButCanceledPacketCount();
+			stats.repairSentAfterCompleteAckPackets =
+				sender->GetRepairSentAfterCompleteAckPacketCount();
+			stats.repairSentAfterCompleteAckLargePackets =
+				sender->GetRepairSentAfterCompleteAckLargePacketCount();
 			stats.repairSuppressedByFecLikelyFrames =
 				sender->GetRepairSuppressedByFecLikelyFrameCount();
 			stats.repairSuppressedByFecLikelyPackets =
 				sender->GetRepairSuppressedByFecLikelyPacketCount();
+			stats.repairSuppressedByFecLikelyLargeFrames =
+				sender->GetRepairSuppressedByFecLikelyLargeFrameCount();
+			stats.repairSuppressedByFecLikelyLargePackets =
+				sender->GetRepairSuppressedByFecLikelyLargePacketCount();
+			stats.repairBudgetSuppressedFrames =
+				sender->GetRepairBudgetSuppressedFrameCount();
+			stats.repairBudgetSuppressedPackets =
+				sender->GetRepairBudgetSuppressedPacketCount();
+			stats.repairBudgetSuppressedLargeFrames =
+				sender->GetRepairBudgetSuppressedLargeFrameCount();
+			stats.repairBudgetSuppressedLargePackets =
+				sender->GetRepairBudgetSuppressedLargePacketCount();
+			stats.repairRaceGuardSuppressedFrames =
+				sender->GetRepairRaceGuardSuppressedFrameCount();
+			stats.repairRaceGuardSuppressedPackets =
+				sender->GetRepairRaceGuardSuppressedPacketCount();
+			stats.repairRaceGuardSuppressedLargePackets =
+				sender->GetRepairRaceGuardSuppressedLargePacketCount();
+			stats.repairBudgetProfile =
+				sender->GetRepairBudgetProfile();
+			stats.repairBudgetProfileSwitches =
+				sender->GetRepairBudgetProfileSwitchCount();
+			stats.repairBudgetSmoothedMissingRate =
+				sender->GetRepairBudgetSmoothedMissingRate();
+			stats.repairBudgetSmoothedPacingQueueDelayMs =
+				sender->GetRepairBudgetSmoothedPacingQueueDelayMs();
+			stats.repairBudgetSmoothedDeliveryMs =
+				sender->GetRepairBudgetSmoothedDeliveryMs();
 			stats.repairFecLikelySuppressedCompletedFrames =
 				sender->GetRepairFecLikelySuppressedCompletedFrameCount();
 			stats.repairFecLikelySuppressedCompletedPackets =
@@ -2412,6 +2506,10 @@ int AppMain::Run() {
 				feedbackStats.feedbackReceivedPackets;
 			stats.transportFeedbackMissingPackets =
 				feedbackStats.feedbackMissingPackets;
+			stats.transportFeedbackSequenceGapPackets =
+				feedbackStats.feedbackSequenceGapPackets;
+			stats.transportFeedbackSequenceGapRecoveredPackets =
+				feedbackStats.feedbackSequenceGapRecoveredPackets;
 			stats.transportFeedbackLossRate =
 				feedbackStats.feedbackLossRate;
 			stats.transportFeedbackArrivalJitterMs =
@@ -2532,6 +2630,14 @@ int AppMain::Run() {
 				stats.sendActualEncodedFrameBytes =
 					sendTelemetry->actualEncodedFrameBytes;
 				stats.captureFps = sendTelemetry->captureFps;
+				stats.cameraCaptureSubtype =
+					sendTelemetry->cameraCaptureSubtype;
+				stats.cameraCaptureWidth =
+					sendTelemetry->cameraCaptureWidth;
+				stats.cameraCaptureHeight =
+					sendTelemetry->cameraCaptureHeight;
+				stats.cameraCaptureFormatFps =
+					sendTelemetry->cameraCaptureFormatFps;
 				stats.encodeMs = sendTelemetry->encodeMs;
 				stats.sendResizeMs = sendTelemetry->resizeMs;
 				stats.sendNv12PrepareMs = sendTelemetry->nv12PrepareMs;
@@ -2560,6 +2666,38 @@ int AppMain::Run() {
 					sendTelemetry->h264AuIsDecoderSync;
 				stats.h264AuProtectionLevel =
 					sendTelemetry->h264AuProtectionLevel;
+				stats.h264AuDroppedBeforeSend =
+					sendTelemetry->h264AuDroppedBeforeSend;
+				stats.h264AuDropReason =
+					sendTelemetry->h264AuDropReason;
+				stats.h264AuDroppedBytes =
+					sendTelemetry->h264AuDroppedBytes;
+				stats.h264AuDroppedChunks =
+					sendTelemetry->h264AuDroppedChunks;
+				stats.h264AuPacingQueueDelayMs =
+					sendTelemetry->h264AuPacingQueueDelayMs;
+				stats.h264AuEstimatedSendMs =
+					sendTelemetry->h264AuEstimatedSendMs;
+				stats.h264InputGatedByPacing =
+					sendTelemetry->h264InputGatedByPacing;
+				stats.h264InputGateReason =
+					sendTelemetry->h264InputGateReason;
+				stats.h264InputGateQueueDelayMs =
+					sendTelemetry->h264InputGateQueueDelayMs;
+				stats.h264InputGateVideoCreditBytes =
+					sendTelemetry->h264InputGateVideoCreditBytes;
+				stats.h264InputGateFrameBudgetBytes =
+					sendTelemetry->h264InputGateFrameBudgetBytes;
+				stats.h264InputGateDurationMs =
+					sendTelemetry->h264InputGateDurationMs;
+				stats.h264InputGateConsecutiveFrames =
+					sendTelemetry->h264InputGateConsecutiveFrames;
+				stats.h264InputGateSkippedInputFrames =
+					sendTelemetry->h264InputGateSkippedInputFrames;
+				stats.h264InputGateForcedOpen =
+					sendTelemetry->h264InputGateForcedOpen;
+				stats.h264InputGateReleaseReason =
+					sendTelemetry->h264InputGateReleaseReason;
 				stats.fecProtectedH264KeyFrames =
 					sendTelemetry->fecProtectedH264KeyFrames;
 				stats.fecProtectedH264LargeFrames =
@@ -2572,6 +2710,56 @@ int AppMain::Run() {
 					sendTelemetry->h264EncoderPendingFrames;
 				stats.h264EncodedInputFrameId =
 					sendTelemetry->h264EncodedInputFrameId;
+				stats.h264EncoderCallMs =
+					sendTelemetry->h264EncoderCallMs;
+				stats.h264EncoderSampleCreateMs =
+					sendTelemetry->h264EncoderSampleCreateMs;
+				stats.h264EncoderProcessInputMs =
+					sendTelemetry->h264EncoderProcessInputMs;
+				stats.h264EncoderPreInputPollMs =
+					sendTelemetry->h264EncoderPreInputPollMs;
+				stats.h264EncoderPostInputWaitMs =
+					sendTelemetry->h264EncoderPostInputWaitMs;
+				stats.h264EncoderProcessOutputMs =
+					sendTelemetry->h264EncoderProcessOutputMs;
+				stats.h264EncoderOutputCopyMs =
+					sendTelemetry->h264EncoderOutputCopyMs;
+				stats.h264EncoderProcessOutputAttempts =
+					sendTelemetry->h264EncoderProcessOutputAttempts;
+				stats.h264EncoderAsyncEventCount =
+					sendTelemetry->h264EncoderAsyncEventCount;
+				stats.h264EncoderHardware =
+					sendTelemetry->h264EncoderHardware;
+				stats.h264EncoderAsync =
+					sendTelemetry->h264EncoderAsync;
+				stats.h264EncoderNeedInputSignaled =
+					sendTelemetry->h264EncoderNeedInputSignaled;
+				stats.h264EncoderOutputProduced =
+					sendTelemetry->h264EncoderOutputProduced;
+				stats.h264EncoderOutputProducedBeforeInput =
+					sendTelemetry->h264EncoderOutputProducedBeforeInput;
+				stats.h264SubmittedNewInput =
+					sendTelemetry->h264SubmittedNewInput;
+				stats.h264AsyncSubmittedWithoutOutput =
+					sendTelemetry->h264AsyncSubmittedWithoutOutput;
+				stats.h264AsyncPendingNoOutput =
+					sendTelemetry->h264AsyncPendingNoOutput;
+				stats.h264AsyncCadenceHoldActive =
+					sendTelemetry->h264AsyncCadenceHoldActive;
+				stats.h264AsyncPendingNoOutputStreak =
+					sendTelemetry->h264AsyncPendingNoOutputStreak;
+				stats.h264AsyncCadenceScale =
+					sendTelemetry->h264AsyncCadenceScale;
+				stats.h264AsyncCadenceHoldRemainingMs =
+					sendTelemetry->h264AsyncCadenceHoldRemainingMs;
+				stats.h264AsyncOutputPollBackoffMs =
+					sendTelemetry->h264AsyncOutputPollBackoffMs;
+				stats.h264InputCadenceFps =
+					sendTelemetry->h264InputCadenceFps;
+				stats.h264NeedInputSubmitWake =
+					sendTelemetry->h264NeedInputSubmitWake;
+				stats.h264NeedInputSubmitLeadMs =
+					sendTelemetry->h264NeedInputSubmitLeadMs;
 				stats.encodedCameraFrameId =
 					sendTelemetry->encodedCameraFrameId;
 				stats.encodedCameraSourceTimestamp100ns =
@@ -2580,6 +2768,16 @@ int AppMain::Run() {
 					sendTelemetry->encodedCameraCaptureCompletedTimeUs;
 				stats.encodedCameraFrameAgeMs =
 					sendTelemetry->encodedCameraFrameAgeMs;
+				stats.encodedCameraReadSampleMs =
+					sendTelemetry->encodedCameraReadSampleMs;
+				stats.encodedCameraReadSampleEndToCaptureMs =
+					sendTelemetry->encodedCameraReadSampleEndToCaptureMs;
+				stats.encodedCameraCaptureToPublishMs =
+					sendTelemetry->encodedCameraCaptureToPublishMs;
+				stats.encodedCameraPublishToAcquireMs =
+					sendTelemetry->encodedCameraPublishToAcquireMs;
+				stats.encodedCameraAcquireToEncoderInputMs =
+					sendTelemetry->encodedCameraAcquireToEncoderInputMs;
 				stats.sendJpegEncodeMs = sendTelemetry->jpegEncodeMs;
 				stats.sendPacketizeMs = sendTelemetry->packetizeMs;
 				stats.sendFrameIntervalMs =
@@ -2590,10 +2788,26 @@ int AppMain::Run() {
 					sendTelemetry->cameraFrameId;
 				stats.cameraSourceTimestamp100ns =
 					sendTelemetry->cameraSourceTimestamp100ns;
+				stats.cameraReadSampleStartTimeUs =
+					sendTelemetry->cameraReadSampleStartTimeUs;
+				stats.cameraReadSampleEndTimeUs =
+					sendTelemetry->cameraReadSampleEndTimeUs;
 				stats.cameraCaptureCompletedTimeUs =
 					sendTelemetry->cameraCaptureCompletedTimeUs;
+				stats.cameraFramePublishedTimeUs =
+					sendTelemetry->cameraFramePublishedTimeUs;
+				stats.cameraSenderAcquireTimeUs =
+					sendTelemetry->cameraSenderAcquireTimeUs;
 				stats.cameraReadSampleMs =
 					sendTelemetry->cameraReadSampleMs;
+				stats.cameraReadSampleEndToCaptureMs =
+					sendTelemetry->cameraReadSampleEndToCaptureMs;
+				stats.cameraCaptureToPublishMs =
+					sendTelemetry->cameraCaptureToPublishMs;
+				stats.cameraPublishToAcquireMs =
+					sendTelemetry->cameraPublishToAcquireMs;
+				stats.cameraAcquireToSendMs =
+					sendTelemetry->cameraAcquireToSendMs;
 				stats.cameraFrameAgeMs =
 					sendTelemetry->cameraFrameAgeMs;
 				stats.cameraFrameCacheUsed =
@@ -2712,6 +2926,14 @@ int AppMain::Run() {
 				videoReceiverStats.decodeWorkerFps;
 			stats.receiveDecodeWorkerFrames =
 				videoReceiverStats.decodedFrames;
+			stats.receiveDecodePopSuccesses =
+				videoReceiverStats.decodePopSuccesses;
+			stats.receiveDecodePopEmptyPolls =
+				videoReceiverStats.decodePopEmptyPolls;
+			stats.receiveDecodeLoopLastPopGapMs =
+				videoReceiverStats.decodeLoopLastPopGapMs;
+			stats.receiveDecodeLoopMaxPopGapMs =
+				videoReceiverStats.decodeLoopMaxPopGapMs;
 			stats.receiveDecodeOverwrittenFrames =
 				videoReceiverStats.overwrittenFrames;
 			stats.receiveDecodeQueueDroppedFrames =
@@ -2746,8 +2968,16 @@ int AppMain::Run() {
 				videoReceiverStats.h264AuLastInvalidReason;
 			stats.receiveDecodeInputFrameAgeMs =
 				videoReceiverStats.decodeInputFrameAgeMs;
+			stats.receiveDecodeInputCameraFrameAgeMs =
+				videoReceiverStats.decodeInputCameraFrameAgeMs;
+			stats.receiveDecodeInputEncoderOutputAgeMs =
+				videoReceiverStats.decodeInputEncoderOutputAgeMs;
 			stats.receiveLatestDecodedFrameAgeMs =
 				videoReceiverStats.latestDecodedFrameAgeMs;
+			stats.receiveLatestDecodedCameraFrameAgeMs =
+				videoReceiverStats.latestDecodedCameraFrameAgeMs;
+			stats.receiveLatestDecodedEncoderOutputAgeMs =
+				videoReceiverStats.latestDecodedEncoderOutputAgeMs;
 			stats.receiveFreshnessDropThresholdMs =
 				videoReceiverStats.freshnessDropThresholdMs;
 			stats.receiveDecodeLastDropReason =
@@ -2771,29 +3001,35 @@ int AppMain::Run() {
 	const auto networkCsvStartTime = std::chrono::steady_clock::now();
 	auto lastNetworkCsvSampleTime = networkCsvStartTime - std::chrono::seconds(1);
 	net::NetworkExperimentReporter networkExperimentReporter;
-	if (networkExperimentReporter.Start("logs")) {
-		std::cout << "[AppMain] Network experiment summary started: "
-			<< networkExperimentReporter.CsvFilePath()
-			<< " report: "
-			<< networkExperimentReporter.MarkdownFilePath()
-			<< " before/after: "
-			<< networkExperimentReporter.BeforeAfterFilePath()
-			<< " repeat: "
-			<< networkExperimentReporter.RepeatReportFilePath()
-			<< " manifest: "
-			<< networkExperimentReporter.ManifestFilePath()
-			<< "\n";
-		networkExperimentReporter.WriteManifest(
-			networkExperimentRunner.Scenarios(),
-			networkCsvLogger.FilePath(),
-			runtimeState.networkRuntimeMode,
-			autoNetworkExperiment,
-			autoNetworkExperiment,
-			networkExperimentRunner.WarmupSec());
-	}
-	else {
+	auto startNetworkExperimentReporter = [&]() -> bool {
+		if (networkExperimentReporter.IsRunning()) {
+			return true;
+		}
+		if (networkExperimentReporter.Start("logs")) {
+			std::cout << "[AppMain] Network experiment summary started: "
+				<< networkExperimentReporter.CsvFilePath()
+				<< " report: "
+				<< networkExperimentReporter.MarkdownFilePath()
+				<< " before/after: "
+				<< networkExperimentReporter.BeforeAfterFilePath()
+				<< " repeat: "
+				<< networkExperimentReporter.RepeatReportFilePath()
+				<< " manifest: "
+				<< networkExperimentReporter.ManifestFilePath()
+				<< "\n";
+			networkExperimentReporter.WriteManifest(
+				networkExperimentRunner.Scenarios(),
+				networkCsvLogger.FilePath(),
+				runtimeState.networkRuntimeMode,
+				autoNetworkExperiment,
+				autoNetworkExperiment,
+				networkExperimentRunner.WarmupSec());
+			return true;
+		}
+
 		std::cerr << "[AppMain] Network experiment summary failed to start.\n";
-	}
+		return false;
+	};
 	auto lastNetworkExperimentUpdateTime = networkCsvStartTime;
 
 	runLoop.SetJitterBufferTargetDelaySetter(
@@ -2971,11 +3207,22 @@ int AppMain::Run() {
 			uint64_t cameraFrameId = 0;
 			int64_t cameraSourceTimestamp100ns = 0;
 			uint64_t cameraCaptureCompletedTimeUs = 0;
+			double cameraReadSampleMs = 0.0;
+			double cameraReadSampleEndToCaptureMs = 0.0;
+			double cameraCaptureToPublishMs = 0.0;
+			double cameraPublishToAcquireMs = 0.0;
 			uint64_t encoderInputTimeUs = 0;
+			double cameraAcquireToEncoderInputMs = 0.0;
 		};
 		std::queue<H264PendingInputFrame> h264PendingInputFrames;
 		uint64_t h264InputSequence = 0;
 		uint32_t h264PostKeyFrameSkipFrames = 0;
+		bool h264PacingInputGateActive = false;
+		std::chrono::steady_clock::time_point h264PacingInputGateStartTime{};
+		uint32_t h264PacingInputGateConsecutiveFrames = 0;
+		uint64_t h264PacingInputGateSkippedInputFrames = 0;
+		std::chrono::steady_clock::time_point h264AsyncCadenceHoldUntil{};
+		uint32_t h264AsyncPendingNoOutputStreak = 0;
 		auto steadyNowUs = []() {
 			return static_cast<uint64_t>(
 				std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2996,13 +3243,55 @@ int AppMain::Run() {
 			h264AwaitingDecoderSync = true;
 			h264PendingInputFrames = {};
 			h264InputSequence = 0;
+			h264AsyncCadenceHoldUntil = {};
+			h264AsyncPendingNoOutputStreak = 0;
 		};
 
 		while (videoSenderRunning.load()) {
 			const auto now = std::chrono::steady_clock::now();
+			bool dueForScheduledInput = now >= nextSendTime;
+			const bool h264OutputPumpPending =
+				runtimeState.networkVideoCodec == net::CodecType::H264 &&
+				h264EncoderReady &&
+				h264Encoder.IsAsyncHardware() &&
+				!h264PendingInputFrames.empty();
+			const bool h264CameraPublishWakeEnabled =
+				runtimeState.networkVideoCodec == net::CodecType::H264 &&
+				cameraCaptureEnabled &&
+				cameraCapture != nullptr;
 			if (now < nextSendTime) {
-				std::this_thread::sleep_until(nextSendTime);
-				continue;
+				if (!h264OutputPumpPending) {
+					bool wokeForCameraPublish = false;
+					if (h264CameraPublishWakeEnabled) {
+						wokeForCameraPublish =
+							cameraCapture->WaitForFrameAfter(
+								lastCameraFrameId,
+								nextSendTime);
+					}
+					else {
+						std::this_thread::sleep_until(nextSendTime);
+					}
+					const auto wakeNow = std::chrono::steady_clock::now();
+					if (wokeForCameraPublish) {
+						nextSendTime = wakeNow;
+						dueForScheduledInput = true;
+					}
+					else {
+						dueForScheduledInput = wakeNow >= nextSendTime;
+						if (!dueForScheduledInput) {
+							continue;
+						}
+					}
+				}
+				else {
+					const auto pumpWakeTime =
+						(std::min)(
+							nextSendTime,
+							now + std::chrono::milliseconds(1));
+					std::this_thread::sleep_until(pumpWakeTime);
+					dueForScheduledInput =
+						std::chrono::steady_clock::now() >= nextSendTime;
+				}
 			}
 
 			if (!networkManager ||
@@ -3023,39 +3312,110 @@ int AppMain::Run() {
 
 			int targetFps = adaptiveState.targetFps;
 			targetFps = std::clamp(targetFps, 1, 30);
+			int inputCadenceFps = targetFps;
+			bool h264AsyncCadenceHoldActive = false;
+			double h264AsyncCadenceScale = 1.0;
+			double h264AsyncCadenceHoldRemainingMs = 0.0;
+			if (runtimeState.networkVideoCodec == net::CodecType::H264 &&
+				adaptiveState.h264VideoBudgetScale < 0.999) {
+				const double cadenceScale =
+					adaptiveState.h264VideoBudgetScale <= 0.70
+					? ReadEnvDoubleClamped(
+						"RNVP_H264_QUEUE_HARD_CADENCE_SCALE",
+						0.67,
+						0.35,
+						1.0)
+					: ReadEnvDoubleClamped(
+						"RNVP_H264_QUEUE_CADENCE_SCALE",
+						0.80,
+						0.35,
+						1.0);
+				inputCadenceFps =
+					std::clamp(
+						static_cast<int>(
+							std::lround(
+								static_cast<double>(targetFps) *
+								cadenceScale)),
+						10,
+						targetFps);
+			}
+			if (runtimeState.networkVideoCodec == net::CodecType::H264) {
+				h264AsyncCadenceHoldActive =
+					h264AsyncCadenceHoldUntil.time_since_epoch().count() != 0 &&
+					now < h264AsyncCadenceHoldUntil;
+				if (h264AsyncCadenceHoldActive) {
+					h264AsyncCadenceHoldRemainingMs =
+						std::chrono::duration<double, std::milli>(
+							h264AsyncCadenceHoldUntil - now).count();
+				}
+				if (h264AsyncCadenceHoldActive ||
+					h264AsyncPendingNoOutputStreak > 0) {
+					h264AsyncCadenceScale =
+						h264AsyncPendingNoOutputStreak >= 2
+						? ReadEnvDoubleClamped(
+							"RNVP_H264_ASYNC_HARD_CADENCE_SCALE",
+							0.72,
+							0.35,
+							1.0)
+						: ReadEnvDoubleClamped(
+							"RNVP_H264_ASYNC_CADENCE_SCALE",
+							0.86,
+							0.35,
+							1.0);
+					inputCadenceFps =
+						std::clamp(
+						static_cast<int>(
+							std::lround(
+								static_cast<double>(targetFps) *
+								h264AsyncCadenceScale)),
+						10,
+						inputCadenceFps);
+				}
+			}
 			const auto sendInterval =
 				std::chrono::duration<double>(
-					1.0 / static_cast<double>(targetFps)
+					1.0 / static_cast<double>(inputCadenceFps)
 				);
-			if (h264PostKeyFrameSkipFrames > 0 &&
+			bool h264NeedInputSubmitWake = false;
+			double h264NeedInputSubmitLeadMs = 0.0;
+			if (runtimeState.networkVideoCodec == net::CodecType::H264 &&
+				h264EncoderReady &&
+				h264Encoder.IsAsyncHardware() &&
+				!dueForScheduledInput &&
+				!h264PendingInputFrames.empty() &&
+				h264Encoder.CanAcceptInput()) {
+				const auto needInputNow = std::chrono::steady_clock::now();
+				if (nextSendTime > needInputNow) {
+					h264NeedInputSubmitLeadMs =
+						std::chrono::duration<double, std::milli>(
+							nextSendTime - needInputNow).count();
+				}
+				const double maxNeedInputLeadMs =
+					ReadEnvDoubleClamped(
+						"RNVP_H264_NEED_INPUT_EARLY_SUBMIT_MS",
+						12.0,
+						0.0,
+						33.0);
+				h264NeedInputSubmitWake =
+					h264NeedInputSubmitLeadMs <= maxNeedInputLeadMs;
+			}
+			if (dueForScheduledInput &&
+				h264PostKeyFrameSkipFrames > 0 &&
 				runtimeState.networkVideoCodec == net::CodecType::H264) {
 				h264PostKeyFrameSkipFrames--;
+				dueForScheduledInput = false;
 				nextSendTime +=
 					std::chrono::duration_cast<
 						std::chrono::steady_clock::duration
 					>(sendInterval);
-				continue;
 			}
 
 			const uint32_t adaptiveTargetBitrateKbps =
 				static_cast<uint32_t>(
 					(std::max)(1, adaptiveState.targetBitrateKbps)
 				);
-			uint32_t pacingTargetBitrateKbps = adaptiveTargetBitrateKbps;
-			const bool stableBaselineMode =
-				runtimeState.networkRuntimeMode ==
-				net::NetworkRuntimeMode::Loopback &&
-				net::NetworkModeCanReceiveVideo(
-					runtimeState.networkRuntimeMode) &&
-				!runtimeState.networkExperimentMode &&
-				!networkManager->GetNetworkCondition().enabled;
-			if (stableBaselineMode) {
-				pacingTargetBitrateKbps =
-					(std::max)(
-						pacingTargetBitrateKbps,
-						uint32_t{ 50000 }
-					);
-			}
+			const uint32_t pacingTargetBitrateKbps =
+				adaptiveTargetBitrateKbps;
 			networkManager->SetPacingTargetBitrateKbps(
 				pacingTargetBitrateKbps
 			);
@@ -3133,9 +3493,13 @@ int AppMain::Run() {
 			CameraCapture::FrameMetadata cameraFrameMetadata{};
 			const bool wantsH264 =
 				runtimeState.networkVideoCodec == net::CodecType::H264;
+			const bool allowCameraAcquire =
+				!wantsH264 ||
+				dueForScheduledInput ||
+				h264NeedInputSubmitWake;
 			bool hasCameraNv12Frame = false;
 			bool hasCameraRgbaFrame = false;
-			if (cameraCaptureEnabled && cameraCapture) {
+			if (allowCameraAcquire && cameraCaptureEnabled && cameraCapture) {
 				if (wantsH264) {
 					hasCameraNv12Frame =
 						cameraCapture->TryGetLatestNv12Frame(cameraNv12Frame);
@@ -3151,10 +3515,10 @@ int AppMain::Run() {
 						);
 				}
 			}
-			const bool hasCameraFrame =
+			bool hasCameraFrame =
 				hasCameraNv12Frame || hasCameraRgbaFrame;
 			uint64_t cameraFrameId = cameraFrameMetadata.frameId;
-			const bool freshCameraFrame =
+			bool freshCameraFrame =
 				hasCameraFrame &&
 				cameraFrameId != lastCameraFrameId;
 			if (hasCameraFrame) {
@@ -3174,7 +3538,7 @@ int AppMain::Run() {
 			bool selectedCameraNv12Frame = hasCameraNv12Frame;
 			if (!hasCameraFrame &&
 				cameraCaptureEnabled &&
-				wantsH264 &&
+				!wantsH264 &&
 				!lastCameraNv12FrameCache.yPlane.empty() &&
 				!lastCameraNv12FrameCache.uvPlane.empty()) {
 				cameraNv12Frame = lastCameraNv12FrameCache;
@@ -3185,6 +3549,7 @@ int AppMain::Run() {
 			}
 			else if (!hasCameraFrame &&
 				cameraCaptureEnabled &&
+				!wantsH264 &&
 				!lastCameraFrameCache.empty()) {
 				videoFrame = lastCameraFrameCache;
 				cameraFrameMetadata = lastCameraFrameMetadata;
@@ -3192,7 +3557,9 @@ int AppMain::Run() {
 				selectedCameraNv12Frame = false;
 				usedCameraCache = true;
 			}
-			else if (!hasCameraFrame && cameraCaptureEnabled) {
+			else if (!hasCameraFrame &&
+				cameraCaptureEnabled &&
+				!wantsH264) {
 				const auto sendInterval =
 					std::chrono::duration_cast<
 						std::chrono::steady_clock::duration>(
@@ -3202,7 +3569,7 @@ int AppMain::Run() {
 				nextSendTime += sendInterval;
 				continue;
 			}
-			const bool reusedCameraFrame =
+			bool reusedCameraFrame =
 				cameraCaptureEnabled &&
 				cameraFrameId != 0 &&
 				(!hasCameraFrame || !freshCameraFrame || usedCameraCache);
@@ -3211,7 +3578,7 @@ int AppMain::Run() {
 					std::chrono::duration_cast<std::chrono::microseconds>(
 						std::chrono::steady_clock::now().time_since_epoch()
 					).count());
-			const double cameraFrameAgeMs =
+			double cameraFrameAgeMs =
 				cameraFrameMetadata.captureCompletedTimeUs != 0 &&
 				cameraAgeNowUs >= cameraFrameMetadata.captureCompletedTimeUs
 				? static_cast<double>(
@@ -3219,6 +3586,95 @@ int AppMain::Run() {
 					cameraFrameMetadata.captureCompletedTimeUs) /
 					1000.0
 				: 0.0;
+			double cameraReadSampleEndToCaptureMs =
+				cameraFrameMetadata.readSampleEndTimeUs != 0 &&
+				cameraFrameMetadata.captureCompletedTimeUs != 0 &&
+				cameraFrameMetadata.captureCompletedTimeUs >=
+					cameraFrameMetadata.readSampleEndTimeUs
+				? static_cast<double>(
+					cameraFrameMetadata.captureCompletedTimeUs -
+					cameraFrameMetadata.readSampleEndTimeUs) /
+					1000.0
+				: 0.0;
+			double cameraCaptureToPublishMs =
+				cameraFrameMetadata.captureCompletedTimeUs != 0 &&
+				cameraFrameMetadata.framePublishedTimeUs != 0 &&
+				cameraFrameMetadata.framePublishedTimeUs >=
+					cameraFrameMetadata.captureCompletedTimeUs
+				? static_cast<double>(
+					cameraFrameMetadata.framePublishedTimeUs -
+					cameraFrameMetadata.captureCompletedTimeUs) /
+					1000.0
+				: 0.0;
+			double cameraPublishToAcquireMs =
+				cameraFrameMetadata.framePublishedTimeUs != 0 &&
+				cameraFrameMetadata.senderAcquireTimeUs != 0 &&
+				cameraFrameMetadata.senderAcquireTimeUs >=
+					cameraFrameMetadata.framePublishedTimeUs
+				? static_cast<double>(
+					cameraFrameMetadata.senderAcquireTimeUs -
+					cameraFrameMetadata.framePublishedTimeUs) /
+					1000.0
+				: 0.0;
+			double cameraAcquireToSendMs =
+				cameraFrameMetadata.senderAcquireTimeUs != 0 &&
+				cameraAgeNowUs >= cameraFrameMetadata.senderAcquireTimeUs
+				? static_cast<double>(
+					cameraAgeNowUs -
+					cameraFrameMetadata.senderAcquireTimeUs) /
+					1000.0
+				: 0.0;
+			auto refreshCameraTimingMetrics = [&]() {
+				const uint64_t nowUs =
+					static_cast<uint64_t>(
+						std::chrono::duration_cast<std::chrono::microseconds>(
+							std::chrono::steady_clock::now().time_since_epoch()
+						).count());
+				cameraFrameAgeMs =
+					cameraFrameMetadata.captureCompletedTimeUs != 0 &&
+					nowUs >= cameraFrameMetadata.captureCompletedTimeUs
+					? static_cast<double>(
+						nowUs - cameraFrameMetadata.captureCompletedTimeUs) /
+						1000.0
+					: 0.0;
+				cameraReadSampleEndToCaptureMs =
+					cameraFrameMetadata.readSampleEndTimeUs != 0 &&
+					cameraFrameMetadata.captureCompletedTimeUs != 0 &&
+					cameraFrameMetadata.captureCompletedTimeUs >=
+						cameraFrameMetadata.readSampleEndTimeUs
+					? static_cast<double>(
+						cameraFrameMetadata.captureCompletedTimeUs -
+						cameraFrameMetadata.readSampleEndTimeUs) /
+						1000.0
+					: 0.0;
+				cameraCaptureToPublishMs =
+					cameraFrameMetadata.captureCompletedTimeUs != 0 &&
+					cameraFrameMetadata.framePublishedTimeUs != 0 &&
+					cameraFrameMetadata.framePublishedTimeUs >=
+						cameraFrameMetadata.captureCompletedTimeUs
+					? static_cast<double>(
+						cameraFrameMetadata.framePublishedTimeUs -
+						cameraFrameMetadata.captureCompletedTimeUs) /
+						1000.0
+					: 0.0;
+				cameraPublishToAcquireMs =
+					cameraFrameMetadata.framePublishedTimeUs != 0 &&
+					cameraFrameMetadata.senderAcquireTimeUs != 0 &&
+					cameraFrameMetadata.senderAcquireTimeUs >=
+						cameraFrameMetadata.framePublishedTimeUs
+					? static_cast<double>(
+						cameraFrameMetadata.senderAcquireTimeUs -
+						cameraFrameMetadata.framePublishedTimeUs) /
+						1000.0
+					: 0.0;
+				cameraAcquireToSendMs =
+					cameraFrameMetadata.senderAcquireTimeUs != 0 &&
+					nowUs >= cameraFrameMetadata.senderAcquireTimeUs
+					? static_cast<double>(
+						nowUs - cameraFrameMetadata.senderAcquireTimeUs) /
+						1000.0
+					: 0.0;
+			};
 
 			{
 				std::lock_guard<std::mutex> lock(sendTelemetry.mutex);
@@ -3226,19 +3682,51 @@ int AppMain::Run() {
 				sendTelemetry.cameraFrameId = cameraFrameId;
 				sendTelemetry.cameraSourceTimestamp100ns =
 					cameraFrameMetadata.sourceTimestamp100ns;
+				sendTelemetry.cameraReadSampleStartTimeUs =
+					cameraFrameMetadata.readSampleStartTimeUs;
+				sendTelemetry.cameraReadSampleEndTimeUs =
+					cameraFrameMetadata.readSampleEndTimeUs;
 				sendTelemetry.cameraCaptureCompletedTimeUs =
 					cameraFrameMetadata.captureCompletedTimeUs;
+				sendTelemetry.cameraFramePublishedTimeUs =
+					cameraFrameMetadata.framePublishedTimeUs;
+				sendTelemetry.cameraSenderAcquireTimeUs =
+					cameraFrameMetadata.senderAcquireTimeUs;
 				sendTelemetry.cameraReadSampleMs =
 					cameraFrameMetadata.readSampleMs;
+				sendTelemetry.cameraReadSampleEndToCaptureMs =
+					cameraReadSampleEndToCaptureMs;
+				sendTelemetry.cameraCaptureToPublishMs =
+					cameraCaptureToPublishMs;
+				sendTelemetry.cameraPublishToAcquireMs =
+					cameraPublishToAcquireMs;
+				sendTelemetry.cameraAcquireToSendMs =
+					cameraAcquireToSendMs;
 				sendTelemetry.cameraFrameAgeMs = cameraFrameAgeMs;
-				sendTelemetry.cameraFrameCacheUsed = reusedCameraFrame;
+				sendTelemetry.cameraFrameCacheUsed = usedCameraCache;
 				sendTelemetry.captureFps =
 					cameraCaptureEnabled && cameraCapture
 					? cameraCapture->GetAsyncCaptureFps()
 					: 0.0;
+				sendTelemetry.cameraCaptureSubtype =
+					cameraCaptureEnabled && cameraCapture
+					? cameraCapture->GetCaptureSubtypeName()
+					: std::string{};
+				sendTelemetry.cameraCaptureWidth =
+					cameraCaptureEnabled && cameraCapture
+					? cameraCapture->GetCaptureWidth()
+					: 0u;
+				sendTelemetry.cameraCaptureHeight =
+					cameraCaptureEnabled && cameraCapture
+					? cameraCapture->GetCaptureHeight()
+					: 0u;
+				sendTelemetry.cameraCaptureFormatFps =
+					cameraCaptureEnabled && cameraCapture
+					? cameraCapture->GetCaptureFormatFps()
+					: 0.0;
 			}
 
-			if (!hasCameraFrame && !usedCameraCache) {
+			if (!hasCameraFrame && !usedCameraCache && !wantsH264) {
 				selectedCameraNv12Frame = false;
 				videoFrame.resize(
 					static_cast<size_t>(texWidth) *
@@ -3278,10 +3766,16 @@ int AppMain::Run() {
 			double h264EncoderDelayMs = 0.0;
 			uint32_t h264EncoderPendingFrames = 0;
 			uint32_t h264EncodedInputFrameId = 0;
+			H264Encoder::FrameTiming h264EncoderTiming{};
 			uint64_t encodedCameraFrameId = 0;
 			int64_t encodedCameraSourceTimestamp100ns = 0;
 			uint64_t encodedCameraCaptureCompletedTimeUs = 0;
 			double encodedCameraFrameAgeMs = 0.0;
+			double encodedCameraReadSampleMs = 0.0;
+			double encodedCameraReadSampleEndToCaptureMs = 0.0;
+			double encodedCameraCaptureToPublishMs = 0.0;
+			double encodedCameraPublishToAcquireMs = 0.0;
+			double encodedCameraAcquireToEncoderInputMs = 0.0;
 			double jpegEncodeMs = 0.0;
 			double packetizeMs = 0.0;
 
@@ -3336,6 +3830,20 @@ int AppMain::Run() {
 
 			std::vector<uint8_t> encodedPayload;
 			net::CodecType sendCodec = runtimeState.networkVideoCodec;
+			uint32_t rnvpSendFrameId = frameId;
+			bool h264AsyncSubmittedWithoutOutput = false;
+			bool h264SubmittedNewInput = false;
+			bool h264SkippedInputWaitingForFreshCamera = false;
+			bool h264InputGatedByPacing = false;
+			std::string h264InputGateReason;
+			double h264InputGateQueueDelayMs = 0.0;
+			double h264InputGateVideoCreditBytes = 0.0;
+			double h264InputGateFrameBudgetBytes = 0.0;
+			double h264InputGateDurationMs = 0.0;
+			uint32_t h264InputGateConsecutiveFrames = 0;
+			uint64_t h264InputGateSkippedInputFrames = 0;
+			bool h264InputGateForcedOpen = false;
+			std::string h264InputGateReleaseReason;
 			const bool requestedKeyFrame =
 				networkManager->ConsumeKeyFrameRequest();
 
@@ -3396,74 +3904,456 @@ int AppMain::Run() {
 						h264Encoder.RequestKeyFrame();
 					}
 
+					std::vector<BYTE> accessUnit;
+					bool h264Encoded = false;
+					H264Encoder::FrameTiming h264DrainTiming{};
+					if (h264Encoder.IsAsyncHardware()) {
+						const auto h264DrainStartTime =
+							std::chrono::steady_clock::now();
+						const bool h264Drained =
+							h264Encoder.DrainOutput(accessUnit, 0);
+						h264EncodeMs +=
+							std::chrono::duration<double, std::milli>(
+								std::chrono::steady_clock::now() -
+								h264DrainStartTime
+							).count();
+						h264DrainTiming =
+							h264Encoder.GetLastFrameTiming();
+						if (h264Drained) {
+							h264EncoderTiming = h264DrainTiming;
+							h264Encoded = true;
+						}
+					}
+
+					if (h264Encoder.IsAsyncHardware() &&
+						!dueForScheduledInput &&
+						!h264NeedInputSubmitWake &&
+						h264EncoderTiming.needInputSignaled &&
+						cameraCaptureEnabled &&
+						cameraCapture != nullptr) {
+						const auto needInputNow =
+							std::chrono::steady_clock::now();
+						h264NeedInputSubmitLeadMs =
+							nextSendTime > needInputNow
+							? std::chrono::duration<double, std::milli>(
+								nextSendTime - needInputNow).count()
+							: 0.0;
+						const double maxNeedInputLeadMs =
+							ReadEnvDoubleClamped(
+								"RNVP_H264_NEED_INPUT_EARLY_SUBMIT_MS",
+								12.0,
+								0.0,
+								33.0);
+						if (h264NeedInputSubmitLeadMs <=
+							maxNeedInputLeadMs) {
+							CameraCapture::Nv12Frame lateNv12Frame;
+							CameraCapture::FrameMetadata lateMetadata{};
+							std::vector<uint8_t> lateRgbaFrame;
+							bool lateHasNv12 =
+								cameraCapture->TryGetLatestNv12Frame(
+									lateNv12Frame);
+							if (lateHasNv12) {
+								lateMetadata = lateNv12Frame.metadata;
+							}
+							bool lateHasRgba = false;
+							if (!lateHasNv12) {
+								lateHasRgba =
+									cameraCapture->TryGetLatestRgbaFrame(
+										lateRgbaFrame,
+										lateMetadata);
+							}
+							const uint64_t lateFrameId =
+								lateMetadata.frameId;
+							if ((lateHasNv12 || lateHasRgba) &&
+								lateFrameId != 0 &&
+								lateFrameId != lastCameraFrameId) {
+								cameraFrameMetadata = lateMetadata;
+								cameraFrameId = lateFrameId;
+								hasCameraNv12Frame = lateHasNv12;
+								hasCameraRgbaFrame = lateHasRgba;
+								hasCameraFrame = true;
+								freshCameraFrame = true;
+								usedCameraCache = false;
+								reusedCameraFrame = false;
+								selectedCameraNv12Frame = lateHasNv12;
+								if (lateHasNv12) {
+									cameraNv12Frame =
+										std::move(lateNv12Frame);
+									lastCameraNv12FrameCache =
+										cameraNv12Frame;
+									lastCameraFrameCache.clear();
+								}
+								else {
+									videoFrame = std::move(lateRgbaFrame);
+									lastCameraFrameCache = videoFrame;
+									lastCameraNv12FrameCache = {};
+								}
+								lastCameraFrameId = cameraFrameId;
+								lastCameraFrameMetadata =
+									cameraFrameMetadata;
+								refreshCameraTimingMetrics();
+								h264NeedInputSubmitWake = true;
+								{
+									std::lock_guard<std::mutex> lock(
+										sendTelemetry.mutex);
+									sendTelemetry.cameraFrameReady = true;
+									sendTelemetry.cameraFrameId =
+										cameraFrameId;
+									sendTelemetry.cameraSourceTimestamp100ns =
+										cameraFrameMetadata.sourceTimestamp100ns;
+									sendTelemetry.cameraReadSampleStartTimeUs =
+										cameraFrameMetadata.readSampleStartTimeUs;
+									sendTelemetry.cameraReadSampleEndTimeUs =
+										cameraFrameMetadata.readSampleEndTimeUs;
+									sendTelemetry.cameraCaptureCompletedTimeUs =
+										cameraFrameMetadata.captureCompletedTimeUs;
+									sendTelemetry.cameraFramePublishedTimeUs =
+										cameraFrameMetadata.framePublishedTimeUs;
+									sendTelemetry.cameraSenderAcquireTimeUs =
+										cameraFrameMetadata.senderAcquireTimeUs;
+									sendTelemetry.cameraReadSampleMs =
+										cameraFrameMetadata.readSampleMs;
+									sendTelemetry.
+										cameraReadSampleEndToCaptureMs =
+										cameraReadSampleEndToCaptureMs;
+									sendTelemetry.cameraCaptureToPublishMs =
+										cameraCaptureToPublishMs;
+									sendTelemetry.cameraPublishToAcquireMs =
+										cameraPublishToAcquireMs;
+									sendTelemetry.cameraAcquireToSendMs =
+										cameraAcquireToSendMs;
+									sendTelemetry.cameraFrameAgeMs =
+										cameraFrameAgeMs;
+									sendTelemetry.cameraFrameCacheUsed = false;
+								}
+							}
+						}
+					}
+
+					const bool h264FreshCameraInputAvailable =
+						!cameraCaptureEnabled ||
+						(hasCameraFrame &&
+							freshCameraFrame &&
+							!reusedCameraFrame);
+					if (h264Encoder.IsAsyncHardware() &&
+						!dueForScheduledInput &&
+						!h264NeedInputSubmitWake &&
+						h264EncoderTiming.needInputSignaled &&
+						h264FreshCameraInputAvailable) {
+						const auto needInputNow =
+							std::chrono::steady_clock::now();
+						h264NeedInputSubmitLeadMs =
+							nextSendTime > needInputNow
+							? std::chrono::duration<double, std::milli>(
+								nextSendTime - needInputNow).count()
+							: 0.0;
+						const double maxNeedInputLeadMs =
+							ReadEnvDoubleClamped(
+								"RNVP_H264_NEED_INPUT_EARLY_SUBMIT_MS",
+								12.0,
+								0.0,
+								33.0);
+						h264NeedInputSubmitWake =
+							h264NeedInputSubmitLeadMs <=
+							maxNeedInputLeadMs;
+					}
+					if (h264Encoder.IsAsyncHardware() &&
+						dueForScheduledInput &&
+						cameraCaptureEnabled &&
+						!h264FreshCameraInputAvailable) {
+						h264SkippedInputWaitingForFreshCamera = true;
+					}
+					if (h264Encoder.IsAsyncHardware() &&
+						dueForScheduledInput &&
+						h264FreshCameraInputAvailable &&
+						networkManager &&
+						!requestedKeyFrame &&
+						!h264AwaitingDecoderSync) {
+						const auto gateNow =
+							std::chrono::steady_clock::now();
+						const net::PacketPacerStats pacingStatsNow =
+							networkManager->GetPacingStats();
+						h264InputGateQueueDelayMs =
+							pacingStatsNow.currentQueueDelayMs;
+						h264InputGateVideoCreditBytes =
+							pacingStatsNow.videoCreditBytes;
+						h264InputGateFrameBudgetBytes =
+							static_cast<double>(pacingTargetBitrateKbps) *
+							1000.0 /
+							8.0 /
+							static_cast<double>(
+								(std::max)(1, inputCadenceFps));
+						const double startGateMs =
+							ReadEnvDoubleClamped(
+								"RNVP_H264_INPUT_GATE_QUEUE_DELAY_MS",
+								55.0,
+								5.0,
+								250.0);
+						const double resumeGateMs =
+							ReadEnvDoubleClamped(
+								"RNVP_H264_INPUT_GATE_RESUME_DELAY_MS",
+								20.0,
+								0.0,
+								200.0);
+						const double maxGateHoldMs =
+							ReadEnvDoubleClamped(
+								"RNVP_H264_INPUT_GATE_MAX_HOLD_MS",
+								220.0,
+								20.0,
+								500.0);
+						const double lowCreditRatio =
+							ReadEnvDoubleClamped(
+								"RNVP_H264_INPUT_GATE_LOW_CREDIT_RATIO",
+								0.75,
+								0.0,
+								1.0);
+						const bool queueStressed =
+							h264InputGateQueueDelayMs >= startGateMs ||
+							(h264PacingInputGateActive &&
+								h264InputGateQueueDelayMs > resumeGateMs);
+						const bool videoCreditLow =
+							h264InputGateFrameBudgetBytes <= 0.0 ||
+							h264InputGateVideoCreditBytes <
+								h264InputGateFrameBudgetBytes *
+								lowCreditRatio;
+						if (h264PacingInputGateActive) {
+							h264InputGateDurationMs =
+								std::chrono::duration<double, std::milli>(
+									gateNow -
+									h264PacingInputGateStartTime
+								).count();
+						}
+						const bool maxHoldReached =
+							h264PacingInputGateActive &&
+							h264InputGateDurationMs >= maxGateHoldMs;
+						h264InputGateForcedOpen =
+							maxHoldReached;
+						h264InputGatedByPacing =
+							queueStressed &&
+							videoCreditLow &&
+							!maxHoldReached;
+						if (h264InputGatedByPacing &&
+							!h264PacingInputGateActive) {
+							h264PacingInputGateActive = true;
+							h264PacingInputGateStartTime = gateNow;
+							h264PacingInputGateConsecutiveFrames = 0;
+							h264InputGateDurationMs = 0.0;
+						}
+						else if (!h264InputGatedByPacing &&
+							h264PacingInputGateActive) {
+							const uint32_t previousConsecutiveGateFrames =
+								h264PacingInputGateConsecutiveFrames;
+							if (maxHoldReached) {
+								h264InputGateReleaseReason =
+									"max-hold-forced-open";
+							}
+							else if (!queueStressed) {
+								h264InputGateReleaseReason =
+									"queue-resumed";
+							}
+							else if (!videoCreditLow) {
+								h264InputGateReleaseReason =
+									"credit-resumed";
+							}
+							h264PacingInputGateActive = false;
+							h264PacingInputGateConsecutiveFrames = 0;
+							h264InputGateConsecutiveFrames =
+								previousConsecutiveGateFrames;
+						}
+						if (h264InputGatedByPacing) {
+							h264InputGateReason =
+								"pacing-input-gate";
+							h264PacingInputGateConsecutiveFrames++;
+							h264PacingInputGateSkippedInputFrames++;
+							h264InputGateConsecutiveFrames =
+								h264PacingInputGateConsecutiveFrames;
+							h264InputGateSkippedInputFrames =
+								h264PacingInputGateSkippedInputFrames;
+							h264InputGateDurationMs =
+								std::chrono::duration<double, std::milli>(
+									gateNow -
+									h264PacingInputGateStartTime
+								).count();
+						}
+						else {
+							if (h264InputGateReleaseReason.empty()) {
+								h264InputGateConsecutiveFrames =
+									h264PacingInputGateConsecutiveFrames;
+							}
+							h264InputGateSkippedInputFrames =
+								h264PacingInputGateSkippedInputFrames;
+						}
+					}
+					else if (h264PacingInputGateActive &&
+						networkManager) {
+						const auto gateNow =
+							std::chrono::steady_clock::now();
+						const net::PacketPacerStats pacingStatsNow =
+							networkManager->GetPacingStats();
+						const double resumeGateMs =
+							ReadEnvDoubleClamped(
+								"RNVP_H264_INPUT_GATE_RESUME_DELAY_MS",
+								32.0,
+								0.0,
+								200.0);
+						h264InputGateQueueDelayMs =
+							pacingStatsNow.currentQueueDelayMs;
+						h264InputGateVideoCreditBytes =
+							pacingStatsNow.videoCreditBytes;
+						h264InputGateDurationMs =
+							std::chrono::duration<double, std::milli>(
+								gateNow -
+								h264PacingInputGateStartTime
+							).count();
+						h264InputGateConsecutiveFrames =
+							h264PacingInputGateConsecutiveFrames;
+						h264InputGateSkippedInputFrames =
+							h264PacingInputGateSkippedInputFrames;
+						if (pacingStatsNow.currentQueueDelayMs <=
+							resumeGateMs) {
+							h264PacingInputGateActive = false;
+							h264PacingInputGateConsecutiveFrames = 0;
+							h264InputGateReleaseReason =
+								"queue-resumed";
+						}
+					}
+					const bool h264ShouldPrepareInput =
+						!h264Encoder.IsAsyncHardware() ||
+						((dueForScheduledInput ||
+							h264NeedInputSubmitWake) &&
+							h264FreshCameraInputAvailable &&
+							!h264InputGatedByPacing);
+
 					const auto nv12StartTime =
 						std::chrono::steady_clock::now();
-					if (selectedCameraNv12Frame &&
-						!cameraNv12Frame.yPlane.empty() &&
-						!cameraNv12Frame.uvPlane.empty()) {
-						ConvertScaledNv12ToNv12Fast(
-							cameraNv12Frame.yPlane.data(),
-							cameraNv12Frame.uvPlane.data(),
-							cameraNv12Frame.width,
-							cameraNv12Frame.height,
-							cameraNv12Frame.yPitch,
-							cameraNv12Frame.uvPitch,
-							h264Width,
-							h264Height,
-							h264Nv12Frame);
-					}
-					else if (h264ScaleFilter == H264ScaleFilter::Bilinear) {
-						ensureRgbaVideoFrame();
-						h264Nv12Frame =
-							ConvertScaledRgbaToNv12Bilinear(
+					if (h264ShouldPrepareInput) {
+						if (selectedCameraNv12Frame &&
+							!cameraNv12Frame.yPlane.empty() &&
+							!cameraNv12Frame.uvPlane.empty()) {
+							ConvertScaledNv12ToNv12Fast(
+								cameraNv12Frame.yPlane.data(),
+								cameraNv12Frame.uvPlane.data(),
+								cameraNv12Frame.width,
+								cameraNv12Frame.height,
+								cameraNv12Frame.yPitch,
+								cameraNv12Frame.uvPitch,
+								h264Width,
+								h264Height,
+								h264Nv12Frame);
+						}
+						else if (h264ScaleFilter == H264ScaleFilter::Bilinear) {
+							ensureRgbaVideoFrame();
+							h264Nv12Frame =
+								ConvertScaledRgbaToNv12Bilinear(
+									videoFrame,
+									texWidth,
+									texHeight,
+									h264Width,
+									h264Height);
+						}
+						else {
+							ensureRgbaVideoFrame();
+							ConvertScaledRgbaToNv12Fast(
 								videoFrame,
 								texWidth,
 								texHeight,
 								h264Width,
-								h264Height);
-					}
-					else {
-						ensureRgbaVideoFrame();
-						ConvertScaledRgbaToNv12Fast(
-							videoFrame,
-							texWidth,
-							texHeight,
-							h264Width,
-							h264Height,
-							h264Nv12Frame);
+								h264Height,
+								h264Nv12Frame);
+						}
 					}
 					nv12PrepareMs =
 						std::chrono::duration<double, std::milli>(
 							std::chrono::steady_clock::now() -
 							nv12StartTime
 					).count();
-					std::vector<BYTE> accessUnit;
-					bool h264Encoded = false;
-					if (!h264Nv12Frame.empty()) {
-						H264PendingInputFrame pendingInput{};
-						pendingInput.sequence = h264InputSequence + 1;
-						pendingInput.inputFrameId = frameId;
-						pendingInput.cameraFrameId = cameraFrameId;
-						pendingInput.cameraSourceTimestamp100ns =
-							cameraFrameMetadata.sourceTimestamp100ns;
-						pendingInput.cameraCaptureCompletedTimeUs =
-							cameraFrameMetadata.captureCompletedTimeUs;
-						pendingInput.encoderInputTimeUs = steadyNowUs();
-						const auto h264EncodeStartTime =
-							std::chrono::steady_clock::now();
-						h264Encoded =
-							h264Encoder.EncodeFrame(
-							h264Nv12Frame.data(),
-							static_cast<UINT>(h264Nv12Frame.size()),
-							accessUnit);
-						h264EncodeMs =
-							std::chrono::duration<double, std::milli>(
-								std::chrono::steady_clock::now() -
-								h264EncodeStartTime
-							).count();
-						if (h264Encoded) {
-							h264InputSequence = pendingInput.sequence;
-							h264PendingInputFrames.push(pendingInput);
+					if (h264ShouldPrepareInput && !h264Nv12Frame.empty()) {
+						const size_t pendingAfterDrainedOutput =
+							!accessUnit.empty() &&
+								!h264PendingInputFrames.empty()
+							? h264PendingInputFrames.size() - 1u
+							: h264PendingInputFrames.size();
+						const bool asyncSubmitAllowed =
+							h264Encoder.IsAsyncHardware() &&
+							(dueForScheduledInput ||
+								h264NeedInputSubmitWake) &&
+							h264FreshCameraInputAvailable &&
+							!h264InputGatedByPacing &&
+							h264Encoder.CanAcceptInput() &&
+							pendingAfterDrainedOutput <
+								(h264EncoderTiming.needInputSignaled
+									? ReadEnvUInt32Clamped(
+										"RNVP_H264_NEED_INPUT_MAX_PENDING",
+										2u,
+										1u,
+										3u)
+									: 1u);
+						const bool syncSubmitAllowed =
+							!h264Encoder.IsAsyncHardware();
+						if (asyncSubmitAllowed || syncSubmitAllowed) {
+							H264PendingInputFrame pendingInput{};
+							pendingInput.sequence = h264InputSequence + 1;
+							pendingInput.inputFrameId = frameId;
+							pendingInput.cameraFrameId = cameraFrameId;
+							pendingInput.cameraSourceTimestamp100ns =
+								cameraFrameMetadata.sourceTimestamp100ns;
+							pendingInput.cameraCaptureCompletedTimeUs =
+								cameraFrameMetadata.captureCompletedTimeUs;
+							pendingInput.encoderInputTimeUs = steadyNowUs();
+							pendingInput.cameraReadSampleMs =
+								cameraFrameMetadata.readSampleMs;
+							pendingInput.cameraReadSampleEndToCaptureMs =
+								cameraReadSampleEndToCaptureMs;
+							pendingInput.cameraCaptureToPublishMs =
+								cameraCaptureToPublishMs;
+							pendingInput.cameraPublishToAcquireMs =
+								cameraPublishToAcquireMs;
+							if (cameraFrameMetadata.senderAcquireTimeUs != 0 &&
+								pendingInput.encoderInputTimeUs >=
+									cameraFrameMetadata.senderAcquireTimeUs) {
+								pendingInput.cameraAcquireToEncoderInputMs =
+									static_cast<double>(
+										pendingInput.encoderInputTimeUs -
+										cameraFrameMetadata.senderAcquireTimeUs) /
+									1000.0;
+							}
+							const auto h264EncodeStartTime =
+								std::chrono::steady_clock::now();
+							std::vector<BYTE> immediateAccessUnit;
+							bool h264InputAccepted = false;
+							if (h264Encoder.IsAsyncHardware()) {
+								h264InputAccepted =
+									h264Encoder.SubmitFrameNoWait(
+										h264Nv12Frame.data(),
+										static_cast<UINT>(h264Nv12Frame.size()));
+							}
+							else {
+								h264InputAccepted =
+									h264Encoder.EncodeFrame(
+										h264Nv12Frame.data(),
+										static_cast<UINT>(h264Nv12Frame.size()),
+										immediateAccessUnit);
+							}
+							h264EncodeMs +=
+								std::chrono::duration<double, std::milli>(
+									std::chrono::steady_clock::now() -
+									h264EncodeStartTime
+								).count();
+							const H264Encoder::FrameTiming submitTiming =
+								h264Encoder.GetLastFrameTiming();
+							if (accessUnit.empty()) {
+								h264EncoderTiming = submitTiming;
+							}
+							if (!immediateAccessUnit.empty() &&
+								accessUnit.empty()) {
+								accessUnit = std::move(immediateAccessUnit);
+							}
+							if (h264InputAccepted) {
+								h264InputSequence = pendingInput.sequence;
+								h264PendingInputFrames.push(pendingInput);
+								h264SubmittedNewInput = true;
+								h264Encoded = true;
+							}
 						}
 					}
 					if (h264Encoded && !accessUnit.empty()) {
@@ -3474,11 +4364,24 @@ int AppMain::Run() {
 						}
 						const uint64_t encodedOutputTimeUs = steadyNowUs();
 						h264EncodedInputFrameId = encodedInput.inputFrameId;
+						if (encodedInput.inputFrameId != 0) {
+							rnvpSendFrameId = encodedInput.inputFrameId;
+						}
 						encodedCameraFrameId = encodedInput.cameraFrameId;
 						encodedCameraSourceTimestamp100ns =
 							encodedInput.cameraSourceTimestamp100ns;
 						encodedCameraCaptureCompletedTimeUs =
 							encodedInput.cameraCaptureCompletedTimeUs;
+						encodedCameraReadSampleMs =
+							encodedInput.cameraReadSampleMs;
+						encodedCameraReadSampleEndToCaptureMs =
+							encodedInput.cameraReadSampleEndToCaptureMs;
+						encodedCameraCaptureToPublishMs =
+							encodedInput.cameraCaptureToPublishMs;
+						encodedCameraPublishToAcquireMs =
+							encodedInput.cameraPublishToAcquireMs;
+						encodedCameraAcquireToEncoderInputMs =
+							encodedInput.cameraAcquireToEncoderInputMs;
 						if (encodedInput.sequence != 0 &&
 							h264InputSequence >= encodedInput.sequence) {
 							h264EncoderDelayFrames =
@@ -3506,17 +4409,19 @@ int AppMain::Run() {
 							static_cast<uint32_t>(h264PendingInputFrames.size());
 						const uint64_t ptsUs =
 							static_cast<uint64_t>(
-								(frameId - 1u) *
+								(rnvpSendFrameId - 1u) *
 								(1000000ull / (std::max<uint32_t>)(1u, h264Fps)));
 						const auto packetizeStartTime =
 							std::chrono::steady_clock::now();
 						encodedPayload =
-							PackH264AccessUnitPayload(
+								PackH264AccessUnitPayload(
 								accessUnit,
-								frameId,
+								rnvpSendFrameId,
 								h264Width,
 								h264Height,
-								ptsUs);
+								ptsUs,
+								encodedInput.cameraCaptureCompletedTimeUs,
+								encodedOutputTimeUs);
 						packetizeMs =
 							std::chrono::duration<double, std::milli>(
 								std::chrono::steady_clock::now() -
@@ -3533,7 +4438,269 @@ int AppMain::Run() {
 							encodedPayload.clear();
 						}
 					}
+					if (h264Encoder.IsAsyncHardware() &&
+						(h264Encoded || !h264PendingInputFrames.empty()) &&
+						encodedPayload.empty()) {
+						h264AsyncSubmittedWithoutOutput = true;
+					}
 				}
+			}
+
+			if (sendCodec == net::CodecType::H264 &&
+				encodedPayload.empty() &&
+				(h264AsyncSubmittedWithoutOutput ||
+					h264SkippedInputWaitingForFreshCamera ||
+					h264InputGatedByPacing)) {
+				h264EncoderPendingFrames =
+					static_cast<uint32_t>(h264PendingInputFrames.size());
+				const uint64_t actualRawFrameBytes =
+					static_cast<uint64_t>(targetWidth) *
+					static_cast<uint64_t>(targetHeight) *
+					4u;
+				const double encodeMs =
+					std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() -
+						encodePipelineStartTime
+					).count();
+				const bool h264AsyncPendingNoOutput =
+					h264AsyncSubmittedWithoutOutput &&
+					!h264SubmittedNewInput &&
+					!h264SkippedInputWaitingForFreshCamera &&
+					!h264InputGatedByPacing &&
+					!h264PendingInputFrames.empty();
+				double h264AsyncOutputPollBackoffMs = 0.0;
+				if (h264AsyncPendingNoOutput) {
+					h264AsyncPendingNoOutputStreak =
+						(std::min<uint32_t>)(
+							h264AsyncPendingNoOutputStreak + 1u,
+							8u);
+					const double holdMs =
+						h264AsyncPendingNoOutputStreak >= 2u
+						? ReadEnvDoubleClamped(
+							"RNVP_H264_ASYNC_HARD_CADENCE_HOLD_MS",
+							420.0,
+							50.0,
+							2000.0)
+						: ReadEnvDoubleClamped(
+							"RNVP_H264_ASYNC_CADENCE_HOLD_MS",
+							180.0,
+							20.0,
+							1000.0);
+					h264AsyncCadenceHoldUntil =
+						(std::max)(
+							h264AsyncCadenceHoldUntil,
+							std::chrono::steady_clock::now() +
+								std::chrono::duration_cast<
+									std::chrono::steady_clock::duration>(
+									std::chrono::duration<double, std::milli>(
+										holdMs)));
+					h264AsyncCadenceHoldActive = true;
+					h264AsyncCadenceHoldRemainingMs =
+						(std::max)(h264AsyncCadenceHoldRemainingMs, holdMs);
+					h264AsyncOutputPollBackoffMs =
+						ReadEnvDoubleClamped(
+							"RNVP_H264_ASYNC_OUTPUT_POLL_BACKOFF_MS",
+							1.5,
+							0.0,
+							20.0);
+					if (h264AsyncOutputPollBackoffMs > 0.0) {
+						const auto backoffTime =
+							std::chrono::steady_clock::now() +
+							std::chrono::duration_cast<
+								std::chrono::steady_clock::duration>(
+								std::chrono::duration<double, std::milli>(
+									h264AsyncOutputPollBackoffMs));
+						if (nextSendTime < backoffTime) {
+							nextSendTime = backoffTime;
+						}
+					}
+				}
+				else if (!encodedPayload.empty() ||
+					h264EncoderTiming.outputProduced) {
+					h264AsyncPendingNoOutputStreak = 0;
+				}
+				{
+					std::lock_guard<std::mutex> lock(sendTelemetry.mutex);
+					sendTelemetry.actualCodec = net::ToString(sendCodec);
+					sendTelemetry.actualEncodeWidth = targetWidth;
+					sendTelemetry.actualEncodeHeight = targetHeight;
+					sendTelemetry.actualRawFrameBytes = actualRawFrameBytes;
+					sendTelemetry.actualEncodedFrameBytes = 0;
+					sendTelemetry.encodeMs = encodeMs;
+					sendTelemetry.resizeMs = resizeMs;
+					sendTelemetry.nv12PrepareMs = nv12PrepareMs;
+					sendTelemetry.h264EncodeMs = h264EncodeMs;
+					sendTelemetry.h264EncoderRequestedBitrateKbps =
+						h264EncoderRequestedBitrateKbps;
+					sendTelemetry.h264EncoderTargetBitrateKbps =
+						h264EncoderTargetBitrateKbps;
+					sendTelemetry.h264EncoderAppliedBitrateKbps =
+						h264EncoderBitrate / 1000u;
+					sendTelemetry.h264DynamicBitrateUpdateRequests =
+						h264DynamicBitrateUpdateRequests;
+					sendTelemetry.h264DynamicBitrateUpdateSuccesses =
+						h264DynamicBitrateUpdateSuccesses;
+					sendTelemetry.h264DynamicBitrateUpdateFailures =
+						h264DynamicBitrateUpdateFailures;
+					sendTelemetry.h264EncoderReinitializations =
+						h264EncoderReinitializations;
+					sendTelemetry.pacingTargetBitrateKbps =
+						pacingTargetBitrateKbps;
+					sendTelemetry.h264AuChunkCount = 0;
+					sendTelemetry.h264AuIsIdr = false;
+					sendTelemetry.h264AuIsDecoderSync = false;
+					sendTelemetry.h264AuProtectionLevel =
+						h264SkippedInputWaitingForFreshCamera
+						? "fresh-camera-wait"
+						: (h264InputGatedByPacing
+							? "pacing-input-gate"
+							: "async-output-pending");
+					sendTelemetry.h264AuDroppedBeforeSend = false;
+					sendTelemetry.h264AuDropReason.clear();
+					sendTelemetry.h264AuDroppedBytes = 0;
+					sendTelemetry.h264AuDroppedChunks = 0;
+					sendTelemetry.h264AuPacingQueueDelayMs = 0.0;
+					sendTelemetry.h264AuEstimatedSendMs = 0.0;
+					sendTelemetry.h264InputGatedByPacing =
+						h264InputGatedByPacing;
+					sendTelemetry.h264InputGateReason =
+						h264InputGateReason;
+					sendTelemetry.h264InputGateQueueDelayMs =
+						h264InputGateQueueDelayMs;
+					sendTelemetry.h264InputGateVideoCreditBytes =
+						h264InputGateVideoCreditBytes;
+					sendTelemetry.h264InputGateFrameBudgetBytes =
+						h264InputGateFrameBudgetBytes;
+					sendTelemetry.h264InputGateDurationMs =
+						h264InputGateDurationMs;
+					sendTelemetry.h264InputGateConsecutiveFrames =
+						h264InputGateConsecutiveFrames;
+					sendTelemetry.h264InputGateSkippedInputFrames =
+						h264InputGateSkippedInputFrames;
+					sendTelemetry.h264InputGateForcedOpen =
+						h264InputGateForcedOpen;
+					sendTelemetry.h264InputGateReleaseReason =
+						h264InputGateReleaseReason;
+					sendTelemetry.fecProtectedH264KeyFrames =
+						fecProtectedH264KeyFrames;
+					sendTelemetry.fecProtectedH264LargeFrames =
+						fecProtectedH264LargeFrames;
+					sendTelemetry.h264EncoderDelayFrames =
+						h264EncoderDelayFrames;
+					sendTelemetry.h264EncoderDelayMs =
+						h264EncoderDelayMs;
+					sendTelemetry.h264EncoderPendingFrames =
+						h264EncoderPendingFrames;
+					sendTelemetry.h264EncodedInputFrameId =
+						h264EncodedInputFrameId;
+					sendTelemetry.h264EncoderCallMs =
+						h264EncoderTiming.callMs;
+					sendTelemetry.h264EncoderSampleCreateMs =
+						h264EncoderTiming.sampleCreateMs;
+					sendTelemetry.h264EncoderProcessInputMs =
+						h264EncoderTiming.processInputMs;
+					sendTelemetry.h264EncoderPreInputPollMs =
+						h264EncoderTiming.preInputPollMs;
+					sendTelemetry.h264EncoderPostInputWaitMs =
+						h264EncoderTiming.postInputWaitMs;
+					sendTelemetry.h264EncoderProcessOutputMs =
+						h264EncoderTiming.processOutputMs;
+					sendTelemetry.h264EncoderOutputCopyMs =
+						h264EncoderTiming.outputCopyMs;
+					sendTelemetry.h264EncoderProcessOutputAttempts =
+						h264EncoderTiming.processOutputAttempts;
+					sendTelemetry.h264EncoderAsyncEventCount =
+						h264EncoderTiming.asyncEventCount;
+					sendTelemetry.h264EncoderHardware =
+						h264EncoderTiming.hardware;
+					sendTelemetry.h264EncoderAsync =
+						h264EncoderTiming.async;
+					sendTelemetry.h264EncoderNeedInputSignaled =
+						h264EncoderTiming.needInputSignaled;
+					sendTelemetry.h264EncoderOutputProduced =
+						h264EncoderTiming.outputProduced;
+					sendTelemetry.h264EncoderOutputProducedBeforeInput =
+						h264EncoderTiming.outputProducedBeforeInput;
+					sendTelemetry.h264SubmittedNewInput =
+						h264SubmittedNewInput;
+					sendTelemetry.h264AsyncSubmittedWithoutOutput =
+						h264AsyncSubmittedWithoutOutput;
+					sendTelemetry.h264AsyncPendingNoOutput =
+						h264AsyncPendingNoOutput;
+					sendTelemetry.h264AsyncCadenceHoldActive =
+						h264AsyncCadenceHoldActive;
+					sendTelemetry.h264AsyncPendingNoOutputStreak =
+						h264AsyncPendingNoOutputStreak;
+					sendTelemetry.h264AsyncCadenceScale =
+						h264AsyncCadenceScale;
+					sendTelemetry.h264AsyncCadenceHoldRemainingMs =
+						h264AsyncCadenceHoldRemainingMs;
+					sendTelemetry.h264AsyncOutputPollBackoffMs =
+						h264AsyncOutputPollBackoffMs;
+					sendTelemetry.h264InputCadenceFps =
+						static_cast<uint32_t>(inputCadenceFps);
+					sendTelemetry.h264NeedInputSubmitWake =
+						h264NeedInputSubmitWake;
+					sendTelemetry.h264NeedInputSubmitLeadMs =
+						h264NeedInputSubmitLeadMs;
+					sendTelemetry.encodedCameraFrameId = 0;
+					sendTelemetry.encodedCameraSourceTimestamp100ns = 0;
+					sendTelemetry.encodedCameraCaptureCompletedTimeUs = 0;
+					sendTelemetry.encodedCameraFrameAgeMs = 0.0;
+					sendTelemetry.encodedCameraReadSampleMs = 0.0;
+					sendTelemetry.encodedCameraReadSampleEndToCaptureMs = 0.0;
+					sendTelemetry.encodedCameraCaptureToPublishMs = 0.0;
+					sendTelemetry.encodedCameraPublishToAcquireMs = 0.0;
+					sendTelemetry.encodedCameraAcquireToEncoderInputMs = 0.0;
+					sendTelemetry.jpegEncodeMs = 0.0;
+					sendTelemetry.packetizeMs = 0.0;
+				}
+				if (h264SubmittedNewInput) {
+					frameId++;
+					const auto scheduleNow = std::chrono::steady_clock::now();
+					if (h264NeedInputSubmitWake &&
+						nextSendTime > scheduleNow) {
+						nextSendTime =
+							scheduleNow +
+							std::chrono::duration_cast<
+								std::chrono::steady_clock::duration
+							>(sendInterval);
+					}
+					else {
+						nextSendTime +=
+							std::chrono::duration_cast<
+								std::chrono::steady_clock::duration
+							>(sendInterval);
+					}
+					if (nextSendTime <
+						scheduleNow - std::chrono::milliseconds(100)) {
+						nextSendTime =
+							scheduleNow +
+							std::chrono::duration_cast<
+								std::chrono::steady_clock::duration
+							>(sendInterval);
+					}
+				}
+				else if (h264InputGatedByPacing) {
+					frameId++;
+					nextSendTime +=
+						std::chrono::duration_cast<
+							std::chrono::steady_clock::duration
+						>(sendInterval);
+					const auto scheduleNow = std::chrono::steady_clock::now();
+					if (nextSendTime <
+						scheduleNow - std::chrono::milliseconds(100)) {
+						nextSendTime =
+							scheduleNow +
+							std::chrono::duration_cast<
+								std::chrono::steady_clock::duration
+							>(sendInterval);
+					}
+				}
+				else if (h264SkippedInputWaitingForFreshCamera) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				continue;
 			}
 
 			if (sendCodec != net::CodecType::H264 ||
@@ -3589,6 +4756,10 @@ int AppMain::Run() {
 				).count();
 			h264EncoderPendingFrames =
 				static_cast<uint32_t>(h264PendingInputFrames.size());
+			if (sendCodec == net::CodecType::H264 &&
+				!encodedPayload.empty()) {
+				h264AsyncPendingNoOutputStreak = 0;
+			}
 
 			net::H264AccessUnitPayloadHeader h264AuHeader{};
 			const bool h264AuHeaderValid =
@@ -3615,12 +4786,24 @@ int AppMain::Run() {
 				1000.0 /
 				8.0 /
 				static_cast<double>((std::max)(1, targetFps));
+			const double h264AuBudgetRatio =
+				sendCodec == net::CodecType::H264 &&
+					h264FrameBudgetBytes > 0.0
+				? static_cast<double>(encodedPayload.size()) /
+					h264FrameBudgetBytes
+				: 0.0;
 			const bool h264LargeAu =
 				sendCodec == net::CodecType::H264 &&
 				(h264AuChunkCount >= 8u ||
 					(h264FrameBudgetBytes > 0.0 &&
 						static_cast<double>(encodedPayload.size()) >
 						h264FrameBudgetBytes * 1.35));
+			bool h264AuDroppedBeforeSend = false;
+			std::string h264AuDropReason;
+			uint64_t h264AuDroppedBytes = 0;
+			uint32_t h264AuDroppedChunks = 0;
+			double h264AuPacingQueueDelayMs = 0.0;
+			double h264AuEstimatedSendMs = 0.0;
 			NetworkManager::RnvpFrameProtectionOptions protection{};
 			std::string h264AuProtectionLevel =
 				sendCodec == net::CodecType::H264 ? "none" : "";
@@ -3647,6 +4830,73 @@ int AppMain::Run() {
 				}
 				else {
 					h264AuProtectionLevel = "large-au-observed";
+				}
+			}
+
+			if (sendCodec == net::CodecType::H264 &&
+				!encodedPayload.empty() &&
+				networkManager) {
+				const net::PacketPacerStats pacingStatsNow =
+					networkManager->GetPacingStats();
+				h264AuPacingQueueDelayMs =
+					pacingStatsNow.currentQueueDelayMs;
+				const double pacingBps =
+					static_cast<double>(
+						(std::max)(1u, pacingTargetBitrateKbps)) *
+					1000.0;
+				h264AuEstimatedSendMs =
+					static_cast<double>(encodedPayload.size()) *
+					8.0 *
+					1000.0 /
+					pacingBps;
+				const double deadlineBudgetMs =
+					ReadEnvDoubleClamped(
+						"RNVP_H264_AU_SEND_DEADLINE_MS",
+						115.0,
+						40.0,
+						250.0);
+				const double largeAuQueueGuardMs =
+					ReadEnvDoubleClamped(
+						"RNVP_H264_LARGE_AU_QUEUE_GUARD_MS",
+						55.0,
+						0.0,
+						200.0);
+				const double staleAuAgeMs =
+					ReadEnvDoubleClamped(
+						"RNVP_H264_STALE_AU_AGE_MS",
+						45.0,
+						10.0,
+						200.0);
+				const bool queueWouldMissDeadline =
+					h264AuPacingQueueDelayMs +
+						h264AuEstimatedSendMs >
+					deadlineBudgetMs;
+				const bool queueAlreadyStressed =
+					h264AuPacingQueueDelayMs >= largeAuQueueGuardMs;
+				const bool staleAu =
+					encodedCameraFrameAgeMs >= staleAuAgeMs ||
+					h264EncoderDelayMs >=
+						ReadEnvDoubleClamped(
+							"RNVP_H264_STALE_ENCODER_DELAY_MS",
+							18.0,
+							5.0,
+							120.0);
+				const bool canDropDeltaAu =
+					!h264AuIsIdr && !h264AuIsDecoderSync;
+				if (canDropDeltaAu &&
+					((h264LargeAu && queueWouldMissDeadline) ||
+						(staleAu && queueAlreadyStressed))) {
+					h264AuDroppedBeforeSend = true;
+					h264AuDropReason =
+						queueWouldMissDeadline
+						? "large-au-would-miss-pacing-deadline"
+						: "large-au-queue-stressed";
+				}
+				if (h264AuDroppedBeforeSend) {
+					h264AuDroppedBytes =
+						static_cast<uint64_t>(encodedPayload.size());
+					h264AuDroppedChunks = h264AuChunkCount;
+					h264AuProtectionLevel = h264AuDropReason;
 				}
 			}
 
@@ -3691,6 +4941,38 @@ int AppMain::Run() {
 					h264AuIsDecoderSync;
 				sendTelemetry.h264AuProtectionLevel =
 					h264AuProtectionLevel;
+				sendTelemetry.h264AuDroppedBeforeSend =
+					h264AuDroppedBeforeSend;
+				sendTelemetry.h264AuDropReason =
+					h264AuDropReason;
+				sendTelemetry.h264AuDroppedBytes =
+					h264AuDroppedBytes;
+				sendTelemetry.h264AuDroppedChunks =
+					h264AuDroppedChunks;
+				sendTelemetry.h264AuPacingQueueDelayMs =
+					h264AuPacingQueueDelayMs;
+				sendTelemetry.h264AuEstimatedSendMs =
+					h264AuEstimatedSendMs;
+				sendTelemetry.h264InputGatedByPacing =
+					h264InputGatedByPacing;
+				sendTelemetry.h264InputGateReason =
+					h264InputGateReason;
+				sendTelemetry.h264InputGateQueueDelayMs =
+					h264InputGateQueueDelayMs;
+				sendTelemetry.h264InputGateVideoCreditBytes =
+					h264InputGateVideoCreditBytes;
+				sendTelemetry.h264InputGateFrameBudgetBytes =
+					h264InputGateFrameBudgetBytes;
+				sendTelemetry.h264InputGateDurationMs =
+					h264InputGateDurationMs;
+				sendTelemetry.h264InputGateConsecutiveFrames =
+					h264InputGateConsecutiveFrames;
+				sendTelemetry.h264InputGateSkippedInputFrames =
+					h264InputGateSkippedInputFrames;
+				sendTelemetry.h264InputGateForcedOpen =
+					h264InputGateForcedOpen;
+				sendTelemetry.h264InputGateReleaseReason =
+					h264InputGateReleaseReason;
 				sendTelemetry.fecProtectedH264KeyFrames =
 					fecProtectedH264KeyFrames;
 				sendTelemetry.fecProtectedH264LargeFrames =
@@ -3703,6 +4985,54 @@ int AppMain::Run() {
 					h264EncoderPendingFrames;
 				sendTelemetry.h264EncodedInputFrameId =
 					h264EncodedInputFrameId;
+				sendTelemetry.h264EncoderCallMs =
+					h264EncoderTiming.callMs;
+				sendTelemetry.h264EncoderSampleCreateMs =
+					h264EncoderTiming.sampleCreateMs;
+				sendTelemetry.h264EncoderProcessInputMs =
+					h264EncoderTiming.processInputMs;
+				sendTelemetry.h264EncoderPreInputPollMs =
+					h264EncoderTiming.preInputPollMs;
+				sendTelemetry.h264EncoderPostInputWaitMs =
+					h264EncoderTiming.postInputWaitMs;
+				sendTelemetry.h264EncoderProcessOutputMs =
+					h264EncoderTiming.processOutputMs;
+				sendTelemetry.h264EncoderOutputCopyMs =
+					h264EncoderTiming.outputCopyMs;
+				sendTelemetry.h264EncoderProcessOutputAttempts =
+					h264EncoderTiming.processOutputAttempts;
+				sendTelemetry.h264EncoderAsyncEventCount =
+					h264EncoderTiming.asyncEventCount;
+				sendTelemetry.h264EncoderHardware =
+					h264EncoderTiming.hardware;
+				sendTelemetry.h264EncoderAsync =
+					h264EncoderTiming.async;
+				sendTelemetry.h264EncoderNeedInputSignaled =
+					h264EncoderTiming.needInputSignaled;
+				sendTelemetry.h264EncoderOutputProduced =
+					h264EncoderTiming.outputProduced;
+				sendTelemetry.h264EncoderOutputProducedBeforeInput =
+					h264EncoderTiming.outputProducedBeforeInput;
+				sendTelemetry.h264SubmittedNewInput =
+					h264SubmittedNewInput;
+				sendTelemetry.h264AsyncSubmittedWithoutOutput =
+					h264AsyncSubmittedWithoutOutput;
+				sendTelemetry.h264AsyncPendingNoOutput = false;
+				sendTelemetry.h264AsyncCadenceHoldActive =
+					h264AsyncCadenceHoldActive;
+				sendTelemetry.h264AsyncPendingNoOutputStreak =
+					h264AsyncPendingNoOutputStreak;
+				sendTelemetry.h264AsyncCadenceScale =
+					h264AsyncCadenceScale;
+				sendTelemetry.h264AsyncCadenceHoldRemainingMs =
+					h264AsyncCadenceHoldRemainingMs;
+				sendTelemetry.h264AsyncOutputPollBackoffMs = 0.0;
+				sendTelemetry.h264InputCadenceFps =
+					static_cast<uint32_t>(inputCadenceFps);
+				sendTelemetry.h264NeedInputSubmitWake =
+					h264NeedInputSubmitWake;
+				sendTelemetry.h264NeedInputSubmitLeadMs =
+					h264NeedInputSubmitLeadMs;
 				sendTelemetry.encodedCameraFrameId =
 					encodedCameraFrameId;
 				sendTelemetry.encodedCameraSourceTimestamp100ns =
@@ -3711,6 +5041,16 @@ int AppMain::Run() {
 					encodedCameraCaptureCompletedTimeUs;
 				sendTelemetry.encodedCameraFrameAgeMs =
 					encodedCameraFrameAgeMs;
+				sendTelemetry.encodedCameraReadSampleMs =
+					encodedCameraReadSampleMs;
+				sendTelemetry.encodedCameraReadSampleEndToCaptureMs =
+					encodedCameraReadSampleEndToCaptureMs;
+				sendTelemetry.encodedCameraCaptureToPublishMs =
+					encodedCameraCaptureToPublishMs;
+				sendTelemetry.encodedCameraPublishToAcquireMs =
+					encodedCameraPublishToAcquireMs;
+				sendTelemetry.encodedCameraAcquireToEncoderInputMs =
+					encodedCameraAcquireToEncoderInputMs;
 				sendTelemetry.jpegEncodeMs = jpegEncodeMs;
 				sendTelemetry.packetizeMs = packetizeMs;
 			}
@@ -3735,16 +5075,19 @@ int AppMain::Run() {
 				);
 			}
 
-			networkManager->SendRNVPFragmented(
-				encodedPayload,
-				frameId,
-				sendCodec,
-				1,
-				sendAsKeyFrame,
-				protection
-			);
+			if (!h264AuDroppedBeforeSend) {
+				networkManager->SendRNVPFragmented(
+					encodedPayload,
+					rnvpSendFrameId,
+					sendCodec,
+					1,
+					sendAsKeyFrame,
+					protection
+				);
+			}
 
-			if (sendCodec == net::CodecType::H264 && sendAsKeyFrame) {
+			if (sendCodec == net::CodecType::H264 &&
+				(sendAsKeyFrame || h264AuDroppedBeforeSend)) {
 				const double frameBudgetBytes =
 					static_cast<double>(pacingTargetBitrateKbps) *
 					1000.0 /
@@ -3768,12 +5111,17 @@ int AppMain::Run() {
 				}
 			}
 
-			frameId++;
+			const bool advancedInputFrame =
+				sendCodec != net::CodecType::H264 ||
+				h264SubmittedNewInput;
+			if (advancedInputFrame) {
+				frameId++;
+			}
 
 			if ((frameId % 60) == 0) {
 				std::ostringstream oss;
 				oss << "[AppMain] RNVP video frame sent. frameId="
-					<< frameId
+					<< rnvpSendFrameId
 					<< " targetFps="
 					<< targetFps
 					<< " targetBitrateKbps="
@@ -3809,10 +5157,12 @@ int AppMain::Run() {
 				OutputDebugStringA("\n");
 			}
 
-			nextSendTime +=
-				std::chrono::duration_cast<
-					std::chrono::steady_clock::duration
-				>(sendInterval);
+			if (advancedInputFrame) {
+				nextSendTime +=
+					std::chrono::duration_cast<
+						std::chrono::steady_clock::duration
+					>(sendInterval);
+			}
 
 			const auto scheduleNow = std::chrono::steady_clock::now();
 			if (nextSendTime < scheduleNow - std::chrono::milliseconds(100)) {
@@ -3885,6 +5235,10 @@ int AppMain::Run() {
 				networkExperimentRunner.Update(
 					networkExperimentEnabled,
 					networkExperimentDeltaSec);
+
+			if (networkExperimentRunner.IsActive()) {
+				startNetworkExperimentReporter();
+			}
 
 			if (networkExperimentRunner.IsActive() && networkSendEnabled) {
 				if (networkManager) {
@@ -4072,6 +5426,10 @@ int AppMain::Run() {
 					networkManager->GetAckKeyFrameRequestCount();
 				adaptiveInput.receiveFreshnessDroppedFrames =
 					videoReceiverStats.freshnessDroppedFrames;
+				adaptiveInput.receiveDecodeQueueDroppedFrames =
+					videoReceiverStats.decodeQueueDroppedFrames;
+				adaptiveInput.receiveDecodeRenderOverwriteFrames =
+					videoReceiverStats.decodeRenderOverwriteFrames;
 				adaptiveInput.receiveDecodeInputFrameAgeMs =
 					videoReceiverStats.decodeInputFrameAgeMs;
 				adaptiveInput.receiveLatestDecodedFrameAgeMs =

@@ -10,6 +10,15 @@
 
 namespace net {
 
+	enum class DuplicatePacketKind {
+		Original,
+		Retransmit,
+		LateOriginalAfterCompleted,
+		LateRetransmitAfterCompleted,
+		LateAfterExpired,
+		LateAfterRejected
+	};
+
 	struct NetworkStatsSnapshot {
 		// ============================================================
 		// Packet / Byte
@@ -19,8 +28,17 @@ namespace net {
 
 		// RNVP sequence欠番から推定した欠損パケット数
 		uint64_t missingPackets = 0;
+		uint64_t sequenceGapPackets = 0;
+		uint64_t sequenceGapRecoveredPackets = 0;
 
 		uint64_t duplicatePackets = 0;
+		uint64_t duplicateOriginalPackets = 0;
+		uint64_t duplicateRetransmitPackets = 0;
+		uint64_t duplicateLateAfterCompletedPackets = 0;
+		uint64_t duplicateLateAfterCompletedOriginalPackets = 0;
+		uint64_t duplicateLateAfterCompletedRetransmitPackets = 0;
+		uint64_t duplicateLateAfterExpiredPackets = 0;
+		uint64_t duplicateLateAfterRejectedPackets = 0;
 		uint64_t reorderedPackets = 0;
 
 		// ============================================================
@@ -38,6 +56,17 @@ namespace net {
 		double lastOutputQueueDropNewestAgeMs = 0.0;
 		double maxOutputQueueDropOldestAgeMs = 0.0;
 		std::string lastOutputQueueDropReason;
+		uint64_t completedQueuePushes = 0;
+		uint64_t completedQueuePops = 0;
+		uint64_t completedQueueEmptyPolls = 0;
+		uint32_t completedQueueSize = 0;
+		uint32_t maxCompletedQueueSize = 0;
+		double completedQueueLastPopAgeMs = 0.0;
+		double completedQueueMaxPopAgeMs = 0.0;
+		double completedQueueLastPushIntervalMs = 0.0;
+		double completedQueueMaxPushIntervalMs = 0.0;
+		double lastOutputQueueDropPopAgeMs = 0.0;
+		double lastOutputQueueDropPushIntervalMs = 0.0;
 		uint64_t decodedFrames = 0;
 		uint64_t displayedFrames = 0;
 		uint64_t frameRecoveryOutcomeEvents = 0;
@@ -74,6 +103,12 @@ namespace net {
 		uint64_t retransmitUsefulChunks = 0;
 		uint64_t retransmitDuplicatePackets = 0;
 		uint64_t retransmitLateAfterCompletedPackets = 0;
+		uint64_t retransmitLateAfterCompletedLargePackets = 0;
+		uint64_t retransmitLateAfterCompletedSentBeforeCompletePackets = 0;
+		uint64_t retransmitLateAfterCompletedSentAfterCompletePackets = 0;
+		double retransmitLateAfterCompletedAvgSendToCompleteMs = 0.0;
+		double retransmitLateAfterCompletedAvgDelayMs = 0.0;
+		double retransmitLateAfterCompletedMaxDelayMs = 0.0;
 		uint64_t retransmitLateAfterExpiredPackets = 0;
 		uint64_t retransmitLateAfterRejectedPackets = 0;
 		uint64_t retransmitClassifiedPackets = 0;
@@ -143,8 +178,24 @@ namespace net {
 		uint64_t repairCanceledByCompleteAckPackets = 0;
 		uint64_t repairSkippedByTtlPackets = 0;
 		uint64_t repairQueuedButCanceledPackets = 0;
+		uint64_t repairSentAfterCompleteAckPackets = 0;
+		uint64_t repairSentAfterCompleteAckLargePackets = 0;
 		uint64_t repairSuppressedByFecLikelyFrames = 0;
 		uint64_t repairSuppressedByFecLikelyPackets = 0;
+		uint64_t repairSuppressedByFecLikelyLargeFrames = 0;
+		uint64_t repairSuppressedByFecLikelyLargePackets = 0;
+		uint64_t repairBudgetSuppressedFrames = 0;
+		uint64_t repairBudgetSuppressedPackets = 0;
+		uint64_t repairBudgetSuppressedLargeFrames = 0;
+		uint64_t repairBudgetSuppressedLargePackets = 0;
+		uint64_t repairRaceGuardSuppressedFrames = 0;
+		uint64_t repairRaceGuardSuppressedPackets = 0;
+		uint64_t repairRaceGuardSuppressedLargePackets = 0;
+		std::string repairBudgetProfile;
+		uint64_t repairBudgetProfileSwitches = 0;
+		double repairBudgetSmoothedMissingRate = 0.0;
+		double repairBudgetSmoothedPacingQueueDelayMs = 0.0;
+		double repairBudgetSmoothedDeliveryMs = 0.0;
 		uint64_t repairFecLikelySuppressedCompletedFrames = 0;
 		uint64_t repairFecLikelySuppressedCompletedPackets = 0;
 		uint64_t repairFecLikelySuppressedExpiredFrames = 0;
@@ -183,6 +234,8 @@ namespace net {
 		uint64_t transportFeedbackPacketStatuses = 0;
 		uint64_t transportFeedbackReceivedPackets = 0;
 		uint64_t transportFeedbackMissingPackets = 0;
+		uint64_t transportFeedbackSequenceGapPackets = 0;
+		uint64_t transportFeedbackSequenceGapRecoveredPackets = 0;
 		double transportFeedbackLossRate = 0.0;
 		double transportFeedbackArrivalJitterMs = 0.0;
 		double transportFeedbackQueueDelayTrendMs = 0.0;
@@ -251,6 +304,10 @@ namespace net {
 		uint64_t sendActualRawFrameBytes = 0;
 		uint64_t sendActualEncodedFrameBytes = 0;
 		double captureFps = 0.0;
+		std::string cameraCaptureSubtype;
+		uint32_t cameraCaptureWidth = 0;
+		uint32_t cameraCaptureHeight = 0;
+		double cameraCaptureFormatFps = 0.0;
 		double encodeMs = 0.0;
 		double sendResizeMs = 0.0;
 		double sendNv12PrepareMs = 0.0;
@@ -282,29 +339,87 @@ namespace net {
 		bool h264AuIsIdr = false;
 		bool h264AuIsDecoderSync = false;
 		std::string h264AuProtectionLevel;
+		bool h264AuDroppedBeforeSend = false;
+		std::string h264AuDropReason;
+		uint64_t h264AuDroppedBytes = 0;
+		uint32_t h264AuDroppedChunks = 0;
+		double h264AuPacingQueueDelayMs = 0.0;
+		double h264AuEstimatedSendMs = 0.0;
+		bool h264InputGatedByPacing = false;
+		std::string h264InputGateReason;
+		double h264InputGateQueueDelayMs = 0.0;
+		double h264InputGateVideoCreditBytes = 0.0;
+		double h264InputGateFrameBudgetBytes = 0.0;
+		double h264InputGateDurationMs = 0.0;
+		uint32_t h264InputGateConsecutiveFrames = 0;
+		uint64_t h264InputGateSkippedInputFrames = 0;
+		bool h264InputGateForcedOpen = false;
+		std::string h264InputGateReleaseReason;
 		uint64_t fecProtectedH264KeyFrames = 0;
 		uint64_t fecProtectedH264LargeFrames = 0;
 		uint32_t h264EncoderDelayFrames = 0;
 		double h264EncoderDelayMs = 0.0;
 		uint32_t h264EncoderPendingFrames = 0;
 		uint32_t h264EncodedInputFrameId = 0;
+		double h264EncoderCallMs = 0.0;
+		double h264EncoderSampleCreateMs = 0.0;
+		double h264EncoderProcessInputMs = 0.0;
+		double h264EncoderPreInputPollMs = 0.0;
+		double h264EncoderPostInputWaitMs = 0.0;
+		double h264EncoderProcessOutputMs = 0.0;
+		double h264EncoderOutputCopyMs = 0.0;
+		uint32_t h264EncoderProcessOutputAttempts = 0;
+		uint32_t h264EncoderAsyncEventCount = 0;
+		bool h264EncoderHardware = false;
+		bool h264EncoderAsync = false;
+		bool h264EncoderNeedInputSignaled = false;
+		bool h264EncoderOutputProduced = false;
+		bool h264EncoderOutputProducedBeforeInput = false;
+		bool h264SubmittedNewInput = false;
+		bool h264AsyncSubmittedWithoutOutput = false;
+		bool h264AsyncPendingNoOutput = false;
+		bool h264AsyncCadenceHoldActive = false;
+		uint32_t h264AsyncPendingNoOutputStreak = 0;
+		double h264AsyncCadenceScale = 1.0;
+		double h264AsyncCadenceHoldRemainingMs = 0.0;
+		double h264AsyncOutputPollBackoffMs = 0.0;
+		uint32_t h264InputCadenceFps = 0;
+		bool h264NeedInputSubmitWake = false;
+		double h264NeedInputSubmitLeadMs = 0.0;
 		uint64_t encodedCameraFrameId = 0;
 		int64_t encodedCameraSourceTimestamp100ns = 0;
 		uint64_t encodedCameraCaptureCompletedTimeUs = 0;
 		double encodedCameraFrameAgeMs = 0.0;
+		double encodedCameraReadSampleMs = 0.0;
+		double encodedCameraReadSampleEndToCaptureMs = 0.0;
+		double encodedCameraCaptureToPublishMs = 0.0;
+		double encodedCameraPublishToAcquireMs = 0.0;
+		double encodedCameraAcquireToEncoderInputMs = 0.0;
 		double sendJpegEncodeMs = 0.0;
 		double sendPacketizeMs = 0.0;
 		double sendFrameIntervalMs = 0.0;
 		bool cameraFrameReady = false;
 		uint64_t cameraFrameId = 0;
 		int64_t cameraSourceTimestamp100ns = 0;
+		uint64_t cameraReadSampleStartTimeUs = 0;
+		uint64_t cameraReadSampleEndTimeUs = 0;
 		uint64_t cameraCaptureCompletedTimeUs = 0;
+		uint64_t cameraFramePublishedTimeUs = 0;
+		uint64_t cameraSenderAcquireTimeUs = 0;
 		double cameraReadSampleMs = 0.0;
+		double cameraReadSampleEndToCaptureMs = 0.0;
+		double cameraCaptureToPublishMs = 0.0;
+		double cameraPublishToAcquireMs = 0.0;
+		double cameraAcquireToSendMs = 0.0;
 		double cameraFrameAgeMs = 0.0;
 		bool cameraFrameCacheUsed = false;
 		double receiveJpegDecodeMs = 0.0;
 		double receiveDecodeWorkerFps = 0.0;
 		uint64_t receiveDecodeWorkerFrames = 0;
+		uint64_t receiveDecodePopSuccesses = 0;
+		uint64_t receiveDecodePopEmptyPolls = 0;
+		double receiveDecodeLoopLastPopGapMs = 0.0;
+		double receiveDecodeLoopMaxPopGapMs = 0.0;
 		uint64_t receiveDecodeOverwrittenFrames = 0;
 		uint64_t receiveDecodeQueueDroppedFrames = 0;
 		uint64_t receiveDecodeRenderOverwriteFrames = 0;
@@ -322,10 +437,18 @@ namespace net {
 		uint64_t receiveH264AuForbiddenZeroBit = 0;
 		std::string receiveH264AuLastInvalidReason;
 		double receiveDecodeInputFrameAgeMs = 0.0;
+		double receiveDecodeInputCameraFrameAgeMs = 0.0;
+		double receiveDecodeInputEncoderOutputAgeMs = 0.0;
 		double receiveLatestDecodedFrameAgeMs = 0.0;
+		double receiveLatestDecodedCameraFrameAgeMs = 0.0;
+		double receiveLatestDecodedEncoderOutputAgeMs = 0.0;
 		double receiveFreshnessDropThresholdMs = 0.0;
 		std::string receiveDecodeLastDropReason;
 		double receiveUploadBufferWaitMs = 0.0;
+		uint32_t receiveDisplayFrameId = 0;
+		double receiveDisplayCameraFrameAgeMs = 0.0;
+		double receiveDisplayEncoderOutputAgeMs = 0.0;
+		double receiveDisplayDecodedFrameAgeMs = 0.0;
 		double textureUploadMs = 0.0;
 		double presentGpuWaitMs = 0.0;
 		double renderFramePacingWaitMs = 0.0;
@@ -440,12 +563,21 @@ namespace net {
 		void OnDroppedFrame();
 		void OnDeadlineDroppedFrames(uint32_t droppedFrames);
 		void OnOutputQueueDroppedFrames(uint32_t droppedFrames);
+		void OnCompletedQueuePush(
+			uint32_t queueSizeAfterPush,
+			double popAgeMs,
+			double pushIntervalMs
+		);
+		void OnCompletedQueuePop(uint32_t queueSizeAfterPop);
+		void OnCompletedQueueEmptyPoll();
 		void OnOutputQueueDropEvent(
 			uint32_t droppedFrames,
 			uint32_t queueSizeBeforeDrop,
 			double oldestDroppedAgeMs,
 			double newestFrameAgeMs,
-			const char* reason
+			const char* reason,
+			double completedQueuePopAgeMs = 0.0,
+			double completedQueuePushIntervalMs = 0.0
 		);
 		void OnDeadlineNackSent(
 			uint32_t missingChunkCount,
@@ -493,6 +625,12 @@ namespace net {
 			uint64_t firstReceiveTimeUs,
 			uint64_t eventTimeUs
 		);
+		void OnRetransmitLateAfterCompletedTiming(
+			bool largeFrame,
+			uint64_t packetSendTimeUs,
+			uint64_t completedTimeUs,
+			uint64_t receiveTimeUs
+		);
 		void OnDynamicNackDeadlineUpdated(
 			uint64_t deadlineUs,
 			double usefulnessRatio,
@@ -512,7 +650,9 @@ namespace net {
 		);
 
 		// 重複packetを観測したときに呼ぶ
-		void OnDuplicatePacket();
+		void OnDuplicatePacket(
+			DuplicatePacketKind kind = DuplicatePacketKind::Original
+		);
 
 		// sequenceの逆転など、順序入れ替えを観測したときに呼ぶ
 		void OnReorderedPacket();
@@ -525,6 +665,7 @@ namespace net {
 
 		// RNVP sequence の欠番を検出したときに呼ぶ
 		void OnMissingPackets(uint64_t missingCount);
+		void OnMissingPacketsRecovered(uint64_t recoveredCount);
 
 		// JitterBufferの状態更新
 		void OnJitterBufferUpdated(
@@ -577,6 +718,10 @@ namespace net {
 
 		// latency average
 		double latencySumMs_ = 0.0;
+		double retransmitLateAfterCompletedDelaySumMs_ = 0.0;
+		uint64_t retransmitLateAfterCompletedDelaySamples_ = 0;
+		double retransmitLateAfterCompletedSendToCompleteSumMs_ = 0.0;
+		uint64_t retransmitLateAfterCompletedSendToCompleteSamples_ = 0;
 
 		// jitter
 		bool hasPreviousFrameArrival_ = false;

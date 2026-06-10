@@ -811,6 +811,16 @@ namespace {
 
             ImGui::Text("Duplicate Packets: %llu",
                 static_cast<unsigned long long>(stats.duplicatePackets));
+            ImGui::Text("  Original / Retransmit: %llu / %llu",
+                static_cast<unsigned long long>(stats.duplicateOriginalPackets),
+                static_cast<unsigned long long>(stats.duplicateRetransmitPackets));
+            ImGui::Text("  Late Completed / Expired / Rejected: %llu / %llu / %llu",
+                static_cast<unsigned long long>(stats.duplicateLateAfterCompletedPackets),
+                static_cast<unsigned long long>(stats.duplicateLateAfterExpiredPackets),
+                static_cast<unsigned long long>(stats.duplicateLateAfterRejectedPackets));
+            ImGui::Text("    Late Completed Original / Retransmit: %llu / %llu",
+                static_cast<unsigned long long>(stats.duplicateLateAfterCompletedOriginalPackets),
+                static_cast<unsigned long long>(stats.duplicateLateAfterCompletedRetransmitPackets));
 
             ImGui::Text("Reordered Packets: %llu",
                 static_cast<unsigned long long>(stats.reorderedPackets));
@@ -1050,6 +1060,40 @@ namespace {
                     : stats.receiveDecodeLastDropReason.c_str());
             ImGui::Text("Upload Buffer Wait: %.2f ms",
                 stats.receiveUploadBufferWaitMs);
+            ImGui::Text("Display Frame ID: %u",
+                stats.receiveDisplayFrameId);
+            ImGui::Text("Display Camera Age: %.2f ms",
+                stats.receiveDisplayCameraFrameAgeMs);
+            ImGui::Text("Display Encoder Age: %.2f ms",
+                stats.receiveDisplayEncoderOutputAgeMs);
+            ImGui::Text("Display Decoded Age: %.2f ms",
+                stats.receiveDisplayDecodedFrameAgeMs);
+            ImGui::Text("Send Camera ID/Age: %llu / %.2f ms",
+                static_cast<unsigned long long>(stats.cameraFrameId),
+                stats.cameraFrameAgeMs);
+            ImGui::Text("Camera Format: %s %ux%u @ %.2ffps",
+                stats.cameraCaptureSubtype.empty()
+                    ? "unknown"
+                    : stats.cameraCaptureSubtype.c_str(),
+                stats.cameraCaptureWidth,
+                stats.cameraCaptureHeight,
+                stats.cameraCaptureFormatFps);
+            ImGui::Text("Encoded Camera ID/Age: %llu / %.2f ms",
+                static_cast<unsigned long long>(stats.encodedCameraFrameId),
+                stats.encodedCameraFrameAgeMs);
+            ImGui::Text("Encoded Camera Read/Post/Publish/Acquire/Input: %.2f / %.2f / %.2f / %.2f / %.2f ms",
+                stats.encodedCameraReadSampleMs,
+                stats.encodedCameraReadSampleEndToCaptureMs,
+                stats.encodedCameraCaptureToPublishMs,
+                stats.encodedCameraPublishToAcquireMs,
+                stats.encodedCameraAcquireToEncoderInputMs);
+            ImGui::Text("Camera Read/Post/Publish/Acquire: %.2f / %.2f / %.2f / %.2f ms",
+                stats.cameraReadSampleMs,
+                stats.cameraReadSampleEndToCaptureMs,
+                stats.cameraCaptureToPublishMs,
+                stats.cameraPublishToAcquireMs);
+            ImGui::Text("Camera Acquire->Send: %.2f ms",
+                stats.cameraAcquireToSendMs);
             ImGui::Text("Texture Upload: %.2f ms", stats.textureUploadMs);
             ImGui::Text("Render Pacing Wait: %.2f ms",
                 stats.renderFramePacingWaitMs);
@@ -1453,6 +1497,102 @@ void DrawReceivedVideoBackgroundOverlay(
         bottomRight);
 }
 
+void DrawReceivedVideoLatencyOverlay(
+    const AppRuntimeState& runtimeState,
+    const net::NetworkStatsSnapshot* stats) {
+    if (!runtimeState.showReceivedVideoInGame || stats == nullptr) {
+        return;
+    }
+
+    const float width = (std::max)(32.0f, runtimeState.transformSprite.scale.x);
+    const float height = (std::max)(18.0f, runtimeState.transformSprite.scale.y);
+    const ImVec2 center(
+        runtimeState.transformSprite.translate.x,
+        runtimeState.transformSprite.translate.y);
+    const ImVec2 half(width * 0.5f, height * 0.5f);
+    const ImVec2 videoTopLeft(center.x - half.x, center.y - half.y);
+
+    char line0[96]{};
+    char line1[96]{};
+    char line2[96]{};
+    char line3[112]{};
+    char line4[112]{};
+    std::snprintf(
+        line0,
+        sizeof(line0),
+        "RX frame %u",
+        stats->receiveDisplayFrameId);
+    std::snprintf(
+        line1,
+        sizeof(line1),
+        "cam age %.1f ms",
+        stats->receiveDisplayCameraFrameAgeMs);
+    std::snprintf(
+        line2,
+        sizeof(line2),
+        "enc %.1f ms  dec %.1f ms",
+        stats->receiveDisplayEncoderOutputAgeMs,
+        stats->receiveDisplayDecodedFrameAgeMs);
+    std::snprintf(
+        line3,
+        sizeof(line3),
+        "send cam %llu age %.1f ms",
+        static_cast<unsigned long long>(stats->cameraFrameId),
+        stats->cameraFrameAgeMs);
+    std::snprintf(
+        line4,
+        sizeof(line4),
+        "out cam %llu age %.1f  h264 %.1f ms",
+        static_cast<unsigned long long>(stats->encodedCameraFrameId),
+        stats->encodedCameraFrameAgeMs,
+        stats->h264EncoderDelayMs);
+
+    const ImVec2 padding(8.0f, 6.0f);
+    const ImVec2 text0 = ImGui::CalcTextSize(line0);
+    const ImVec2 text1 = ImGui::CalcTextSize(line1);
+    const ImVec2 text2 = ImGui::CalcTextSize(line2);
+    const ImVec2 text3 = ImGui::CalcTextSize(line3);
+    const ImVec2 text4 = ImGui::CalcTextSize(line4);
+    const float textWidth =
+        (std::max)(
+            (std::max)(text0.x, text1.x),
+            (std::max)(text2.x, (std::max)(text3.x, text4.x)));
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const ImVec2 boxTopLeft(videoTopLeft.x + 10.0f, videoTopLeft.y + 10.0f);
+    const ImVec2 boxBottomRight(
+        boxTopLeft.x + textWidth + padding.x * 2.0f,
+        boxTopLeft.y + lineHeight * 5.0f + padding.y * 2.0f + 4.0f);
+
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    drawList->AddRectFilled(
+        boxTopLeft,
+        boxBottomRight,
+        IM_COL32(0, 0, 0, 180),
+        4.0f);
+    drawList->AddRect(
+        boxTopLeft,
+        boxBottomRight,
+        IM_COL32(120, 210, 255, 180),
+        4.0f);
+
+    const ImU32 labelColor =
+        stats->receiveDisplayCameraFrameAgeMs >= 100.0
+            ? IM_COL32(255, 110, 90, 255)
+            : stats->receiveDisplayCameraFrameAgeMs >= 50.0
+            ? IM_COL32(255, 220, 120, 255)
+            : IM_COL32(220, 245, 255, 255);
+    ImVec2 textPos(boxTopLeft.x + padding.x, boxTopLeft.y + padding.y);
+    drawList->AddText(textPos, IM_COL32(230, 240, 255, 255), line0);
+    textPos.y += lineHeight;
+    drawList->AddText(textPos, labelColor, line1);
+    textPos.y += lineHeight;
+    drawList->AddText(textPos, IM_COL32(210, 220, 230, 255), line2);
+    textPos.y += lineHeight;
+    drawList->AddText(textPos, IM_COL32(210, 235, 210, 255), line3);
+    textPos.y += lineHeight;
+    drawList->AddText(textPos, IM_COL32(210, 235, 210, 255), line4);
+}
+
 void ApplyNetworkExperimentPreset(AppRuntimeState& runtimeState, EffectRuntime& effectRuntime) {
     if (runtimeState.networkExperimentMode) {
         runtimeState.enableVfxRenderPasses = false;
@@ -1629,6 +1769,7 @@ void AppImGuiLayer::BuildUi(
         ImGuiWindowFlags_NoCollapse;
 
     DrawReceivedVideoBackgroundOverlay(runtimeState, receivedVideoPreview);
+    DrawReceivedVideoLatencyOverlay(runtimeState, networkStats);
 
     if (!runtimeState.showImGui) {
         return;

@@ -31,6 +31,9 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr double kDefaultFreshnessDropThresholdMs = 120.0;
+constexpr size_t kDecodedFrameQueueCapacity = 3;
+constexpr size_t kPredecodeCoalesceQueueThreshold = 2;
+constexpr uint32_t kCompletedFrameWaitTimeoutMs = 4;
 
 void SetCodecApiU32(IMFTransform* transform, const GUID& key, ULONG value) {
     if (!transform) {
@@ -205,7 +208,8 @@ H264AccessUnitValidation ValidateH264AccessUnit(
     H264AccessUnitValidation result{};
 
     if (auHeader.headerBytes != kH264AccessUnitPayloadHeaderSize &&
-        auHeader.headerBytes != kH264AccessUnitPayloadHeaderV2Size) {
+        auHeader.headerBytes != kH264AccessUnitPayloadHeaderV2Size &&
+        auHeader.headerBytes != kH264AccessUnitPayloadHeaderV3Size) {
         result.reason = "invalid-header-size";
         return result;
     }
@@ -227,7 +231,8 @@ H264AccessUnitValidation ValidateH264AccessUnit(
         frame.data.data() + auHeader.headerBytes;
     const size_t accessUnitBytes = auHeader.accessUnitBytes;
 
-    if (auHeader.magic == kH264AccessUnitPayloadMagicV2) {
+    if (auHeader.magic == kH264AccessUnitPayloadMagicV2 ||
+        auHeader.magic == kH264AccessUnitPayloadMagicV3) {
         const uint32_t calculatedCrc =
             ComputeCrc32(accessUnit, accessUnitBytes);
         if (calculatedCrc != auHeader.accessUnitCrc32) {
@@ -1037,15 +1042,16 @@ bool NetworkVideoReceiver::Start(
         std::lock_guard<std::mutex> lock(mutex_);
         receiver_ = receiver;
         enabledProvider_ = std::move(enabledProvider);
-        latestDecodedFrame_ = {};
-        hasLatestDecodedFrame_ = false;
+        decodedFrameQueue_.clear();
         stats_ = {};
         stats_.freshnessDropThresholdMs = FreshnessDropThresholdMs();
         hasJpegDecodeMs_ = false;
         hasInputFrameAgeMs_ = false;
-        latestDecodedFrameTimeUs_ = 0;
+        hasInputCameraFrameAgeMs_ = false;
+        hasInputEncoderOutputAgeMs_ = false;
         lastFpsUpdateTimeUs_ = NowMicroseconds();
         decodedFramesAtLastFpsUpdate_ = 0;
+        lastDecodePopTimeUs_ = 0;
     }
 
     running_.store(true);
@@ -1062,9 +1068,7 @@ void NetworkVideoReceiver::Stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     receiver_ = nullptr;
     enabledProvider_ = {};
-    latestDecodedFrame_ = {};
-    hasLatestDecodedFrame_ = false;
-    latestDecodedFrameTimeUs_ = 0;
+    decodedFrameQueue_.clear();
 }
 
 bool NetworkVideoReceiver::IsRunning() const {
@@ -1073,34 +1077,47 @@ bool NetworkVideoReceiver::IsRunning() const {
 
 bool NetworkVideoReceiver::TryGetLatestFrame(DecodedVideoFrame& outFrame) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!hasLatestDecodedFrame_) {
-        return false;
-    }
-
-    if (IsStaleFrame(FrameFreshnessAgeMs(
-            NowMicroseconds(),
-            latestDecodedFrame_))) {
-        latestDecodedFrame_ = {};
-        hasLatestDecodedFrame_ = false;
-        latestDecodedFrameTimeUs_ = 0;
+    const uint64_t nowUs = NowMicroseconds();
+    while (!decodedFrameQueue_.empty() &&
+        IsStaleFrame(FrameFreshnessAgeMs(
+            nowUs,
+            decodedFrameQueue_.front().frame))) {
+        decodedFrameQueue_.pop_front();
         stats_.freshnessDroppedFrames++;
         RecordDropLocked("stale-before-upload", true);
+    }
+
+    if (decodedFrameQueue_.empty()) {
         return false;
     }
 
-    outFrame = std::move(latestDecodedFrame_);
-    latestDecodedFrame_ = {};
-    hasLatestDecodedFrame_ = false;
-    latestDecodedFrameTimeUs_ = 0;
+    outFrame = std::move(decodedFrameQueue_.front().frame);
+    decodedFrameQueue_.pop_front();
     return true;
 }
 
 NetworkVideoReceiverStats NetworkVideoReceiver::GetStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     NetworkVideoReceiverStats stats = stats_;
+    const bool hasQueuedFrame = !decodedFrameQueue_.empty();
+    const PendingDecodedFrame* latestQueuedFrame =
+        hasQueuedFrame ? &decodedFrameQueue_.back() : nullptr;
     stats.latestDecodedFrameAgeMs =
-        hasLatestDecodedFrame_
-        ? AgeMs(NowMicroseconds(), latestDecodedFrameTimeUs_)
+        latestQueuedFrame != nullptr
+        ? AgeMs(NowMicroseconds(), latestQueuedFrame->storedTimeUs)
+        : 0.0;
+    const uint64_t nowUs = NowMicroseconds();
+    stats.latestDecodedCameraFrameAgeMs =
+        latestQueuedFrame != nullptr &&
+        latestQueuedFrame->frame.cameraCaptureCompletedTimeUs != 0 &&
+        nowUs >= latestQueuedFrame->frame.cameraCaptureCompletedTimeUs
+        ? AgeMs(nowUs, latestQueuedFrame->frame.cameraCaptureCompletedTimeUs)
+        : 0.0;
+    stats.latestDecodedEncoderOutputAgeMs =
+        latestQueuedFrame != nullptr &&
+        latestQueuedFrame->frame.encoderOutputTimeUs != 0 &&
+        nowUs >= latestQueuedFrame->frame.encoderOutputTimeUs
+        ? AgeMs(nowUs, latestQueuedFrame->frame.encoderOutputTimeUs)
         : 0.0;
     stats.freshnessDropThresholdMs = FreshnessDropThresholdMs();
     return stats;
@@ -1123,23 +1140,40 @@ void NetworkVideoReceiver::DecodeLoop() {
         if (receiver == nullptr || !enabled) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (hasLatestDecodedFrame_) {
+                if (!decodedFrameQueue_.empty()) {
                     RecordDropLocked("receiver-disabled", true);
                 }
-                hasLatestDecodedFrame_ = false;
-                latestDecodedFrameTimeUs_ = 0;
+                decodedFrameQueue_.clear();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
         CompletedFrame frame{};
-        if (!receiver->TryPopFrame(frame)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!receiver->WaitPopFrame(frame, kCompletedFrameWaitTimeoutMs)) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                stats_.decodePopEmptyPolls++;
+            }
             continue;
         }
 
         const uint64_t inputCheckUs = NowMicroseconds();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stats_.decodePopSuccesses++;
+            if (lastDecodePopTimeUs_ != 0 &&
+                inputCheckUs >= lastDecodePopTimeUs_) {
+                const double popGapMs =
+                    static_cast<double>(
+                        inputCheckUs - lastDecodePopTimeUs_) / 1000.0;
+                stats_.decodeLoopLastPopGapMs = popGapMs;
+                stats_.decodeLoopMaxPopGapMs =
+                    (std::max)(stats_.decodeLoopMaxPopGapMs, popGapMs);
+            }
+            lastDecodePopTimeUs_ = inputCheckUs;
+        }
+
         const double inputFrameAgeMs =
             FrameFreshnessAgeMs(inputCheckUs, frame);
         UpdateInputFrameAge(inputFrameAgeMs);
@@ -1147,6 +1181,15 @@ void NetworkVideoReceiver::DecodeLoop() {
             std::lock_guard<std::mutex> lock(mutex_);
             stats_.freshnessDroppedFrames++;
             RecordDropLocked("stale-before-decode", true);
+            continue;
+        }
+
+        const char* predecodeCoalesceReason = nullptr;
+        if (ShouldPredecodeCoalesceFrame(
+                frame,
+                inputCheckUs,
+                &predecodeCoalesceReason)) {
+            RecordPredecodeCoalescedFrame(predecodeCoalesceReason);
             continue;
         }
 
@@ -1242,6 +1285,19 @@ void NetworkVideoReceiver::DecodeLoop() {
             const uint8_t* accessUnit =
                 frame.data.data() + auHeader.headerBytes;
             const size_t accessUnitBytes = auHeader.accessUnitBytes;
+            const uint64_t h264InputCheckUs = NowMicroseconds();
+            if (auHeader.cameraCaptureCompletedTimeUs != 0 &&
+                h264InputCheckUs >= auHeader.cameraCaptureCompletedTimeUs) {
+                UpdateInputCameraFrameAge(
+                    AgeMs(
+                        h264InputCheckUs,
+                        auHeader.cameraCaptureCompletedTimeUs));
+            }
+            if (auHeader.encoderOutputTimeUs != 0 &&
+                h264InputCheckUs >= auHeader.encoderOutputTimeUs) {
+                UpdateInputEncoderOutputAge(
+                    AgeMs(h264InputCheckUs, auHeader.encoderOutputTimeUs));
+            }
             const bool decoderSync = auValidation.decoderSync;
             const bool decoderWasSyncedBeforeInit = h264Decoder.HasSync();
 
@@ -1279,6 +1335,9 @@ void NetworkVideoReceiver::DecodeLoop() {
             decodedFrame.height = auHeader.height;
             decodedFrame.sendTimeUs = frame.sendTimeUs;
             decodedFrame.receiveTimeUs = frame.receiveTimeUs;
+            decodedFrame.cameraCaptureCompletedTimeUs =
+                auHeader.cameraCaptureCompletedTimeUs;
+            decodedFrame.encoderOutputTimeUs = auHeader.encoderOutputTimeUs;
             const auto decodeStart = std::chrono::steady_clock::now();
             const bool decoderWasSynced = h264Decoder.HasSync();
             const H264DecodeStatus decodeStatus = h264Decoder.Decode(
@@ -1365,6 +1424,9 @@ void NetworkVideoReceiver::DecodeLoop() {
                 "decoded");
 
             decodedFrame.decodedTimeUs = NowMicroseconds();
+            decodedFrame.cameraCaptureCompletedTimeUs =
+                auHeader.cameraCaptureCompletedTimeUs;
+            decodedFrame.encoderOutputTimeUs = auHeader.encoderOutputTimeUs;
 
             if (IsStaleFrame(FrameFreshnessAgeMs(
                     decodedFrame.decodedTimeUs,
@@ -1405,22 +1467,81 @@ void NetworkVideoReceiver::DecodeLoop() {
     }
 }
 
+bool NetworkVideoReceiver::ShouldPredecodeCoalesceFrame(
+    const CompletedFrame& frame,
+    uint64_t,
+    const char** outReason) const {
+    if (outReason) {
+        *outReason = nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (decodedFrameQueue_.size() < kPredecodeCoalesceQueueThreshold) {
+            return false;
+        }
+    }
+
+    if (frame.codecType == CodecType::MJPEG ||
+        frame.codecType == CodecType::Raw) {
+        if (outReason) {
+            *outReason = "predecode-coalesced-intra";
+        }
+        return true;
+    }
+
+    if (frame.codecType != CodecType::H264) {
+        return false;
+    }
+
+    H264AccessUnitPayloadHeader auHeader{};
+    if (!DecodeH264AccessUnitPayloadHeader(
+            frame.data.data(),
+            frame.data.size(),
+            auHeader)) {
+        return false;
+    }
+
+    const bool discardable =
+        (auHeader.flags & H264AccessUnitFlag_Discardable) != 0;
+    const bool decoderSync =
+        (auHeader.flags & H264AccessUnitFlag_DecoderSync) != 0;
+    if (!discardable || decoderSync) {
+        return false;
+    }
+
+    if (outReason) {
+        *outReason = "predecode-coalesced-h264-discardable";
+    }
+    return true;
+}
+
+void NetworkVideoReceiver::RecordPredecodeCoalescedFrame(const char* reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stats_.decodeQueueDroppedFrames++;
+    RecordDropLocked(
+        reason ? reason : "predecode-coalesced",
+        true);
+}
+
 void NetworkVideoReceiver::StoreDecodedFrame(
     DecodedVideoFrame frame,
     double jpegDecodeMs) {
     std::lock_guard<std::mutex> lock(mutex_);
     UpdateDecodeMs(jpegDecodeMs);
-    if (hasLatestDecodedFrame_) {
+    while (decodedFrameQueue_.size() >= kDecodedFrameQueueCapacity) {
+        decodedFrameQueue_.pop_front();
         stats_.overwrittenFrames++;
         stats_.decodeRenderOverwriteFrames++;
-        RecordDropLocked("render-overwrite", true);
+        RecordDropLocked("render-queue-overflow", true);
     }
 
-    latestDecodedFrame_ = std::move(frame);
-    hasLatestDecodedFrame_ = true;
-    latestDecodedFrameTimeUs_ = NowMicroseconds();
+    PendingDecodedFrame queuedFrame{};
+    queuedFrame.frame = std::move(frame);
+    queuedFrame.storedTimeUs = NowMicroseconds();
+    decodedFrameQueue_.push_back(std::move(queuedFrame));
     stats_.decodedFrames++;
-    UpdateDecodeWorkerFpsLocked(latestDecodedFrameTimeUs_);
+    UpdateDecodeWorkerFpsLocked(decodedFrameQueue_.back().storedTimeUs);
 }
 
 void NetworkVideoReceiver::UpdateDecodeMs(double sampleMs) {
@@ -1446,6 +1567,34 @@ void NetworkVideoReceiver::UpdateInputFrameAge(double sampleMs) {
 
     stats_.decodeInputFrameAgeMs =
         stats_.decodeInputFrameAgeMs * (1.0 - kAlpha) + sampleMs * kAlpha;
+}
+
+void NetworkVideoReceiver::UpdateInputCameraFrameAge(double sampleMs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    constexpr double kAlpha = 0.20;
+    if (!hasInputCameraFrameAgeMs_) {
+        stats_.decodeInputCameraFrameAgeMs = sampleMs;
+        hasInputCameraFrameAgeMs_ = true;
+        return;
+    }
+
+    stats_.decodeInputCameraFrameAgeMs =
+        stats_.decodeInputCameraFrameAgeMs * (1.0 - kAlpha) +
+        sampleMs * kAlpha;
+}
+
+void NetworkVideoReceiver::UpdateInputEncoderOutputAge(double sampleMs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    constexpr double kAlpha = 0.20;
+    if (!hasInputEncoderOutputAgeMs_) {
+        stats_.decodeInputEncoderOutputAgeMs = sampleMs;
+        hasInputEncoderOutputAgeMs_ = true;
+        return;
+    }
+
+    stats_.decodeInputEncoderOutputAgeMs =
+        stats_.decodeInputEncoderOutputAgeMs * (1.0 - kAlpha) +
+        sampleMs * kAlpha;
 }
 
 void NetworkVideoReceiver::UpdateDecodeWorkerFpsLocked(uint64_t nowUs) {

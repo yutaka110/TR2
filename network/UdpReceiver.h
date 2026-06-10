@@ -10,6 +10,7 @@
 #include "NetworkStats.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -29,6 +30,7 @@ namespace net {
         bool IsRunning() const;
 
         bool TryPopFrame(CompletedFrame& outFrame);
+        bool WaitPopFrame(CompletedFrame& outFrame, uint32_t timeoutMs);
 
         NetworkStatsSnapshot GetStats() const;
         void ResetStats();
@@ -51,6 +53,10 @@ namespace net {
         );
 
         void DrainReadyJitterBuffer(uint64_t nowUs);
+        bool TryPopFrameInternal(
+            CompletedFrame& outFrame,
+            bool recordEmptyPoll
+        );
 
         void UpdateJitterBufferAutoMode(uint64_t nowUs);
         bool IsFramePastReceiverSafetyDeadline(
@@ -148,7 +154,13 @@ namespace net {
         std::atomic<uint64_t> lastJitterAutoUpdateUs_{ 0 };
 
         std::mutex frameQueueMutex_;
+        std::condition_variable frameQueueCondition_;
         std::deque<CompletedFrame> completedFrames_;
+        uint64_t completedQueueLastPushUs_ = 0;
+        uint64_t completedQueueLastPopUs_ = 0;
+        uint64_t completedQueuePushes_ = 0;
+        uint64_t completedQueuePops_ = 0;
+        uint64_t completedQueueEmptyPolls_ = 0;
 
         // Receiver側からPongなどを返すときのRNVP sequence
         std::atomic<uint32_t> rnvpSequence_{ 1 };

@@ -366,12 +366,52 @@ namespace {
         );
     }
 
+    void NetworkStats::OnCompletedQueuePush(
+        uint32_t queueSizeAfterPush,
+        double popAgeMs,
+        double pushIntervalMs
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.completedQueuePushes++;
+        snapshot_.completedQueueSize = queueSizeAfterPush;
+        snapshot_.maxCompletedQueueSize =
+            (std::max)(snapshot_.maxCompletedQueueSize, queueSizeAfterPush);
+        snapshot_.completedQueueLastPopAgeMs = popAgeMs;
+        snapshot_.completedQueueMaxPopAgeMs =
+            (std::max)(snapshot_.completedQueueMaxPopAgeMs, popAgeMs);
+        snapshot_.completedQueueLastPushIntervalMs = pushIntervalMs;
+        snapshot_.completedQueueMaxPushIntervalMs =
+            (std::max)(
+                snapshot_.completedQueueMaxPushIntervalMs,
+                pushIntervalMs
+            );
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnCompletedQueuePop(uint32_t queueSizeAfterPop) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.completedQueuePops++;
+        snapshot_.completedQueueSize = queueSizeAfterPop;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnCompletedQueueEmptyPoll() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.completedQueueEmptyPolls++;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
     void NetworkStats::OnOutputQueueDropEvent(
         uint32_t droppedFrames,
         uint32_t queueSizeBeforeDrop,
         double oldestDroppedAgeMs,
         double newestFrameAgeMs,
-        const char* reason
+        const char* reason,
+        double completedQueuePopAgeMs,
+        double completedQueuePushIntervalMs
     ) {
         if (droppedFrames == 0) {
             return;
@@ -390,6 +430,9 @@ namespace {
                 snapshot_.maxOutputQueueDropOldestAgeMs,
                 oldestDroppedAgeMs
             );
+        snapshot_.lastOutputQueueDropPopAgeMs = completedQueuePopAgeMs;
+        snapshot_.lastOutputQueueDropPushIntervalMs =
+            completedQueuePushIntervalMs;
         snapshot_.lastOutputQueueDropReason =
             reason != nullptr ? reason : "unknown";
 
@@ -732,6 +775,59 @@ namespace {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
+    void NetworkStats::OnRetransmitLateAfterCompletedTiming(
+        bool largeFrame,
+        uint64_t packetSendTimeUs,
+        uint64_t completedTimeUs,
+        uint64_t receiveTimeUs
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (largeFrame) {
+            snapshot_.retransmitLateAfterCompletedLargePackets++;
+        }
+
+        if (packetSendTimeUs != 0 &&
+            completedTimeUs != 0) {
+            if (packetSendTimeUs <= completedTimeUs) {
+                snapshot_
+                    .retransmitLateAfterCompletedSentBeforeCompletePackets++;
+                const double sendToCompleteMs =
+                    static_cast<double>(completedTimeUs - packetSendTimeUs) /
+                    1000.0;
+                retransmitLateAfterCompletedSendToCompleteSumMs_ +=
+                    sendToCompleteMs;
+                retransmitLateAfterCompletedSendToCompleteSamples_++;
+                snapshot_.retransmitLateAfterCompletedAvgSendToCompleteMs =
+                    retransmitLateAfterCompletedSendToCompleteSumMs_ /
+                    static_cast<double>(
+                        retransmitLateAfterCompletedSendToCompleteSamples_);
+            }
+            else {
+                snapshot_
+                    .retransmitLateAfterCompletedSentAfterCompletePackets++;
+            }
+        }
+
+        if (completedTimeUs != 0 && receiveTimeUs >= completedTimeUs) {
+            const double delayMs =
+                static_cast<double>(receiveTimeUs - completedTimeUs) /
+                1000.0;
+            retransmitLateAfterCompletedDelaySumMs_ += delayMs;
+            retransmitLateAfterCompletedDelaySamples_++;
+            snapshot_.retransmitLateAfterCompletedAvgDelayMs =
+                retransmitLateAfterCompletedDelaySumMs_ /
+                static_cast<double>(
+                    retransmitLateAfterCompletedDelaySamples_);
+            snapshot_.retransmitLateAfterCompletedMaxDelayMs =
+                (std::max)(
+                    snapshot_.retransmitLateAfterCompletedMaxDelayMs,
+                    delayMs);
+        }
+
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
     void NetworkStats::OnNackSuppressed(
         const char* reason,
         uint32_t missingChunkCount
@@ -787,10 +883,32 @@ namespace {
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
-    void NetworkStats::OnDuplicatePacket() {
+    void NetworkStats::OnDuplicatePacket(DuplicatePacketKind kind) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         snapshot_.duplicatePackets++;
+        switch (kind) {
+        case DuplicatePacketKind::Original:
+            snapshot_.duplicateOriginalPackets++;
+            break;
+        case DuplicatePacketKind::Retransmit:
+            snapshot_.duplicateRetransmitPackets++;
+            break;
+        case DuplicatePacketKind::LateOriginalAfterCompleted:
+            snapshot_.duplicateLateAfterCompletedPackets++;
+            snapshot_.duplicateLateAfterCompletedOriginalPackets++;
+            break;
+        case DuplicatePacketKind::LateRetransmitAfterCompleted:
+            snapshot_.duplicateLateAfterCompletedPackets++;
+            snapshot_.duplicateLateAfterCompletedRetransmitPackets++;
+            break;
+        case DuplicatePacketKind::LateAfterExpired:
+            snapshot_.duplicateLateAfterExpiredPackets++;
+            break;
+        case DuplicatePacketKind::LateAfterRejected:
+            snapshot_.duplicateLateAfterRejectedPackets++;
+            break;
+        }
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
@@ -809,6 +927,7 @@ namespace {
         std::lock_guard<std::mutex> lock(mutex_);
 
         snapshot_.missingPackets += missingCount;
+        snapshot_.sequenceGapPackets += missingCount;
 
         const uint64_t totalObservedPackets =
             snapshot_.receivedPackets + snapshot_.missingPackets;
@@ -818,6 +937,34 @@ namespace {
                 static_cast<double>(snapshot_.missingPackets) /
                 static_cast<double>(totalObservedPackets);
         }
+
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnMissingPacketsRecovered(uint64_t recoveredCount) {
+        if (recoveredCount == 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const uint64_t applied =
+            (std::min)(snapshot_.missingPackets, recoveredCount);
+        if (applied == 0) {
+            return;
+        }
+
+        snapshot_.missingPackets -= applied;
+        snapshot_.sequenceGapRecoveredPackets += applied;
+
+        const uint64_t totalObservedPackets =
+            snapshot_.receivedPackets + snapshot_.missingPackets;
+
+        snapshot_.packetLossRate =
+            totalObservedPackets > 0
+            ? static_cast<double>(snapshot_.missingPackets) /
+                static_cast<double>(totalObservedPackets)
+            : 0.0;
 
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }

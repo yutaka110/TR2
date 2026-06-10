@@ -109,6 +109,7 @@ namespace net {
         bool RefreshNackAckInfo(
             const FrameAckInfo& candidate,
             uint64_t nowUs,
+            uint64_t minRecoverySlackUs,
             FrameAckInfo& outAckInfo
         );
 
@@ -314,10 +315,12 @@ namespace net {
         // RNVP sequence観測用
         bool hasLastRnvpSequence_ = false;
         uint32_t lastRnvpSequence_ = 0;
+        std::unordered_set<uint32_t> pendingMissingRnvpSequences_;
 
         static constexpr uint64_t kFrameTimeoutUs = 1000000; // 1秒
         static constexpr uint64_t kDefaultRecoveryExpireUs = 150000;
         static constexpr size_t kCompletedFrameHistoryLimit = 128;
+        static constexpr uint32_t kMaxTrackedRnvpSequenceGap = 65536;
     };
 
 } // namespace net
