@@ -31,9 +31,46 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr double kDefaultFreshnessDropThresholdMs = 120.0;
+constexpr double kLatencyFreshnessPressureMs = 80.0;
+constexpr double kLatencyFreshnessMaxExtraMs = 25.0;
+constexpr double kLatencyFreshnessJitterExtraMs = 5.0;
 constexpr size_t kDecodedFrameQueueCapacity = 3;
 constexpr size_t kPredecodeCoalesceQueueThreshold = 2;
 constexpr uint32_t kCompletedFrameWaitTimeoutMs = 4;
+constexpr double kArrivalGapRatioThreshold = 0.70;
+constexpr double kJitterSpikeThresholdMs = 20.0;
+
+const char* ClassifySteadyPopGap(
+    double popGapMs,
+    double completedQueuePushIntervalMs,
+    double completedQueuePopAgeMs,
+    uint32_t completedQueueSize,
+    uint32_t decodedQueueSize,
+    double receiverJitterMs
+) {
+    const double arrivalRatio =
+        popGapMs > 0.0 ? completedQueuePushIntervalMs / popGapMs : 0.0;
+
+    if (completedQueueSize == 0 &&
+        decodedQueueSize == 0 &&
+        arrivalRatio >= kArrivalGapRatioThreshold) {
+        return receiverJitterMs >= kJitterSpikeThresholdMs
+            ? "arrival-gap-jitter-spike"
+            : "arrival-gap";
+    }
+
+    if (completedQueueSize > 0 ||
+        (popGapMs > 0.0 &&
+            completedQueuePopAgeMs / popGapMs >= kArrivalGapRatioThreshold)) {
+        return "completed-queue-wait";
+    }
+
+    if (decodedQueueSize > 0) {
+        return "decoded-queue-backpressure";
+    }
+
+    return "scheduler-gap";
+}
 
 void SetCodecApiU32(IMFTransform* transform, const GUID& key, ULONG value) {
     if (!transform) {
@@ -1019,8 +1056,33 @@ bool HasDecodedPayload(const DecodedVideoFrame& frame) {
     return !frame.rgba.empty();
 }
 
+double EffectiveFreshnessDropThresholdMs(
+    const NetworkStatsSnapshot& stats) {
+    const double baseThresholdMs = FreshnessDropThresholdMs();
+    if (stats.currentLatencyMs < kLatencyFreshnessPressureMs) {
+        return baseThresholdMs;
+    }
+
+    double extraMs =
+        (std::min)(
+            kLatencyFreshnessMaxExtraMs,
+            (stats.currentLatencyMs - kLatencyFreshnessPressureMs) * 0.5);
+    if (stats.currentJitterMs >= 35.0) {
+        extraMs =
+            (std::min)(
+                kLatencyFreshnessMaxExtraMs,
+                extraMs + kLatencyFreshnessJitterExtraMs);
+    }
+
+    return baseThresholdMs + (std::max)(0.0, extraMs);
+}
+
+bool IsStaleFrame(double freshnessAgeMs, double thresholdMs) {
+    return freshnessAgeMs > thresholdMs;
+}
+
 bool IsStaleFrame(double freshnessAgeMs) {
-    return freshnessAgeMs > FreshnessDropThresholdMs();
+    return IsStaleFrame(freshnessAgeMs, FreshnessDropThresholdMs());
 }
 
 } // namespace
@@ -1044,6 +1106,7 @@ bool NetworkVideoReceiver::Start(
         enabledProvider_ = std::move(enabledProvider);
         decodedFrameQueue_.clear();
         stats_ = {};
+        stats_.startupActive = true;
         stats_.freshnessDropThresholdMs = FreshnessDropThresholdMs();
         hasJpegDecodeMs_ = false;
         hasInputFrameAgeMs_ = false;
@@ -1052,6 +1115,7 @@ bool NetworkVideoReceiver::Start(
         lastFpsUpdateTimeUs_ = NowMicroseconds();
         decodedFramesAtLastFpsUpdate_ = 0;
         lastDecodePopTimeUs_ = 0;
+        startupStartTimeUs_ = lastFpsUpdateTimeUs_;
     }
 
     running_.store(true);
@@ -1078,13 +1142,29 @@ bool NetworkVideoReceiver::IsRunning() const {
 bool NetworkVideoReceiver::TryGetLatestFrame(DecodedVideoFrame& outFrame) {
     std::lock_guard<std::mutex> lock(mutex_);
     const uint64_t nowUs = NowMicroseconds();
-    while (!decodedFrameQueue_.empty() &&
-        IsStaleFrame(FrameFreshnessAgeMs(
-            nowUs,
-            decodedFrameQueue_.front().frame))) {
+    const double freshnessDropThresholdMs =
+        stats_.freshnessDropThresholdMs > 0.0
+        ? stats_.freshnessDropThresholdMs
+        : FreshnessDropThresholdMs();
+    while (!decodedFrameQueue_.empty()) {
+        const DecodedVideoFrame& staleFrame =
+            decodedFrameQueue_.front().frame;
+        const double freshnessAgeMs =
+            FrameFreshnessAgeMs(nowUs, staleFrame);
+        if (!IsStaleFrame(freshnessAgeMs, freshnessDropThresholdMs)) {
+            break;
+        }
+        const uint32_t staleFrameId = staleFrame.frameId;
+        const uint32_t staleStreamId = staleFrame.streamId;
         decodedFrameQueue_.pop_front();
         stats_.freshnessDroppedFrames++;
-        RecordDropLocked("stale-before-upload", true);
+        RecordDropLocked(
+            "stale-before-upload",
+            true,
+            freshnessAgeMs,
+            staleFrameId,
+            staleStreamId,
+            "decoded");
     }
 
     if (decodedFrameQueue_.empty()) {
@@ -1093,6 +1173,7 @@ bool NetworkVideoReceiver::TryGetLatestFrame(DecodedVideoFrame& outFrame) {
 
     outFrame = std::move(decodedFrameQueue_.front().frame);
     decodedFrameQueue_.pop_front();
+    RecordStartupFirstDisplayedLocked(nowUs);
     return true;
 }
 
@@ -1119,7 +1200,13 @@ NetworkVideoReceiverStats NetworkVideoReceiver::GetStats() const {
         nowUs >= latestQueuedFrame->frame.encoderOutputTimeUs
         ? AgeMs(nowUs, latestQueuedFrame->frame.encoderOutputTimeUs)
         : 0.0;
-    stats.freshnessDropThresholdMs = FreshnessDropThresholdMs();
+    if (stats.freshnessDropThresholdMs <= 0.0) {
+        stats.freshnessDropThresholdMs = FreshnessDropThresholdMs();
+    }
+    if (startupStartTimeUs_ != 0 && nowUs >= startupStartTimeUs_) {
+        stats.startupElapsedMs =
+            static_cast<double>(nowUs - startupStartTimeUs_) / 1000.0;
+    }
     return stats;
 }
 
@@ -1159,8 +1246,14 @@ void NetworkVideoReceiver::DecodeLoop() {
         }
 
         const uint64_t inputCheckUs = NowMicroseconds();
+        const double inputFrameAgeMs =
+            FrameFreshnessAgeMs(inputCheckUs, frame);
+        const NetworkStatsSnapshot receiverSnapshot = receiver->GetStats();
+        const double freshnessDropThresholdMs =
+            EffectiveFreshnessDropThresholdMs(receiverSnapshot);
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            stats_.freshnessDropThresholdMs = freshnessDropThresholdMs;
             stats_.decodePopSuccesses++;
             if (lastDecodePopTimeUs_ != 0 &&
                 inputCheckUs >= lastDecodePopTimeUs_) {
@@ -1170,17 +1263,69 @@ void NetworkVideoReceiver::DecodeLoop() {
                 stats_.decodeLoopLastPopGapMs = popGapMs;
                 stats_.decodeLoopMaxPopGapMs =
                     (std::max)(stats_.decodeLoopMaxPopGapMs, popGapMs);
+                if (stats_.startupActive) {
+                    stats_.startupDecodeLoopMaxPopGapMs =
+                        (std::max)(
+                            stats_.startupDecodeLoopMaxPopGapMs,
+                            popGapMs);
+                }
+                else if (popGapMs > stats_.steadyDecodeLoopMaxPopGapMs) {
+                    stats_.steadyDecodeLoopMaxPopGapMs = popGapMs;
+                    stats_.steadyDecodeLoopMaxPopGapAtMs =
+                        startupStartTimeUs_ != 0 &&
+                        inputCheckUs >= startupStartTimeUs_
+                        ? static_cast<double>(
+                            inputCheckUs - startupStartTimeUs_) / 1000.0
+                        : 0.0;
+                    stats_.steadyDecodeLoopMaxPopGapFrameId =
+                        frame.frameId;
+                    stats_.steadyDecodeLoopMaxPopGapStreamId =
+                        frame.streamId;
+                    stats_.steadyDecodeLoopMaxPopGapCodec =
+                        ToString(frame.codecType);
+                    stats_.steadyDecodeLoopMaxPopGapInputFrameAgeMs =
+                        inputFrameAgeMs;
+                    stats_.steadyDecodeLoopMaxPopGapDecodedQueueSize =
+                        static_cast<uint32_t>(decodedFrameQueue_.size());
+                    stats_.steadyDecodeLoopMaxPopGapCompletedQueueSize =
+                        receiverSnapshot.completedQueueSize;
+                    stats_.steadyDecodeLoopMaxPopGapCompletedQueuePopAgeMs =
+                        receiverSnapshot.completedQueueLastPopAgeMs;
+                    stats_.steadyDecodeLoopMaxPopGapCompletedQueuePushIntervalMs =
+                        receiverSnapshot.completedQueueLastPushIntervalMs;
+                    stats_.steadyDecodeLoopMaxPopGapArrivalRatio =
+                        popGapMs > 0.0
+                        ? receiverSnapshot.completedQueueLastPushIntervalMs /
+                            popGapMs
+                        : 0.0;
+                    stats_.steadyDecodeLoopMaxPopGapReceiverJitterMs =
+                        receiverSnapshot.currentJitterMs;
+                    stats_.steadyDecodeLoopMaxPopGapReceiverLatencyMs =
+                        receiverSnapshot.currentLatencyMs;
+                    stats_.steadyDecodeLoopMaxPopGapClass =
+                        ClassifySteadyPopGap(
+                            popGapMs,
+                            receiverSnapshot.completedQueueLastPushIntervalMs,
+                            receiverSnapshot.completedQueueLastPopAgeMs,
+                            receiverSnapshot.completedQueueSize,
+                            static_cast<uint32_t>(decodedFrameQueue_.size()),
+                            receiverSnapshot.currentJitterMs);
+                }
             }
             lastDecodePopTimeUs_ = inputCheckUs;
         }
 
-        const double inputFrameAgeMs =
-            FrameFreshnessAgeMs(inputCheckUs, frame);
         UpdateInputFrameAge(inputFrameAgeMs);
-        if (IsStaleFrame(inputFrameAgeMs)) {
+        if (IsStaleFrame(inputFrameAgeMs, freshnessDropThresholdMs)) {
             std::lock_guard<std::mutex> lock(mutex_);
             stats_.freshnessDroppedFrames++;
-            RecordDropLocked("stale-before-decode", true);
+            RecordDropLocked(
+                "stale-before-decode",
+                true,
+                inputFrameAgeMs,
+                frame.frameId,
+                frame.streamId,
+                ToString(frame.codecType));
             continue;
         }
 
@@ -1218,12 +1363,22 @@ void NetworkVideoReceiver::DecodeLoop() {
             decodedFrame.decodedTimeUs = NowMicroseconds();
             decodedFrame.rgba = std::move(rgba);
 
-            if (IsStaleFrame(FrameFreshnessAgeMs(
+            const double decodedFreshnessAgeMs =
+                FrameFreshnessAgeMs(
                     decodedFrame.decodedTimeUs,
-                    decodedFrame))) {
+                    decodedFrame);
+            if (IsStaleFrame(
+                    decodedFreshnessAgeMs,
+                    freshnessDropThresholdMs)) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.freshnessDroppedFrames++;
-                RecordDropLocked("stale-after-decode", true);
+                RecordDropLocked(
+                    "stale-after-decode",
+                    true,
+                    decodedFreshnessAgeMs,
+                    decodedFrame.frameId,
+                    decodedFrame.streamId,
+                    "MJPEG");
                 continue;
             }
 
@@ -1347,6 +1502,10 @@ void NetworkVideoReceiver::DecodeLoop() {
                 decoderSync,
                 decodedFrame);
             const bool decoderHasSyncAfterDecode = h264Decoder.HasSync();
+            if (decoderHasSyncAfterDecode) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                RecordStartupDecoderSyncedLocked(NowMicroseconds());
+            }
 
             if (decodeStatus == H264DecodeStatus::NeedMoreInput) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1428,17 +1587,30 @@ void NetworkVideoReceiver::DecodeLoop() {
                 auHeader.cameraCaptureCompletedTimeUs;
             decodedFrame.encoderOutputTimeUs = auHeader.encoderOutputTimeUs;
 
-            if (IsStaleFrame(FrameFreshnessAgeMs(
+            const double decodedFreshnessAgeMs =
+                FrameFreshnessAgeMs(
                     decodedFrame.decodedTimeUs,
-                    decodedFrame))) {
+                    decodedFrame);
+            if (IsStaleFrame(
+                    decodedFreshnessAgeMs,
+                    freshnessDropThresholdMs)) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.freshnessDroppedFrames++;
-                RecordDropLocked("stale-after-h264-decode", true);
+                RecordDropLocked(
+                    "stale-after-h264-decode",
+                    true,
+                    decodedFreshnessAgeMs,
+                    decodedFrame.frameId,
+                    decodedFrame.streamId,
+                    "H.264");
                 receiver->RequestKeyFrame(frame.frameId);
                 continue;
             }
 
-            StoreDecodedFrame(std::move(decodedFrame), decodeMs);
+            StoreDecodedFrame(
+                std::move(decodedFrame),
+                decodeMs,
+                decoderHasSyncAfterDecode);
             receiver->NotifyDecodeFrame();
             continue;
         }
@@ -1452,12 +1624,22 @@ void NetworkVideoReceiver::DecodeLoop() {
                 continue;
             }
 
-            if (IsStaleFrame(FrameFreshnessAgeMs(
+            const double decodedFreshnessAgeMs =
+                FrameFreshnessAgeMs(
                     decodedFrame.decodedTimeUs,
-                    decodedFrame))) {
+                    decodedFrame);
+            if (IsStaleFrame(
+                    decodedFreshnessAgeMs,
+                    freshnessDropThresholdMs)) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.freshnessDroppedFrames++;
-                RecordDropLocked("stale-after-raw-decode", true);
+                RecordDropLocked(
+                    "stale-after-raw-decode",
+                    true,
+                    decodedFreshnessAgeMs,
+                    decodedFrame.frameId,
+                    decodedFrame.streamId,
+                    "Raw");
                 continue;
             }
 
@@ -1526,9 +1708,16 @@ void NetworkVideoReceiver::RecordPredecodeCoalescedFrame(const char* reason) {
 
 void NetworkVideoReceiver::StoreDecodedFrame(
     DecodedVideoFrame frame,
-    double jpegDecodeMs) {
+    double jpegDecodeMs,
+    bool decoderSyncReady) {
     std::lock_guard<std::mutex> lock(mutex_);
     UpdateDecodeMs(jpegDecodeMs);
+    const uint64_t nowUs = NowMicroseconds();
+    if (decoderSyncReady) {
+        RecordStartupDecoderSyncedLocked(nowUs);
+    }
+    RecordStartupFirstDecodedLocked(nowUs);
+
     while (decodedFrameQueue_.size() >= kDecodedFrameQueueCapacity) {
         decodedFrameQueue_.pop_front();
         stats_.overwrittenFrames++;
@@ -1538,7 +1727,7 @@ void NetworkVideoReceiver::StoreDecodedFrame(
 
     PendingDecodedFrame queuedFrame{};
     queuedFrame.frame = std::move(frame);
-    queuedFrame.storedTimeUs = NowMicroseconds();
+    queuedFrame.storedTimeUs = nowUs;
     decodedFrameQueue_.push_back(std::move(queuedFrame));
     stats_.decodedFrames++;
     UpdateDecodeWorkerFpsLocked(decodedFrameQueue_.back().storedTimeUs);
@@ -1621,11 +1810,85 @@ void NetworkVideoReceiver::UpdateDecodeWorkerFpsLocked(uint64_t nowUs) {
     lastFpsUpdateTimeUs_ = nowUs;
 }
 
-void NetworkVideoReceiver::RecordDropLocked(const char* reason, bool queueDrop) {
+void NetworkVideoReceiver::RecordStartupDecoderSyncedLocked(uint64_t nowUs) {
+    if (stats_.startupDecoderSynced) {
+        return;
+    }
+
+    stats_.startupDecoderSynced = true;
+    if (startupStartTimeUs_ != 0 && nowUs >= startupStartTimeUs_) {
+        stats_.startupDecoderSyncMs =
+            static_cast<double>(nowUs - startupStartTimeUs_) / 1000.0;
+    }
+}
+
+void NetworkVideoReceiver::RecordStartupFirstDecodedLocked(uint64_t nowUs) {
+    if (stats_.startupFirstDecoded) {
+        return;
+    }
+
+    stats_.startupFirstDecoded = true;
+    if (startupStartTimeUs_ != 0 && nowUs >= startupStartTimeUs_) {
+        stats_.startupFirstDecodedMs =
+            static_cast<double>(nowUs - startupStartTimeUs_) / 1000.0;
+    }
+}
+
+void NetworkVideoReceiver::RecordStartupFirstDisplayedLocked(uint64_t nowUs) {
+    if (!stats_.startupFirstDisplayed) {
+        stats_.startupFirstDisplayed = true;
+        if (startupStartTimeUs_ != 0 && nowUs >= startupStartTimeUs_) {
+            stats_.startupFirstDisplayedMs =
+                static_cast<double>(nowUs - startupStartTimeUs_) / 1000.0;
+        }
+    }
+
+    TryCompleteStartupLocked(nowUs);
+}
+
+void NetworkVideoReceiver::TryCompleteStartupLocked(uint64_t nowUs) {
+    if (stats_.startupReady) {
+        return;
+    }
+
+    if (!stats_.startupDecoderSynced ||
+        !stats_.startupFirstDecoded ||
+        !stats_.startupFirstDisplayed) {
+        return;
+    }
+
+    stats_.startupReady = true;
+    stats_.startupActive = false;
+    if (startupStartTimeUs_ != 0 && nowUs >= startupStartTimeUs_) {
+        stats_.startupReadyMs =
+            static_cast<double>(nowUs - startupStartTimeUs_) / 1000.0;
+    }
+
+    if (!decodedFrameQueue_.empty()) {
+        stats_.startupQueueFlushFrames += decodedFrameQueue_.size();
+        decodedFrameQueue_.clear();
+    }
+}
+
+void NetworkVideoReceiver::RecordDropLocked(
+    const char* reason,
+    bool queueDrop,
+    double freshnessAgeMs,
+    uint32_t frameId,
+    uint32_t streamId,
+    const char* codec) {
     if (queueDrop) {
         stats_.decodeQueueDroppedFrames++;
     }
     stats_.lastDropReason = reason != nullptr ? reason : "unknown";
+    if (freshnessAgeMs >= 0.0) {
+        stats_.lastFreshnessDropAgeMs = freshnessAgeMs;
+        stats_.maxFreshnessDropAgeMs =
+            (std::max)(stats_.maxFreshnessDropAgeMs, freshnessAgeMs);
+        stats_.lastFreshnessDropFrameId = frameId;
+        stats_.lastFreshnessDropStreamId = streamId;
+        stats_.lastFreshnessDropCodec = codec != nullptr ? codec : "";
+    }
 }
 
 void NetworkVideoReceiver::RecordH264AuInvalidLocked(const char* reason) {

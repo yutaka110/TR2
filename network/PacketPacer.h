@@ -15,7 +15,8 @@ namespace net {
     enum class PacketPacingPriority {
         Normal,
         High,
-        Critical
+        Critical,
+        Emergency
     };
 
     struct PacketPacerStats {
@@ -32,6 +33,13 @@ namespace net {
         uint64_t repairSentBytes = 0;
         uint64_t repairBorrowedPackets = 0;
         uint64_t repairBorrowedBytes = 0;
+        uint64_t emergencySentPackets = 0;
+        uint64_t emergencySentBytes = 0;
+        uint64_t emergencyBorrowedPackets = 0;
+        uint64_t emergencyBorrowedBytes = 0;
+        double emergencyLastQueueAgeMs = 0.0;
+        double emergencyMaxQueueAgeMs = 0.0;
+        double emergencyAvgQueueAgeMs = 0.0;
         uint64_t droppedPackets = 0;
         uint64_t deadlineDroppedPackets = 0;
         uint64_t highPriorityDeadlineDroppedPackets = 0;

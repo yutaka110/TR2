@@ -499,6 +499,25 @@ namespace {
         if (codecType == CodecType::H264) {
             if (keyFrame) {
                 snapshot_.deadlineNackExpiredH264KeyFrames++;
+                snapshot_.deadlineNackExpiredH264KeyMissingChunks +=
+                    missingChunkCount;
+                snapshot_.deadlineNackLastExpiredH264KeyMissingChunks =
+                    missingChunkCount;
+                if (missingChunkCount <= 1) {
+                    snapshot_.deadlineNackExpiredH264KeyMissingChunks1++;
+                }
+                else if (missingChunkCount <= 4) {
+                    snapshot_.deadlineNackExpiredH264KeyMissingChunks2To4++;
+                }
+                else if (missingChunkCount <= 8) {
+                    snapshot_.deadlineNackExpiredH264KeyMissingChunks5To8++;
+                }
+                else if (missingChunkCount <= 16) {
+                    snapshot_.deadlineNackExpiredH264KeyMissingChunks9To16++;
+                }
+                else {
+                    snapshot_.deadlineNackExpiredH264KeyMissingChunks17Plus++;
+                }
             }
             else if (largeFrame) {
                 snapshot_.deadlineNackExpiredH264LargeFrames++;
@@ -523,6 +542,40 @@ namespace {
                 static_cast<double>(totalFrames);
         }
 
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnH264KeySmallMissingDeadlineRescue(
+        uint32_t missingChunkCount
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        snapshot_.h264KeySmallMissingDeadlineRescueFrames++;
+        snapshot_.h264KeySmallMissingDeadlineRescueMissingChunks +=
+            missingChunkCount;
+        snapshot_.lastUpdateTimeUs = NowMicroseconds();
+    }
+
+    void NetworkStats::OnH264KeySmallMissingDeadlineRescueOutcome(
+        uint32_t missingChunkCount,
+        bool completed,
+        bool rejected
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (completed) {
+            snapshot_.h264KeySmallMissingDeadlineRescueCompletedFrames++;
+            snapshot_.h264KeySmallMissingDeadlineRescueCompletedMissingChunks +=
+                missingChunkCount;
+        }
+        else if (rejected) {
+            snapshot_.h264KeySmallMissingDeadlineRescueRejectedFrames++;
+        }
+        else {
+            snapshot_.h264KeySmallMissingDeadlineRescueExpiredFrames++;
+            snapshot_.h264KeySmallMissingDeadlineRescueExpiredMissingChunks +=
+                missingChunkCount;
+        }
         snapshot_.lastUpdateTimeUs = NowMicroseconds();
     }
 
@@ -651,6 +704,62 @@ namespace {
         }
         else if (eventText == "retransmit-late-after-rejected") {
             snapshot_.retransmitLateAfterRejectedPackets++;
+        }
+
+        const bool h264KeyRepairBucket =
+            codecType == CodecType::H264 &&
+            keyFrame &&
+            nackRequestedChunks > 0 &&
+            nackRequestedChunks <= 4;
+        if (h264KeyRepairBucket) {
+            const bool bucket1To2 = nackRequestedChunks <= 2;
+            uint64_t& completedFrames = bucket1To2
+                ? snapshot_.h264KeyRepair1To2CompletedFrames
+                : snapshot_.h264KeyRepair3To4CompletedFrames;
+            uint64_t& expiredFrames = bucket1To2
+                ? snapshot_.h264KeyRepair1To2ExpiredFrames
+                : snapshot_.h264KeyRepair3To4ExpiredFrames;
+            uint64_t& arrivedPackets = bucket1To2
+                ? snapshot_.h264KeyRepair1To2ArrivedPackets
+                : snapshot_.h264KeyRepair3To4ArrivedPackets;
+            uint64_t& duplicatePackets = bucket1To2
+                ? snapshot_.h264KeyRepair1To2DuplicatePackets
+                : snapshot_.h264KeyRepair3To4DuplicatePackets;
+            uint64_t& lateCompletedPackets = bucket1To2
+                ? snapshot_.h264KeyRepair1To2LateCompletedPackets
+                : snapshot_.h264KeyRepair3To4LateCompletedPackets;
+            uint64_t& lateExpiredPackets = bucket1To2
+                ? snapshot_.h264KeyRepair1To2LateExpiredPackets
+                : snapshot_.h264KeyRepair3To4LateExpiredPackets;
+            uint64_t& lateRejectedPackets = bucket1To2
+                ? snapshot_.h264KeyRepair1To2LateRejectedPackets
+                : snapshot_.h264KeyRepair3To4LateRejectedPackets;
+
+            if (eventText == "completed" &&
+                outcomeText == "completed" &&
+                retransmitReceivedChunks > 0) {
+                completedFrames++;
+            }
+            else if (outcomeText == "expired" &&
+                eventText != "retransmit-late-after-expired" &&
+                retransmitReceivedChunks > 0) {
+                expiredFrames++;
+            }
+            else if (eventText == "retransmit-arrived") {
+                arrivedPackets++;
+            }
+            else if (eventText == "retransmit-duplicate") {
+                duplicatePackets++;
+            }
+            else if (eventText == "retransmit-late-after-completed") {
+                lateCompletedPackets++;
+            }
+            else if (eventText == "retransmit-late-after-expired") {
+                lateExpiredPackets++;
+            }
+            else if (eventText == "retransmit-late-after-rejected") {
+                lateRejectedPackets++;
+            }
         }
 
         if (outcomeText == "completed" && retransmitReceivedChunks > 0) {

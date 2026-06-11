@@ -204,6 +204,45 @@ namespace net {
 		uint64_t repairFecLikelySuppressedPendingPackets = 0;
 		uint64_t repairFecLikelySuppressionRescueFrames = 0;
 		uint64_t repairFecLikelySuppressionRescuePackets = 0;
+		uint64_t h264KeyTinyMissingCriticalFrames = 0;
+		uint64_t h264KeyTinyMissingCriticalPackets = 0;
+		uint64_t h264KeyTinyMissingCriticalSentPackets = 0;
+		uint64_t h264KeyTinyMissingCriticalSkippedPackets = 0;
+		uint32_t h264KeyTinyMissingCriticalLastFrameId = 0;
+		uint32_t h264KeyTinyMissingCriticalLastAckMissingChunks = 0;
+		uint32_t h264KeyTinyMissingCriticalLastRequestedChunks = 0;
+		std::string h264KeyTinyMissingCriticalLastEvent;
+		uint64_t h264KeySmallMissingAckFrames = 0;
+		uint64_t h264KeySmallMissingAckMissingChunks = 0;
+		uint64_t h264KeySmallMissingAckHistoryMissingFrames = 0;
+		uint64_t h264KeySmallMissingAckStaleFrameLagFrames = 0;
+		uint64_t h264KeySmallMissingAckStaleAgeFrames = 0;
+		uint64_t h264KeySmallMissingAckRetransmitBudgetExhaustedFrames = 0;
+		uint64_t h264KeySmallMissingAckDynamicBudgetSuppressedFrames = 0;
+		uint64_t h264KeySmallMissingAckDynamicBudgetSuppressedPackets = 0;
+		uint64_t h264KeySmallMissingAckSelectedRepairFrames = 0;
+		uint64_t h264KeySmallMissingAckSelectedRepairPackets = 0;
+		uint64_t h264KeySelectedRepair1To2Frames = 0;
+		uint64_t h264KeySelectedRepair1To2Packets = 0;
+		uint64_t h264KeySelectedRepair3To4Frames = 0;
+		uint64_t h264KeySelectedRepair3To4Packets = 0;
+		uint32_t h264KeySmallMissingAckLastFrameId = 0;
+		uint32_t h264KeySmallMissingAckLastMissingChunks = 0;
+		std::string h264KeySmallMissingAckLastGate;
+		uint64_t h264KeyRepair1To2CompletedFrames = 0;
+		uint64_t h264KeyRepair1To2ExpiredFrames = 0;
+		uint64_t h264KeyRepair1To2ArrivedPackets = 0;
+		uint64_t h264KeyRepair1To2DuplicatePackets = 0;
+		uint64_t h264KeyRepair1To2LateCompletedPackets = 0;
+		uint64_t h264KeyRepair1To2LateExpiredPackets = 0;
+		uint64_t h264KeyRepair1To2LateRejectedPackets = 0;
+		uint64_t h264KeyRepair3To4CompletedFrames = 0;
+		uint64_t h264KeyRepair3To4ExpiredFrames = 0;
+		uint64_t h264KeyRepair3To4ArrivedPackets = 0;
+		uint64_t h264KeyRepair3To4DuplicatePackets = 0;
+		uint64_t h264KeyRepair3To4LateCompletedPackets = 0;
+		uint64_t h264KeyRepair3To4LateExpiredPackets = 0;
+		uint64_t h264KeyRepair3To4LateRejectedPackets = 0;
 		uint64_t lateRepairSavedPackets = 0;
 		uint64_t ackStaleDroppedFrames = 0;
 		uint64_t ackKeyFrameRequests = 0;
@@ -221,6 +260,13 @@ namespace net {
 		uint64_t pacingRepairSentBytes = 0;
 		uint64_t pacingRepairBorrowedPackets = 0;
 		uint64_t pacingRepairBorrowedBytes = 0;
+		uint64_t pacingEmergencySentPackets = 0;
+		uint64_t pacingEmergencySentBytes = 0;
+		uint64_t pacingEmergencyBorrowedPackets = 0;
+		uint64_t pacingEmergencyBorrowedBytes = 0;
+		double h264KeyTinyEmergencyLastQueueAgeMs = 0.0;
+		double h264KeyTinyEmergencyMaxQueueAgeMs = 0.0;
+		double h264KeyTinyEmergencyAvgQueueAgeMs = 0.0;
 		uint64_t pacingDroppedPackets = 0;
 		uint64_t pacingDeadlineDroppedPackets = 0;
 		uint64_t pacingHighPriorityDeadlineDroppedPackets = 0;
@@ -257,6 +303,20 @@ namespace net {
 		uint64_t deadlineNackExpiredAfterNackFrames = 0;
 		uint64_t deadlineNackExpiredMissingChunks = 0;
 		uint64_t deadlineNackExpiredH264KeyFrames = 0;
+		uint64_t deadlineNackExpiredH264KeyMissingChunks = 0;
+		uint32_t deadlineNackLastExpiredH264KeyMissingChunks = 0;
+		uint64_t deadlineNackExpiredH264KeyMissingChunks1 = 0;
+		uint64_t deadlineNackExpiredH264KeyMissingChunks2To4 = 0;
+		uint64_t deadlineNackExpiredH264KeyMissingChunks5To8 = 0;
+		uint64_t deadlineNackExpiredH264KeyMissingChunks9To16 = 0;
+		uint64_t deadlineNackExpiredH264KeyMissingChunks17Plus = 0;
+		uint64_t h264KeySmallMissingDeadlineRescueFrames = 0;
+		uint64_t h264KeySmallMissingDeadlineRescueMissingChunks = 0;
+		uint64_t h264KeySmallMissingDeadlineRescueCompletedFrames = 0;
+		uint64_t h264KeySmallMissingDeadlineRescueRejectedFrames = 0;
+		uint64_t h264KeySmallMissingDeadlineRescueExpiredFrames = 0;
+		uint64_t h264KeySmallMissingDeadlineRescueCompletedMissingChunks = 0;
+		uint64_t h264KeySmallMissingDeadlineRescueExpiredMissingChunks = 0;
 		uint64_t deadlineNackExpiredH264LargeFrames = 0;
 		uint64_t deadlineNackExpiredH264DeltaFrames = 0;
 		bool fecEnabled = false;
@@ -322,6 +382,10 @@ namespace net {
 		uint32_t sendPacingTargetBitrateKbps = 0;
 		double sendH264VideoBudgetScale = 1.0;
 		bool pacingBurstGuardActive = false;
+		double fixedPacingRecentMaxQueueDelayMs = 0.0;
+		double fixedPacingQueueReleaseStableSec = 0.0;
+		bool fixedPacingQueueRecovered = false;
+		bool fixedPacingQueueReleaseEligible = false;
 		double adaptiveRepairBudgetUtilization = 0.0;
 		double adaptiveRepairBorrowedRatio = 0.0;
 		uint64_t adaptiveRepairSentBytesDelta = 0;
@@ -338,6 +402,15 @@ namespace net {
 		uint32_t h264AuChunkCount = 0;
 		bool h264AuIsIdr = false;
 		bool h264AuIsDecoderSync = false;
+		uint64_t h264RequestedKeyFrameConsumedFrames = 0;
+		uint64_t h264EncoderKeyFrameRequests = 0;
+		uint64_t h264RecoveryKeyFrameRequests = 0;
+		uint64_t h264AwaitingSyncKeyFrameRequests = 0;
+		uint64_t h264PeriodicIdrRequests = 0;
+		uint64_t h264IdrFrames = 0;
+		uint64_t h264DecoderSyncFrames = 0;
+		uint32_t h264ConsecutiveIdrFrames = 0;
+		uint32_t h264MaxConsecutiveIdrFrames = 0;
 		std::string h264AuProtectionLevel;
 		bool h264AuDroppedBeforeSend = false;
 		std::string h264AuDropReason;
@@ -420,6 +493,33 @@ namespace net {
 		uint64_t receiveDecodePopEmptyPolls = 0;
 		double receiveDecodeLoopLastPopGapMs = 0.0;
 		double receiveDecodeLoopMaxPopGapMs = 0.0;
+		double receiveStartupDecodeLoopMaxPopGapMs = 0.0;
+		double receiveSteadyDecodeLoopMaxPopGapMs = 0.0;
+		double receiveSteadyDecodeLoopMaxPopGapAtMs = 0.0;
+		uint32_t receiveSteadyDecodeLoopMaxPopGapFrameId = 0;
+		uint32_t receiveSteadyDecodeLoopMaxPopGapStreamId = 0;
+		std::string receiveSteadyDecodeLoopMaxPopGapCodec;
+		double receiveSteadyDecodeLoopMaxPopGapInputFrameAgeMs = 0.0;
+		uint32_t receiveSteadyDecodeLoopMaxPopGapDecodedQueueSize = 0;
+		uint32_t receiveSteadyDecodeLoopMaxPopGapCompletedQueueSize = 0;
+		double receiveSteadyDecodeLoopMaxPopGapCompletedQueuePopAgeMs = 0.0;
+		double receiveSteadyDecodeLoopMaxPopGapCompletedQueuePushIntervalMs = 0.0;
+		double receiveSteadyDecodeLoopMaxPopGapArrivalRatio = 0.0;
+		double receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs = 0.0;
+		double receiveSteadyDecodeLoopMaxPopGapReceiverLatencyMs = 0.0;
+		std::string receiveSteadyDecodeLoopMaxPopGapClass;
+		double receiveSteadyDecodeLoopMaxPopGapAgeMs = -1.0;
+		bool receiveH264StartupActive = false;
+		bool receiveH264StartupDecoderSynced = false;
+		bool receiveH264StartupFirstDecoded = false;
+		bool receiveH264StartupFirstDisplayed = false;
+		bool receiveH264StartupReady = false;
+		double receiveH264StartupElapsedMs = 0.0;
+		double receiveH264StartupDecoderSyncMs = 0.0;
+		double receiveH264StartupFirstDecodedMs = 0.0;
+		double receiveH264StartupFirstDisplayedMs = 0.0;
+		double receiveH264StartupReadyMs = 0.0;
+		uint64_t receiveH264StartupQueueFlushFrames = 0;
 		uint64_t receiveDecodeOverwrittenFrames = 0;
 		uint64_t receiveDecodeQueueDroppedFrames = 0;
 		uint64_t receiveDecodeRenderOverwriteFrames = 0;
@@ -444,6 +544,11 @@ namespace net {
 		double receiveLatestDecodedEncoderOutputAgeMs = 0.0;
 		double receiveFreshnessDropThresholdMs = 0.0;
 		std::string receiveDecodeLastDropReason;
+		double receiveLastFreshnessDropAgeMs = 0.0;
+		double receiveMaxFreshnessDropAgeMs = 0.0;
+		uint32_t receiveLastFreshnessDropFrameId = 0;
+		uint32_t receiveLastFreshnessDropStreamId = 0;
+		std::string receiveLastFreshnessDropCodec;
 		double receiveUploadBufferWaitMs = 0.0;
 		uint32_t receiveDisplayFrameId = 0;
 		double receiveDisplayCameraFrameAgeMs = 0.0;
@@ -475,6 +580,7 @@ namespace net {
 		double adaptiveLastDisplayFps = 0.0;
 		double adaptiveLastQoeScore = 0.0;
 		std::string adaptiveDegradationCause;
+		bool adaptiveArrivalGapJitterSpikeActive = false;
 		bool adaptiveFecRecoveryWorking = false;
 		bool adaptiveFecGuardActive = false;
 		double adaptiveFecRecoveryEfficiency = 0.0;
@@ -592,6 +698,14 @@ namespace net {
 			CodecType codecType = CodecType::Unknown,
 			bool keyFrame = false,
 			bool largeFrame = false
+		);
+		void OnH264KeySmallMissingDeadlineRescue(
+			uint32_t missingChunkCount
+		);
+		void OnH264KeySmallMissingDeadlineRescueOutcome(
+			uint32_t missingChunkCount,
+			bool completed,
+			bool rejected
 		);
 		void OnFecParityPacket();
 		void OnFecRecoveredFrame(uint32_t recoveredChunkCount);

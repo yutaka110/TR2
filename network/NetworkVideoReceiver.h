@@ -23,6 +23,32 @@ struct NetworkVideoReceiverStats {
     uint64_t decodePopEmptyPolls = 0;
     double decodeLoopLastPopGapMs = 0.0;
     double decodeLoopMaxPopGapMs = 0.0;
+    double startupDecodeLoopMaxPopGapMs = 0.0;
+    double steadyDecodeLoopMaxPopGapMs = 0.0;
+    double steadyDecodeLoopMaxPopGapAtMs = 0.0;
+    uint32_t steadyDecodeLoopMaxPopGapFrameId = 0;
+    uint32_t steadyDecodeLoopMaxPopGapStreamId = 0;
+    std::string steadyDecodeLoopMaxPopGapCodec;
+    double steadyDecodeLoopMaxPopGapInputFrameAgeMs = 0.0;
+    uint32_t steadyDecodeLoopMaxPopGapDecodedQueueSize = 0;
+    uint32_t steadyDecodeLoopMaxPopGapCompletedQueueSize = 0;
+    double steadyDecodeLoopMaxPopGapCompletedQueuePopAgeMs = 0.0;
+    double steadyDecodeLoopMaxPopGapCompletedQueuePushIntervalMs = 0.0;
+    double steadyDecodeLoopMaxPopGapArrivalRatio = 0.0;
+    double steadyDecodeLoopMaxPopGapReceiverJitterMs = 0.0;
+    double steadyDecodeLoopMaxPopGapReceiverLatencyMs = 0.0;
+    std::string steadyDecodeLoopMaxPopGapClass;
+    bool startupActive = true;
+    bool startupDecoderSynced = false;
+    bool startupFirstDecoded = false;
+    bool startupFirstDisplayed = false;
+    bool startupReady = false;
+    double startupElapsedMs = 0.0;
+    double startupDecoderSyncMs = 0.0;
+    double startupFirstDecodedMs = 0.0;
+    double startupFirstDisplayedMs = 0.0;
+    double startupReadyMs = 0.0;
+    uint64_t startupQueueFlushFrames = 0;
     uint64_t overwrittenFrames = 0;
     uint64_t decodeQueueDroppedFrames = 0;
     uint64_t decodeRenderOverwriteFrames = 0;
@@ -47,6 +73,11 @@ struct NetworkVideoReceiverStats {
     double latestDecodedEncoderOutputAgeMs = 0.0;
     double freshnessDropThresholdMs = 0.0;
     std::string lastDropReason;
+    double lastFreshnessDropAgeMs = 0.0;
+    double maxFreshnessDropAgeMs = 0.0;
+    uint32_t lastFreshnessDropFrameId = 0;
+    uint32_t lastFreshnessDropStreamId = 0;
+    std::string lastFreshnessDropCodec;
 };
 
 enum class DecodedVideoFrameFormat {
@@ -100,13 +131,28 @@ private:
         const char** outReason
     ) const;
     void RecordPredecodeCoalescedFrame(const char* reason);
-    void StoreDecodedFrame(DecodedVideoFrame frame, double jpegDecodeMs);
+    void StoreDecodedFrame(
+        DecodedVideoFrame frame,
+        double jpegDecodeMs,
+        bool decoderSyncReady = true
+    );
     void UpdateDecodeMs(double sampleMs);
     void UpdateInputFrameAge(double sampleMs);
     void UpdateInputCameraFrameAge(double sampleMs);
     void UpdateInputEncoderOutputAge(double sampleMs);
     void UpdateDecodeWorkerFpsLocked(uint64_t nowUs);
-    void RecordDropLocked(const char* reason, bool queueDrop);
+    void RecordStartupDecoderSyncedLocked(uint64_t nowUs);
+    void RecordStartupFirstDecodedLocked(uint64_t nowUs);
+    void RecordStartupFirstDisplayedLocked(uint64_t nowUs);
+    void TryCompleteStartupLocked(uint64_t nowUs);
+    void RecordDropLocked(
+        const char* reason,
+        bool queueDrop,
+        double freshnessAgeMs = -1.0,
+        uint32_t frameId = 0,
+        uint32_t streamId = 0,
+        const char* codec = nullptr
+    );
     void RecordH264AuInvalidLocked(const char* reason);
     static uint64_t NowMicroseconds();
 
@@ -125,6 +171,7 @@ private:
     uint64_t lastFpsUpdateTimeUs_ = 0;
     uint64_t decodedFramesAtLastFpsUpdate_ = 0;
     uint64_t lastDecodePopTimeUs_ = 0;
+    uint64_t startupStartTimeUs_ = 0;
 };
 
 } // namespace net

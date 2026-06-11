@@ -31,6 +31,7 @@ namespace net {
         uint64_t previousOutputQueueDroppedFrames_ = 0;
         uint64_t previousOutputQueueDropEvents_ = 0;
         uint64_t previousOutputQueueDropBurstEvents_ = 0;
+        uint64_t previousReceiveFreshnessDroppedFrames_ = 0;
         uint64_t startupOutputQueueDroppedFrames_ = 0;
         uint64_t startupOutputQueueDropEvents_ = 0;
         uint64_t startupOutputQueueDropBurstEvents_ = 0;

@@ -118,6 +118,31 @@ public:
     uint64_t GetRepairFecLikelySuppressedPendingPacketCount() const;
     uint64_t GetRepairFecLikelySuppressionRescueFrameCount() const;
     uint64_t GetRepairFecLikelySuppressionRescuePacketCount() const;
+    uint64_t GetH264KeyTinyMissingCriticalFrameCount() const;
+    uint64_t GetH264KeyTinyMissingCriticalPacketCount() const;
+    uint64_t GetH264KeyTinyMissingCriticalSentPacketCount() const;
+    uint64_t GetH264KeyTinyMissingCriticalSkippedPacketCount() const;
+    uint32_t GetH264KeyTinyMissingCriticalLastFrameId() const;
+    uint32_t GetH264KeyTinyMissingCriticalLastAckMissingChunks() const;
+    uint32_t GetH264KeyTinyMissingCriticalLastRequestedChunks() const;
+    std::string GetH264KeyTinyMissingCriticalLastEvent() const;
+    uint64_t GetH264KeySmallMissingAckFrameCount() const;
+    uint64_t GetH264KeySmallMissingAckMissingChunkCount() const;
+    uint64_t GetH264KeySmallMissingAckHistoryMissingFrameCount() const;
+    uint64_t GetH264KeySmallMissingAckStaleFrameLagFrameCount() const;
+    uint64_t GetH264KeySmallMissingAckStaleAgeFrameCount() const;
+    uint64_t GetH264KeySmallMissingAckRetransmitBudgetExhaustedFrameCount() const;
+    uint64_t GetH264KeySmallMissingAckDynamicBudgetSuppressedFrameCount() const;
+    uint64_t GetH264KeySmallMissingAckDynamicBudgetSuppressedPacketCount() const;
+    uint64_t GetH264KeySmallMissingAckSelectedRepairFrameCount() const;
+    uint64_t GetH264KeySmallMissingAckSelectedRepairPacketCount() const;
+    uint64_t GetH264KeySelectedRepair1To2FrameCount() const;
+    uint64_t GetH264KeySelectedRepair1To2PacketCount() const;
+    uint64_t GetH264KeySelectedRepair3To4FrameCount() const;
+    uint64_t GetH264KeySelectedRepair3To4PacketCount() const;
+    uint32_t GetH264KeySmallMissingAckLastFrameId() const;
+    uint32_t GetH264KeySmallMissingAckLastMissingChunks() const;
+    std::string GetH264KeySmallMissingAckLastGate() const;
     uint64_t GetLateRepairSavedPacketCount() const;
     uint64_t GetAckStaleDroppedFrameCount() const;
     uint64_t GetAckKeyFrameRequestCount() const;
@@ -385,6 +410,8 @@ private:
     void HandleAckControl(
         uint32_t streamId,
         const net::AckPayload& ack,
+        net::CodecType ackCodecType,
+        bool ackKeyFrame,
         double missingRate
     );
 
@@ -532,9 +559,35 @@ private:
     uint64_t repairFecLikelySuppressedExpiredPackets_ = 0;
     uint64_t repairFecLikelySuppressionRescueFrames_ = 0;
     uint64_t repairFecLikelySuppressionRescuePackets_ = 0;
+    uint64_t h264KeyTinyMissingCriticalFrames_ = 0;
+    uint64_t h264KeyTinyMissingCriticalPackets_ = 0;
+    uint64_t h264KeyTinyMissingCriticalSentPackets_ = 0;
+    uint64_t h264KeyTinyMissingCriticalSkippedPackets_ = 0;
+    uint32_t h264KeyTinyMissingCriticalLastFrameId_ = 0;
+    uint32_t h264KeyTinyMissingCriticalLastAckMissingChunks_ = 0;
+    uint32_t h264KeyTinyMissingCriticalLastRequestedChunks_ = 0;
+    std::string h264KeyTinyMissingCriticalLastEvent_;
+    uint64_t h264KeySmallMissingAckFrames_ = 0;
+    uint64_t h264KeySmallMissingAckMissingChunks_ = 0;
+    uint64_t h264KeySmallMissingAckHistoryMissingFrames_ = 0;
+    uint64_t h264KeySmallMissingAckStaleFrameLagFrames_ = 0;
+    uint64_t h264KeySmallMissingAckStaleAgeFrames_ = 0;
+    uint64_t h264KeySmallMissingAckRetransmitBudgetExhaustedFrames_ = 0;
+    uint64_t h264KeySmallMissingAckDynamicBudgetSuppressedFrames_ = 0;
+    uint64_t h264KeySmallMissingAckDynamicBudgetSuppressedPackets_ = 0;
+    uint64_t h264KeySmallMissingAckSelectedRepairFrames_ = 0;
+    uint64_t h264KeySmallMissingAckSelectedRepairPackets_ = 0;
+    uint64_t h264KeySelectedRepair1To2Frames_ = 0;
+    uint64_t h264KeySelectedRepair1To2Packets_ = 0;
+    uint64_t h264KeySelectedRepair3To4Frames_ = 0;
+    uint64_t h264KeySelectedRepair3To4Packets_ = 0;
+    uint32_t h264KeySmallMissingAckLastFrameId_ = 0;
+    uint32_t h264KeySmallMissingAckLastMissingChunks_ = 0;
+    std::string h264KeySmallMissingAckLastGate_;
     uint64_t lateRepairSavedPackets_ = 0;
     uint64_t ackStaleDroppedFrameCount_ = 0;
     uint64_t ackKeyFrameRequestCount_ = 0;
+    uint64_t lastAckKeyFrameRequestUs_ = 0;
     std::deque<CompletedFrameAckRecord> completedFrameAcks_;
     std::deque<FecLikelySuppressionRecord> fecLikelySuppressionRecords_;
     std::atomic<bool> forceNextKeyFrame_{ false };
@@ -551,6 +604,7 @@ private:
     static constexpr uint32_t kMaxRetransmitsPerFrame = 1;
     static constexpr uint32_t kMaxRetransmitFrameLag = 2;
     static constexpr uint64_t kMaxRetransmitAgeUs = 180000;
+    static constexpr uint64_t kAckKeyFrameRequestCooldownUs = 500000;
     static constexpr size_t kCompletedFrameAckHistoryLimit = 64;
     static constexpr size_t kFecLikelySuppressionHistoryLimit = 128;
 
