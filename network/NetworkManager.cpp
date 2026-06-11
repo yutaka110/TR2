@@ -24,6 +24,9 @@ namespace {
     constexpr uint64_t kKeyH264RepairMaxTtlUs = 180000;
     constexpr uint64_t kLargeH264RepairExtraTtlUs = 20000;
     constexpr uint64_t kKeyH264RepairExtraTtlUs = 40000;
+    constexpr uint32_t kKeyH264TinyMissingRepairChunks = 2;
+    constexpr uint32_t kKeyH264SmallMissingAckChunks = 4;
+    constexpr uint64_t kKeyH264TinyMissingEmergencyPacerDeadlineUs = 30000;
     constexpr uint64_t kMinRepairTtlUs = 45000;
     constexpr uint64_t kUrgentRepairRemainingUs = 30000;
     constexpr uint64_t kRepairDeliveryGuardUs = 8000;
@@ -1049,6 +1052,7 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
         ? originalFrameSendTimeUs
         : sendTimeUs;
     repairRecord.keyFrame = keyFrame;
+    bool h264KeyTinyMissingCriticalFrameRecorded = false;
 
     for (uint16_t chunkIndex : chunkIndices) {
         if (chunkIndex >= chunkCount) {
@@ -1064,8 +1068,14 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                 nowUs,
                 ackMissingChunks,
                 static_cast<uint32_t>(chunkIndices.size()));
+        const bool h264KeyTinyMissingCritical =
+            repairRecord.codecType == net::CodecType::H264 &&
+            repairRecord.keyFrame &&
+            ackMissingChunks > 0 &&
+            ackMissingChunks <= kKeyH264TinyMissingRepairChunks;
         bool predictedLate = false;
         uint64_t predictedDeliveryUs = 0;
+        uint64_t effectiveRepairDeadlineUs = repairPolicy.deadlineUs;
         {
             const net::PacketPacerStats pacingStats = packetPacer_.GetStats();
             const net::NetworkCondition condition =
@@ -1092,9 +1102,26 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
             predictedLate =
                 repairPolicy.deadlineUs > 0 &&
                 nowUs + predictedDeliveryUs >= repairPolicy.deadlineUs;
+            if (h264KeyTinyMissingCritical) {
+                effectiveRepairDeadlineUs =
+                    nowUs + kKeyH264TinyMissingEmergencyPacerDeadlineUs;
+            }
         }
         {
             std::lock_guard<std::mutex> lock(sentFramesMutex_);
+            if (h264KeyTinyMissingCritical) {
+                if (!h264KeyTinyMissingCriticalFrameRecorded) {
+                    h264KeyTinyMissingCriticalFrames_++;
+                    h264KeyTinyMissingCriticalFrameRecorded = true;
+                }
+                h264KeyTinyMissingCriticalPackets_++;
+                h264KeyTinyMissingCriticalLastFrameId_ = frameId;
+                h264KeyTinyMissingCriticalLastAckMissingChunks_ =
+                    ackMissingChunks;
+                h264KeyTinyMissingCriticalLastRequestedChunks_ =
+                    static_cast<uint32_t>(chunkIndices.size());
+                h264KeyTinyMissingCriticalLastEvent_ = "policy";
+            }
             if (ShouldSkipRepairForFrameLocked(
                     streamId,
                     frameId,
@@ -1110,13 +1137,31 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                 }
             }
         }
-        if (!completedAck && !ttlExpired && predictedLate) {
+        if (!completedAck &&
+            !ttlExpired &&
+            predictedLate &&
+            !h264KeyTinyMissingCritical) {
             ttlExpired = true;
             std::lock_guard<std::mutex> lock(sentFramesMutex_);
             lateRepairSavedPackets_++;
             repairSkippedByTtlPackets_++;
         }
         if (completedAck || ttlExpired) {
+            if (h264KeyTinyMissingCritical) {
+                std::lock_guard<std::mutex> lock(sentFramesMutex_);
+                h264KeyTinyMissingCriticalSkippedPackets_++;
+                h264KeyTinyMissingCriticalLastFrameId_ = frameId;
+                h264KeyTinyMissingCriticalLastAckMissingChunks_ =
+                    ackMissingChunks;
+                h264KeyTinyMissingCriticalLastRequestedChunks_ =
+                    static_cast<uint32_t>(chunkIndices.size());
+                h264KeyTinyMissingCriticalLastEvent_ =
+                    completedAck
+                    ? "skipped-complete-ack"
+                    : (predictedLate
+                        ? "skipped-predicted-late"
+                        : "skipped-ttl");
+            }
             WriteRetransmitTrace(
                 nowUs,
                 completedAck
@@ -1142,7 +1187,7 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                 static_cast<uint32_t>(chunkIndices.size()),
                 ToRepairPriorityString(repairPolicy.priority),
                 repairPolicy.ttlUs,
-                repairPolicy.deadlineUs,
+                effectiveRepairDeadlineUs,
                 predictedLate
                     ? "predicted-delivery-after-deadline"
                     : repairPolicy.reason,
@@ -1196,7 +1241,7 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
             std::move(packet),
             context,
             repairPolicy.priority,
-            repairPolicy.deadlineUs
+            effectiveRepairDeadlineUs
         );
         WriteRetransmitTrace(
             NowMicroseconds(),
@@ -1219,10 +1264,20 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
             static_cast<uint32_t>(chunkIndices.size()),
             ToRepairPriorityString(repairPolicy.priority),
             repairPolicy.ttlUs,
-            repairPolicy.deadlineUs,
+            effectiveRepairDeadlineUs,
             repairPolicy.reason,
             context
         );
+        if (h264KeyTinyMissingCritical) {
+            std::lock_guard<std::mutex> lock(sentFramesMutex_);
+            h264KeyTinyMissingCriticalSentPackets_++;
+            h264KeyTinyMissingCriticalLastFrameId_ = frameId;
+            h264KeyTinyMissingCriticalLastAckMissingChunks_ =
+                ackMissingChunks;
+            h264KeyTinyMissingCriticalLastRequestedChunks_ =
+                static_cast<uint32_t>(chunkIndices.size());
+            h264KeyTinyMissingCriticalLastEvent_ = "sent";
+        }
         sentChunkCount++;
     }
 
@@ -1411,8 +1466,6 @@ NetworkManager::RepairPacketPolicy NetworkManager::BuildRepairPacketPolicy(
     uint32_t ackMissingChunks,
     uint32_t requestedChunks
 ) const {
-    (void)ackMissingChunks;
-
     RepairPacketPolicy policy{};
     policy.ttlUs = CalculateRepairTtlUs(record);
     policy.deadlineUs = record.sendTimeUs + policy.ttlUs;
@@ -1423,8 +1476,15 @@ NetworkManager::RepairPacketPolicy NetworkManager::BuildRepairPacketPolicy(
         : 0;
 
     if (record.codecType == net::CodecType::H264 && record.keyFrame) {
-        policy.priority = net::PacketPacingPriority::Critical;
-        policy.reason = "h264-key-critical";
+        if (ackMissingChunks > 0 &&
+            ackMissingChunks <= kKeyH264TinyMissingRepairChunks) {
+            policy.priority = net::PacketPacingPriority::Emergency;
+            policy.reason = "h264-key-tiny-missing-emergency";
+        }
+        else {
+            policy.priority = net::PacketPacingPriority::Critical;
+            policy.reason = "h264-key-critical";
+        }
         return policy;
     }
 
@@ -1775,6 +1835,12 @@ NetworkManager::LimitRepairChunksByDynamicBudgetLocked(
             ack.missingChunkCount,
             static_cast<uint32_t>(chunkIndices.size()));
 
+    if (record.codecType == net::CodecType::H264 &&
+        record.keyFrame &&
+        ack.missingChunkCount > 0 &&
+        ack.missingChunkCount <= kKeyH264TinyMissingRepairChunks) {
+        return chunkIndices;
+    }
     const uint64_t deliveryReadyUs = nowUs + estimatedRepairDeliveryUs;
     uint64_t usableSlackUs = 0;
     if (repairPolicy.deadlineUs > deliveryReadyUs) {
@@ -2664,6 +2730,8 @@ const char* NetworkManager::ToRepairPriorityString(
     net::PacketPacingPriority priority
 ) const {
     switch (priority) {
+    case net::PacketPacingPriority::Emergency:
+        return "emergency";
     case net::PacketPacingPriority::Critical:
         return "critical";
     case net::PacketPacingPriority::High:
@@ -3031,7 +3099,17 @@ void NetworkManager::HandleRnvpAck(
         ackCount_++;
     }
 
-    HandleAckControl(header.streamId, ack, missingRate);
+    const net::CodecType ackCodecType =
+        static_cast<net::CodecType>(header.codecType);
+    const bool ackKeyFrame =
+        net::HasPacketFlag(header.flags, net::PacketFlag_KeyFrame);
+
+    HandleAckControl(
+        header.streamId,
+        ack,
+        ackCodecType,
+        ackKeyFrame,
+        missingRate);
 
     std::cout << "[NetworkManager] RNVP Ack received. frameId="
         << ack.frameId
@@ -3051,6 +3129,8 @@ void NetworkManager::HandleRnvpAck(
 void NetworkManager::HandleAckControl(
     uint32_t streamId,
     const net::AckPayload& ack,
+    net::CodecType ackCodecType,
+    bool ackKeyFrame,
     double missingRate
 ) {
     SentFrameRecord resendRecord{};
@@ -3092,6 +3172,87 @@ void NetworkManager::HandleAckControl(
             }
         );
 
+        bool countedSmallMissingAck = false;
+        const auto isH264KeySmallMissingAck =
+            [&](const SentFrameRecord* frameRecord) {
+                if (ack.missingChunkCount == 0 ||
+                    ack.missingChunkCount > kKeyH264SmallMissingAckChunks) {
+                    return false;
+                }
+                if (frameRecord != nullptr) {
+                    return frameRecord->codecType == net::CodecType::H264 &&
+                        frameRecord->keyFrame;
+                }
+                return ackCodecType == net::CodecType::H264 && ackKeyFrame;
+            };
+        const auto isH264KeyTinyMissingAck =
+            [&](const SentFrameRecord* frameRecord) {
+                if (ack.missingChunkCount == 0 ||
+                    ack.missingChunkCount > kKeyH264TinyMissingRepairChunks) {
+                    return false;
+                }
+                if (frameRecord != nullptr) {
+                    return frameRecord->codecType == net::CodecType::H264 &&
+                        frameRecord->keyFrame;
+                }
+                return ackCodecType == net::CodecType::H264 && ackKeyFrame;
+            };
+        const auto recordSmallMissingGate =
+            [&](const SentFrameRecord* frameRecord,
+                const char* gate,
+                uint32_t selectedPackets,
+                uint32_t suppressedPackets) {
+                if (!isH264KeySmallMissingAck(frameRecord)) {
+                    return;
+                }
+                if (!countedSmallMissingAck) {
+                    h264KeySmallMissingAckFrames_++;
+                    h264KeySmallMissingAckMissingChunks_ +=
+                        ack.missingChunkCount;
+                    countedSmallMissingAck = true;
+                }
+                const std::string gateText =
+                    gate != nullptr ? gate : "unknown";
+                if (gateText == "history-missing") {
+                    h264KeySmallMissingAckHistoryMissingFrames_++;
+                }
+                else if (gateText == "stale-frame-lag") {
+                    h264KeySmallMissingAckStaleFrameLagFrames_++;
+                }
+                else if (gateText == "stale-age") {
+                    h264KeySmallMissingAckStaleAgeFrames_++;
+                }
+                else if (gateText == "retransmit-budget-exhausted") {
+                    h264KeySmallMissingAckRetransmitBudgetExhaustedFrames_++;
+                }
+                else if (gateText == "dynamic-budget-suppressed") {
+                    h264KeySmallMissingAckDynamicBudgetSuppressedFrames_++;
+                    h264KeySmallMissingAckDynamicBudgetSuppressedPackets_ +=
+                        suppressedPackets;
+                }
+                else if (gateText == "selected-repair") {
+                    h264KeySmallMissingAckSelectedRepairFrames_++;
+                    h264KeySmallMissingAckSelectedRepairPackets_ +=
+                        selectedPackets;
+                    if (ack.missingChunkCount <=
+                        kKeyH264TinyMissingRepairChunks) {
+                        h264KeySelectedRepair1To2Frames_++;
+                        h264KeySelectedRepair1To2Packets_ +=
+                            selectedPackets;
+                    }
+                    else if (ack.missingChunkCount <=
+                        kKeyH264SmallMissingAckChunks) {
+                        h264KeySelectedRepair3To4Frames_++;
+                        h264KeySelectedRepair3To4Packets_ +=
+                            selectedPackets;
+                    }
+                }
+                h264KeySmallMissingAckLastFrameId_ = ack.frameId;
+                h264KeySmallMissingAckLastMissingChunks_ =
+                    ack.missingChunkCount;
+                h264KeySmallMissingAckLastGate_ = gateText;
+            };
+
         if (ack.missingChunkCount == 0) {
             if (record != sentFrames_.end()) {
                 record->acked = true;
@@ -3117,6 +3278,11 @@ void NetworkManager::HandleAckControl(
         if (record == sentFrames_.end()) {
             shouldCountStaleDrop = true;
             shouldRequestKeyFrame = true;
+            recordSmallMissingGate(
+                nullptr,
+                "history-missing",
+                0,
+                0);
             MarkFecLikelySuppressionOutcomeLocked(
                 streamId,
                 ack.frameId,
@@ -3136,13 +3302,17 @@ void NetworkManager::HandleAckControl(
                 nowUs > record->sendTimeUs &&
                 nowUs - record->sendTimeUs +
                     estimatedRepairDeliveryUs > retransmitDeadlineUs;
-
             const bool retransmitBudgetExhausted =
                 record->retransmitCount >= kMaxRetransmitsPerFrame;
+            const bool tinyKeyStaleAgeCriticalRepairAllowed =
+                staleByAge &&
+                !staleByFrameLag &&
+                !retransmitBudgetExhausted &&
+                isH264KeyTinyMissingAck(&(*record));
             const bool budgetRescueAllowed =
                 retransmitBudgetExhausted &&
                 !staleByFrameLag &&
-                !staleByAge &&
+                (!staleByAge || tinyKeyStaleAgeCriticalRepairAllowed) &&
                 TryMarkFecLikelySuppressionRescueLocked(
                     *record,
                     ack,
@@ -3151,10 +3321,20 @@ void NetworkManager::HandleAckControl(
                     "retransmit-budget-exhausted-rescue");
 
             if (staleByFrameLag ||
-                staleByAge ||
+                (staleByAge && !tinyKeyStaleAgeCriticalRepairAllowed) ||
                 (retransmitBudgetExhausted && !budgetRescueAllowed)) {
                 shouldCountStaleDrop = true;
                 shouldRequestKeyFrame = true;
+                recordSmallMissingGate(
+                    &(*record),
+                    staleByFrameLag
+                        ? "stale-frame-lag"
+                        : (
+                            staleByAge
+                            ? "stale-age"
+                            : "retransmit-budget-exhausted"),
+                    0,
+                    0);
                 MarkFecLikelySuppressionOutcomeLocked(
                     streamId,
                     ack.frameId,
@@ -3197,11 +3377,26 @@ void NetworkManager::HandleAckControl(
                         averageRttMs,
                         condition,
                         missingRate);
+                if (isH264KeySmallMissingAck(&(*record)) &&
+                    resendChunkIndices.size() < ack.missingChunkIndices.size()) {
+                    recordSmallMissingGate(
+                        &(*record),
+                        "dynamic-budget-suppressed",
+                        static_cast<uint32_t>(resendChunkIndices.size()),
+                        static_cast<uint32_t>(
+                            ack.missingChunkIndices.size() -
+                            resendChunkIndices.size()));
+                }
                 if (!resendChunkIndices.empty()) {
                     record->retransmitCount++;
                     retransmitAttempt = record->retransmitCount;
                     resendRecord = *record;
                     shouldRetransmit = true;
+                    recordSmallMissingGate(
+                        &(*record),
+                        "selected-repair",
+                        static_cast<uint32_t>(resendChunkIndices.size()),
+                        0);
 
                     if (missingRate >= 0.25) {
                         shouldRequestKeyFrame = true;
@@ -3215,8 +3410,17 @@ void NetworkManager::HandleAckControl(
         }
 
         if (shouldRequestKeyFrame) {
-            forceNextKeyFrame_.store(true, std::memory_order_relaxed);
-            ackKeyFrameRequestCount_++;
+            const bool requestPending =
+                forceNextKeyFrame_.load(std::memory_order_relaxed);
+            const bool cooldownElapsed =
+                lastAckKeyFrameRequestUs_ == 0 ||
+                nowUs > lastAckKeyFrameRequestUs_ +
+                    kAckKeyFrameRequestCooldownUs;
+            if (!requestPending && cooldownElapsed) {
+                forceNextKeyFrame_.store(true, std::memory_order_relaxed);
+                ackKeyFrameRequestCount_++;
+                lastAckKeyFrameRequestUs_ = nowUs;
+            }
         }
     }
 
@@ -3731,6 +3935,159 @@ uint64_t
 NetworkManager::GetRepairFecLikelySuppressionRescuePacketCount() const {
     std::lock_guard<std::mutex> lock(sentFramesMutex_);
     return repairFecLikelySuppressionRescuePackets_;
+}
+
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalPackets_;
+}
+
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalSentPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalSentPackets_;
+}
+
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalSkippedPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalSkippedPackets_;
+}
+
+uint32_t
+NetworkManager::GetH264KeyTinyMissingCriticalLastFrameId() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalLastFrameId_;
+}
+
+uint32_t
+NetworkManager::GetH264KeyTinyMissingCriticalLastAckMissingChunks() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalLastAckMissingChunks_;
+}
+
+uint32_t
+NetworkManager::GetH264KeyTinyMissingCriticalLastRequestedChunks() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalLastRequestedChunks_;
+}
+
+std::string
+NetworkManager::GetH264KeyTinyMissingCriticalLastEvent() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalLastEvent_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckMissingChunkCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckMissingChunks_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckHistoryMissingFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckHistoryMissingFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckStaleFrameLagFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckStaleFrameLagFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckStaleAgeFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckStaleAgeFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckRetransmitBudgetExhaustedFrameCount()
+    const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckRetransmitBudgetExhaustedFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckDynamicBudgetSuppressedFrameCount()
+    const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckDynamicBudgetSuppressedFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckDynamicBudgetSuppressedPacketCount()
+    const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckDynamicBudgetSuppressedPackets_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckSelectedRepairFrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckSelectedRepairFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySmallMissingAckSelectedRepairPacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckSelectedRepairPackets_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySelectedRepair1To2FrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySelectedRepair1To2Frames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySelectedRepair1To2PacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySelectedRepair1To2Packets_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySelectedRepair3To4FrameCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySelectedRepair3To4Frames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeySelectedRepair3To4PacketCount() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySelectedRepair3To4Packets_;
+}
+
+uint32_t
+NetworkManager::GetH264KeySmallMissingAckLastFrameId() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckLastFrameId_;
+}
+
+uint32_t
+NetworkManager::GetH264KeySmallMissingAckLastMissingChunks() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckLastMissingChunks_;
+}
+
+std::string
+NetworkManager::GetH264KeySmallMissingAckLastGate() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeySmallMissingAckLastGate_;
 }
 
 uint64_t NetworkManager::GetLateRepairSavedPacketCount() const {
@@ -4568,9 +4925,35 @@ void NetworkManager::ResetStats() {
         repairFecLikelySuppressedExpiredPackets_ = 0;
         repairFecLikelySuppressionRescueFrames_ = 0;
         repairFecLikelySuppressionRescuePackets_ = 0;
+        h264KeyTinyMissingCriticalFrames_ = 0;
+        h264KeyTinyMissingCriticalPackets_ = 0;
+        h264KeyTinyMissingCriticalSentPackets_ = 0;
+        h264KeyTinyMissingCriticalSkippedPackets_ = 0;
+        h264KeyTinyMissingCriticalLastFrameId_ = 0;
+        h264KeyTinyMissingCriticalLastAckMissingChunks_ = 0;
+        h264KeyTinyMissingCriticalLastRequestedChunks_ = 0;
+        h264KeyTinyMissingCriticalLastEvent_.clear();
+        h264KeySmallMissingAckFrames_ = 0;
+        h264KeySmallMissingAckMissingChunks_ = 0;
+        h264KeySmallMissingAckHistoryMissingFrames_ = 0;
+        h264KeySmallMissingAckStaleFrameLagFrames_ = 0;
+        h264KeySmallMissingAckStaleAgeFrames_ = 0;
+        h264KeySmallMissingAckRetransmitBudgetExhaustedFrames_ = 0;
+        h264KeySmallMissingAckDynamicBudgetSuppressedFrames_ = 0;
+        h264KeySmallMissingAckDynamicBudgetSuppressedPackets_ = 0;
+        h264KeySmallMissingAckSelectedRepairFrames_ = 0;
+        h264KeySmallMissingAckSelectedRepairPackets_ = 0;
+        h264KeySelectedRepair1To2Frames_ = 0;
+        h264KeySelectedRepair1To2Packets_ = 0;
+        h264KeySelectedRepair3To4Frames_ = 0;
+        h264KeySelectedRepair3To4Packets_ = 0;
+        h264KeySmallMissingAckLastFrameId_ = 0;
+        h264KeySmallMissingAckLastMissingChunks_ = 0;
+        h264KeySmallMissingAckLastGate_.clear();
         lateRepairSavedPackets_ = 0;
         ackStaleDroppedFrameCount_ = 0;
         ackKeyFrameRequestCount_ = 0;
+        lastAckKeyFrameRequestUs_ = 0;
         completedFrameAcks_.clear();
         fecLikelySuppressionRecords_.clear();
         forceNextKeyFrame_.store(false, std::memory_order_relaxed);

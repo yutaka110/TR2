@@ -168,9 +168,12 @@ namespace net {
             uint64_t recoveryExpireTimeUs = 0;
             uint64_t lastNackTimeUs = 0;
             uint32_t nackCount = 0;
+            uint32_t keySmallMissingDeadlineRescueCount = 0;
+            uint32_t keySmallMissingDeadlineRescueMissingChunks = 0;
             uint32_t fecGraceSuppressionCount = 0;
             uint32_t likelyArrivalSuppressionCount = 0;
             bool nackSent = false;
+            uint32_t lastNackMissingChunks = 0;
             uint32_t nackRequestedChunks = 0;
             uint32_t postNackReceivedChunks = 0;
             uint32_t retransmitReceivedChunks = 0;
@@ -201,6 +204,7 @@ namespace net {
             uint16_t chunkCount = 0;
             uint16_t receivedCount = 0;
             uint32_t nackCount = 0;
+            uint32_t lastNackMissingChunks = 0;
             uint32_t retransmitReceivedChunks = 0;
             uint32_t retransmitDuplicatePackets = 0;
             uint64_t sendTimeUs = 0;

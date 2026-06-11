@@ -120,6 +120,22 @@ namespace {
 	constexpr uint32_t kDefaultH264LowLatencyMaxWidth = 480;
 	constexpr uint32_t kDefaultH264LowLatencyMaxHeight = 270;
 
+	void TraceStartup(const char* stage) {
+		if (GetEnvironmentVariableA("RNVP_STARTUP_TRACE", nullptr, 0) == 0) {
+			return;
+		}
+
+		static std::mutex mutex;
+		std::lock_guard<std::mutex> lock(mutex);
+		std::ofstream file("startup_trace.log", std::ios::out | std::ios::app);
+		if (!file.is_open()) {
+			return;
+		}
+
+		file << stage << '\n';
+		file.flush();
+	}
+
 	enum class H264ScaleFilter {
 		Fast,
 		Bilinear,
@@ -1673,21 +1689,28 @@ void AppMain::Finalize() {
 }
 
 int AppMain::Run() {
+	TraceStartup("run-enter");
 	D3DResourceLeakChecker leakCheck;
 
 	if (net::RunNetworkExperimentReplayFromEnv("logs")) {
+		TraceStartup("run-replay-exit");
 		return 0;
 	}
 
 	AppBootstrap bootstrap;
+	TraceStartup("bootstrap-before");
 	if (!bootstrap.Initialize(hInstance_)) {
+		TraceStartup("bootstrap-failed");
 		return -1;
 	}
+	TraceStartup("bootstrap-ok");
 
 	if (FAILED(MFStartup(MF_VERSION))) {
 		OutputDebugStringA("[AppMain] MFStartup failed.\n");
+		TraceStartup("mfstartup-failed");
 		return -1;
 	}
+	TraceStartup("mfstartup-ok");
 
 	const HWND hwnd = bootstrap.Handle();
 	const uint32_t windowWidth = bootstrap.Width();
@@ -1697,9 +1720,12 @@ int AppMain::Run() {
 
 
 	EngineContext engineContext;
+	TraceStartup("engine-initialize-before");
 	if (!engineContext.Initialize(hwnd, windowWidth, windowHeight, /*enableDebugLayer=*/true)) {
+		TraceStartup("engine-initialize-failed");
 		return -1;
 	}
+	TraceStartup("engine-initialize-ok");
 
 	core::Device& dev = engineContext.GetDevice();
 
@@ -1805,14 +1831,20 @@ int AppMain::Run() {
 
 	AppSceneResources scene;
 	AppPipelines appPipelines;
+	TraceStartup("pipelines-initialize-before");
 	if (!appPipelines.Initialize(device.Get())) {
 		OutputDebugStringA("[AppMain] AppPipelines initialization failed.\n");
+		TraceStartup("pipelines-initialize-failed");
 		return 1;
 	}
+	TraceStartup("pipelines-initialize-ok");
+	TraceStartup("scene-initialize-before");
 	if (!scene.Initialize(device, srvDescriptorHeap, descriptorSizeSRV)) {
 		OutputDebugStringA("[AppMain] AppSceneResources initialization failed.\n");
+		TraceStartup("scene-initialize-failed");
 		return 1;
 	}
+	TraceStartup("scene-initialize-ok");
 
 	AppRuntimeState runtimeState{};
 	bool autoNetworkExperiment = false;
@@ -2218,6 +2250,15 @@ int AppMain::Run() {
 		uint32_t h264AuChunkCount = 0;
 		bool h264AuIsIdr = false;
 		bool h264AuIsDecoderSync = false;
+		uint64_t h264RequestedKeyFrameConsumedFrames = 0;
+		uint64_t h264EncoderKeyFrameRequests = 0;
+		uint64_t h264RecoveryKeyFrameRequests = 0;
+		uint64_t h264AwaitingSyncKeyFrameRequests = 0;
+		uint64_t h264PeriodicIdrRequests = 0;
+		uint64_t h264IdrFrames = 0;
+		uint64_t h264DecoderSyncFrames = 0;
+		uint32_t h264ConsecutiveIdrFrames = 0;
+		uint32_t h264MaxConsecutiveIdrFrames = 0;
 		std::string h264AuProtectionLevel;
 		bool h264AuDroppedBeforeSend = false;
 		std::string h264AuDropReason;
@@ -2304,28 +2345,37 @@ int AppMain::Run() {
 	net::NetworkVideoReceiver networkVideoReceiver;
 
 	if (net::NetworkModeCanReceiveVideo(runtimeState.networkRuntimeMode)) {
+		TraceStartup("udp-start-before");
 		if (udpReceiver->Start(kRnvpListenPort)) {
 			std::cout << "[AppMain] UdpReceiver started. port="
 				<< kRnvpListenPort << "\n";
+			TraceStartup("udp-start-ok");
 		}
 		else {
 			std::cerr << "[AppMain] Failed to start UdpReceiver. port="
 				<< kRnvpListenPort << "\n";
+			TraceStartup("udp-start-failed");
 		}
 	}
 	else {
 		std::cout << "[AppMain] UdpReceiver disabled for network mode="
 			<< net::ToString(runtimeState.networkRuntimeMode) << "\n";
+		TraceStartup("udp-start-disabled");
 	}
+	TraceStartup("udp-start-after");
 
 	if (networkManager) {
+		TraceStartup("control-receiver-start-before");
 		if (networkManager->StartRNVPControlReceiver()) {
 			std::cout << "[AppMain] NetworkManager RNVP control receiver started.\n";
+			TraceStartup("control-receiver-start-ok");
 		}
 		else {
 			std::cerr << "[AppMain] Failed to start NetworkManager RNVP control receiver.\n";
+			TraceStartup("control-receiver-start-failed");
 		}
 	}
+	TraceStartup("control-receiver-start-after");
 
 	// Merge receiver, sender, simulator, and adaptive streaming state for monitoring and CSV logging.
 	auto collectNetworkStats =
@@ -2412,6 +2462,59 @@ int AppMain::Run() {
 				sender->GetRepairFecLikelySuppressionRescueFrameCount();
 			stats.repairFecLikelySuppressionRescuePackets =
 				sender->GetRepairFecLikelySuppressionRescuePacketCount();
+			stats.h264KeyTinyMissingCriticalFrames =
+				sender->GetH264KeyTinyMissingCriticalFrameCount();
+			stats.h264KeyTinyMissingCriticalPackets =
+				sender->GetH264KeyTinyMissingCriticalPacketCount();
+			stats.h264KeyTinyMissingCriticalSentPackets =
+				sender->GetH264KeyTinyMissingCriticalSentPacketCount();
+			stats.h264KeyTinyMissingCriticalSkippedPackets =
+				sender->GetH264KeyTinyMissingCriticalSkippedPacketCount();
+			stats.h264KeyTinyMissingCriticalLastFrameId =
+				sender->GetH264KeyTinyMissingCriticalLastFrameId();
+			stats.h264KeyTinyMissingCriticalLastAckMissingChunks =
+				sender->GetH264KeyTinyMissingCriticalLastAckMissingChunks();
+			stats.h264KeyTinyMissingCriticalLastRequestedChunks =
+				sender->GetH264KeyTinyMissingCriticalLastRequestedChunks();
+			stats.h264KeyTinyMissingCriticalLastEvent =
+				sender->GetH264KeyTinyMissingCriticalLastEvent();
+			stats.h264KeySmallMissingAckFrames =
+				sender->GetH264KeySmallMissingAckFrameCount();
+			stats.h264KeySmallMissingAckMissingChunks =
+				sender->GetH264KeySmallMissingAckMissingChunkCount();
+			stats.h264KeySmallMissingAckHistoryMissingFrames =
+				sender->GetH264KeySmallMissingAckHistoryMissingFrameCount();
+			stats.h264KeySmallMissingAckStaleFrameLagFrames =
+				sender->GetH264KeySmallMissingAckStaleFrameLagFrameCount();
+			stats.h264KeySmallMissingAckStaleAgeFrames =
+				sender->GetH264KeySmallMissingAckStaleAgeFrameCount();
+			stats.h264KeySmallMissingAckRetransmitBudgetExhaustedFrames =
+				sender
+					->GetH264KeySmallMissingAckRetransmitBudgetExhaustedFrameCount();
+			stats.h264KeySmallMissingAckDynamicBudgetSuppressedFrames =
+				sender
+					->GetH264KeySmallMissingAckDynamicBudgetSuppressedFrameCount();
+			stats.h264KeySmallMissingAckDynamicBudgetSuppressedPackets =
+				sender
+					->GetH264KeySmallMissingAckDynamicBudgetSuppressedPacketCount();
+			stats.h264KeySmallMissingAckSelectedRepairFrames =
+				sender->GetH264KeySmallMissingAckSelectedRepairFrameCount();
+			stats.h264KeySmallMissingAckSelectedRepairPackets =
+				sender->GetH264KeySmallMissingAckSelectedRepairPacketCount();
+			stats.h264KeySelectedRepair1To2Frames =
+				sender->GetH264KeySelectedRepair1To2FrameCount();
+			stats.h264KeySelectedRepair1To2Packets =
+				sender->GetH264KeySelectedRepair1To2PacketCount();
+			stats.h264KeySelectedRepair3To4Frames =
+				sender->GetH264KeySelectedRepair3To4FrameCount();
+			stats.h264KeySelectedRepair3To4Packets =
+				sender->GetH264KeySelectedRepair3To4PacketCount();
+			stats.h264KeySmallMissingAckLastFrameId =
+				sender->GetH264KeySmallMissingAckLastFrameId();
+			stats.h264KeySmallMissingAckLastMissingChunks =
+				sender->GetH264KeySmallMissingAckLastMissingChunks();
+			stats.h264KeySmallMissingAckLastGate =
+				sender->GetH264KeySmallMissingAckLastGate();
 			stats.lateRepairSavedPackets =
 				sender->GetLateRepairSavedPacketCount();
 			stats.retransmitClassifiedPackets =
@@ -2481,6 +2584,20 @@ int AppMain::Run() {
 				pacingStats.repairBorrowedPackets;
 			stats.pacingRepairBorrowedBytes =
 				pacingStats.repairBorrowedBytes;
+			stats.pacingEmergencySentPackets =
+				pacingStats.emergencySentPackets;
+			stats.pacingEmergencySentBytes =
+				pacingStats.emergencySentBytes;
+			stats.pacingEmergencyBorrowedPackets =
+				pacingStats.emergencyBorrowedPackets;
+			stats.pacingEmergencyBorrowedBytes =
+				pacingStats.emergencyBorrowedBytes;
+			stats.h264KeyTinyEmergencyLastQueueAgeMs =
+				pacingStats.emergencyLastQueueAgeMs;
+			stats.h264KeyTinyEmergencyMaxQueueAgeMs =
+				pacingStats.emergencyMaxQueueAgeMs;
+			stats.h264KeyTinyEmergencyAvgQueueAgeMs =
+				pacingStats.emergencyAvgQueueAgeMs;
 			stats.pacingDroppedPackets = pacingStats.droppedPackets;
 			stats.pacingDeadlineDroppedPackets =
 				pacingStats.deadlineDroppedPackets;
@@ -2574,6 +2691,14 @@ int AppMain::Run() {
 				adaptiveState.h264VideoBudgetScale;
 			stats.pacingBurstGuardActive =
 				adaptiveState.lastPacingBurstGuardActive;
+			stats.fixedPacingRecentMaxQueueDelayMs =
+				adaptiveState.fixedPacingRecentMaxQueueDelayMs;
+			stats.fixedPacingQueueReleaseStableSec =
+				adaptiveState.fixedPacingQueueReleaseStableSec;
+			stats.fixedPacingQueueRecovered =
+				adaptiveState.fixedPacingQueueRecovered;
+			stats.fixedPacingQueueReleaseEligible =
+				adaptiveState.fixedPacingQueueReleaseEligible;
 			stats.adaptiveRepairBudgetUtilization =
 				adaptiveState.lastRepairBudgetUtilization;
 			stats.adaptiveRepairBorrowedRatio =
@@ -2664,6 +2789,24 @@ int AppMain::Run() {
 					sendTelemetry->h264AuIsIdr;
 				stats.h264AuIsDecoderSync =
 					sendTelemetry->h264AuIsDecoderSync;
+				stats.h264RequestedKeyFrameConsumedFrames =
+					sendTelemetry->h264RequestedKeyFrameConsumedFrames;
+				stats.h264EncoderKeyFrameRequests =
+					sendTelemetry->h264EncoderKeyFrameRequests;
+				stats.h264RecoveryKeyFrameRequests =
+					sendTelemetry->h264RecoveryKeyFrameRequests;
+				stats.h264AwaitingSyncKeyFrameRequests =
+					sendTelemetry->h264AwaitingSyncKeyFrameRequests;
+				stats.h264PeriodicIdrRequests =
+					sendTelemetry->h264PeriodicIdrRequests;
+				stats.h264IdrFrames =
+					sendTelemetry->h264IdrFrames;
+				stats.h264DecoderSyncFrames =
+					sendTelemetry->h264DecoderSyncFrames;
+				stats.h264ConsecutiveIdrFrames =
+					sendTelemetry->h264ConsecutiveIdrFrames;
+				stats.h264MaxConsecutiveIdrFrames =
+					sendTelemetry->h264MaxConsecutiveIdrFrames;
 				stats.h264AuProtectionLevel =
 					sendTelemetry->h264AuProtectionLevel;
 				stats.h264AuDroppedBeforeSend =
@@ -2934,6 +3077,76 @@ int AppMain::Run() {
 				videoReceiverStats.decodeLoopLastPopGapMs;
 			stats.receiveDecodeLoopMaxPopGapMs =
 				videoReceiverStats.decodeLoopMaxPopGapMs;
+			stats.receiveStartupDecodeLoopMaxPopGapMs =
+				videoReceiverStats.startupDecodeLoopMaxPopGapMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapMs =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapAtMs =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapAtMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapFrameId =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapFrameId;
+			stats.receiveSteadyDecodeLoopMaxPopGapStreamId =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapStreamId;
+			stats.receiveSteadyDecodeLoopMaxPopGapCodec =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapCodec;
+			stats.receiveSteadyDecodeLoopMaxPopGapInputFrameAgeMs =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapInputFrameAgeMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapDecodedQueueSize =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapDecodedQueueSize;
+			stats.receiveSteadyDecodeLoopMaxPopGapCompletedQueueSize =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapCompletedQueueSize;
+			stats.receiveSteadyDecodeLoopMaxPopGapCompletedQueuePopAgeMs =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapCompletedQueuePopAgeMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapCompletedQueuePushIntervalMs =
+				videoReceiverStats
+					.steadyDecodeLoopMaxPopGapCompletedQueuePushIntervalMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapArrivalRatio =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapArrivalRatio;
+			stats.receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapReceiverJitterMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapReceiverLatencyMs =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapReceiverLatencyMs;
+			stats.receiveSteadyDecodeLoopMaxPopGapClass =
+				videoReceiverStats.steadyDecodeLoopMaxPopGapClass;
+			stats.receiveH264StartupActive =
+				videoReceiverStats.startupActive;
+			stats.receiveH264StartupDecoderSynced =
+				videoReceiverStats.startupDecoderSynced;
+			stats.receiveH264StartupFirstDecoded =
+				videoReceiverStats.startupFirstDecoded;
+			stats.receiveH264StartupFirstDisplayed =
+				videoReceiverStats.startupFirstDisplayed;
+			stats.receiveH264StartupReady =
+				videoReceiverStats.startupReady;
+			stats.receiveH264StartupElapsedMs =
+				videoReceiverStats.startupElapsedMs;
+			if (stats.receiveH264StartupElapsedMs > 0.0 &&
+				stats.receiveSteadyDecodeLoopMaxPopGapAtMs > 0.0) {
+				stats.receiveSteadyDecodeLoopMaxPopGapAgeMs =
+					stats.receiveH264StartupElapsedMs -
+					stats.receiveSteadyDecodeLoopMaxPopGapAtMs;
+			}
+			else {
+				stats.receiveSteadyDecodeLoopMaxPopGapAgeMs = -1.0;
+			}
+			stats.adaptiveArrivalGapJitterSpikeActive =
+				stats.receiveSteadyDecodeLoopMaxPopGapClass ==
+				"arrival-gap-jitter-spike" &&
+				stats.receiveSteadyDecodeLoopMaxPopGapMs >= 20.0 &&
+				stats.receiveSteadyDecodeLoopMaxPopGapArrivalRatio >= 0.70 &&
+				stats.receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs >= 20.0 &&
+				stats.receiveSteadyDecodeLoopMaxPopGapAgeMs >= 0.0 &&
+				stats.receiveSteadyDecodeLoopMaxPopGapAgeMs <= 1500.0;
+			stats.receiveH264StartupDecoderSyncMs =
+				videoReceiverStats.startupDecoderSyncMs;
+			stats.receiveH264StartupFirstDecodedMs =
+				videoReceiverStats.startupFirstDecodedMs;
+			stats.receiveH264StartupFirstDisplayedMs =
+				videoReceiverStats.startupFirstDisplayedMs;
+			stats.receiveH264StartupReadyMs =
+				videoReceiverStats.startupReadyMs;
+			stats.receiveH264StartupQueueFlushFrames =
+				videoReceiverStats.startupQueueFlushFrames;
 			stats.receiveDecodeOverwrittenFrames =
 				videoReceiverStats.overwrittenFrames;
 			stats.receiveDecodeQueueDroppedFrames =
@@ -2982,21 +3195,36 @@ int AppMain::Run() {
 				videoReceiverStats.freshnessDropThresholdMs;
 			stats.receiveDecodeLastDropReason =
 				videoReceiverStats.lastDropReason;
+			stats.receiveLastFreshnessDropAgeMs =
+				videoReceiverStats.lastFreshnessDropAgeMs;
+			stats.receiveMaxFreshnessDropAgeMs =
+				videoReceiverStats.maxFreshnessDropAgeMs;
+			stats.receiveLastFreshnessDropFrameId =
+				videoReceiverStats.lastFreshnessDropFrameId;
+			stats.receiveLastFreshnessDropStreamId =
+				videoReceiverStats.lastFreshnessDropStreamId;
+			stats.receiveLastFreshnessDropCodec =
+				videoReceiverStats.lastFreshnessDropCodec;
 		}
 
 		return stats;
 		};
 
 	runLoop.SetNetworkStatsProvider(collectNetworkStats);
+	TraceStartup("network-stats-provider-set");
 
 	net::NetworkCsvLogger networkCsvLogger;
-	if (networkCsvLogger.Start("logs")) {
+	TraceStartup("network-csv-start-before");
+	if (networkCsvLogger.Start("logs") ||
+		networkCsvLogger.Start("network_logs")) {
 		std::cout << "[AppMain] Network CSV logging started: "
 			<< networkCsvLogger.FilePath()
 			<< "\n";
+		TraceStartup("network-csv-start-ok");
 	}
 	else {
 		std::cerr << "[AppMain] Network CSV logging failed to start.\n";
+		TraceStartup("network-csv-start-failed");
 	}
 	const auto networkCsvStartTime = std::chrono::steady_clock::now();
 	auto lastNetworkCsvSampleTime = networkCsvStartTime - std::chrono::seconds(1);
@@ -3198,8 +3426,18 @@ int AppMain::Run() {
 		uint64_t h264EncoderReinitializations = 0;
 		uint64_t fecProtectedH264KeyFrames = 0;
 		uint64_t fecProtectedH264LargeFrames = 0;
+		uint64_t h264RequestedKeyFrameConsumedFrames = 0;
+		uint64_t h264EncoderKeyFrameRequests = 0;
+		uint64_t h264RecoveryKeyFrameRequests = 0;
+		uint64_t h264AwaitingSyncKeyFrameRequests = 0;
+		uint64_t h264PeriodicIdrRequests = 0;
+		uint64_t h264IdrFrames = 0;
+		uint64_t h264DecoderSyncFrames = 0;
+		uint32_t h264ConsecutiveIdrFrames = 0;
+		uint32_t h264MaxConsecutiveIdrFrames = 0;
 		bool h264DecoderSyncSent = false;
 		bool h264AwaitingDecoderSync = true;
+		std::chrono::steady_clock::time_point h264LastKeyProtectionTime{};
 		std::vector<uint8_t> h264Nv12Frame;
 		struct H264PendingInputFrame {
 			uint64_t sequence = 0;
@@ -3245,6 +3483,8 @@ int AppMain::Run() {
 			h264InputSequence = 0;
 			h264AsyncCadenceHoldUntil = {};
 			h264AsyncPendingNoOutputStreak = 0;
+			h264LastKeyProtectionTime = {};
+			h264ConsecutiveIdrFrames = 0;
 		};
 
 		while (videoSenderRunning.load()) {
@@ -3318,18 +3558,31 @@ int AppMain::Run() {
 			double h264AsyncCadenceHoldRemainingMs = 0.0;
 			if (runtimeState.networkVideoCodec == net::CodecType::H264 &&
 				adaptiveState.h264VideoBudgetScale < 0.999) {
+				const bool latencyFreshnessCadence =
+					adaptiveState.lastRepairDecisionReason ==
+					"latency-pressure-freshness" ||
+					adaptiveState.lastRepairDecisionReason ==
+					"latency-pressure-freshness-hard" ||
+					adaptiveState.lastRepairDecisionReason ==
+					"latency-pressure-freshness-hold";
 				const double cadenceScale =
-					adaptiveState.h264VideoBudgetScale <= 0.70
+					latencyFreshnessCadence
 					? ReadEnvDoubleClamped(
-						"RNVP_H264_QUEUE_HARD_CADENCE_SCALE",
-						0.67,
-						0.35,
+						"RNVP_H264_LATENCY_FRESHNESS_CADENCE_SCALE",
+						0.90,
+						0.50,
 						1.0)
-					: ReadEnvDoubleClamped(
-						"RNVP_H264_QUEUE_CADENCE_SCALE",
-						0.80,
-						0.35,
-						1.0);
+					: (adaptiveState.h264VideoBudgetScale <= 0.70
+						? ReadEnvDoubleClamped(
+							"RNVP_H264_QUEUE_HARD_CADENCE_SCALE",
+							0.67,
+							0.35,
+							1.0)
+						: ReadEnvDoubleClamped(
+							"RNVP_H264_QUEUE_CADENCE_SCALE",
+							0.80,
+							0.35,
+							1.0));
 				inputCadenceFps =
 					std::clamp(
 						static_cast<int>(
@@ -3894,13 +4147,28 @@ int AppMain::Run() {
 				}
 
 				if (h264EncoderReady) {
+					const bool h264AwaitingSyncRequest =
+						h264AwaitingDecoderSync;
+					const bool h264PeriodicIdrRequest =
+						periodicIdrFrames > 0 &&
+						(frameId % periodicIdrFrames) == 1;
 					if (requestedKeyFrame) {
+						h264RequestedKeyFrameConsumedFrames++;
+						h264RecoveryKeyFrameRequests++;
 						h264AwaitingDecoderSync = true;
 					}
 					if (requestedKeyFrame ||
-						h264AwaitingDecoderSync ||
-						(periodicIdrFrames > 0 &&
-							(frameId % periodicIdrFrames) == 1)) {
+						h264AwaitingSyncRequest ||
+						h264PeriodicIdrRequest) {
+						if (h264AwaitingSyncRequest && !requestedKeyFrame) {
+							h264AwaitingSyncKeyFrameRequests++;
+						}
+						if (h264PeriodicIdrRequest &&
+							!requestedKeyFrame &&
+							!h264AwaitingSyncRequest) {
+							h264PeriodicIdrRequests++;
+						}
+						h264EncoderKeyFrameRequests++;
 						h264Encoder.RequestKeyFrame();
 					}
 
@@ -4549,6 +4817,24 @@ int AppMain::Run() {
 					sendTelemetry.h264AuChunkCount = 0;
 					sendTelemetry.h264AuIsIdr = false;
 					sendTelemetry.h264AuIsDecoderSync = false;
+					sendTelemetry.h264RequestedKeyFrameConsumedFrames =
+						h264RequestedKeyFrameConsumedFrames;
+					sendTelemetry.h264EncoderKeyFrameRequests =
+						h264EncoderKeyFrameRequests;
+					sendTelemetry.h264RecoveryKeyFrameRequests =
+						h264RecoveryKeyFrameRequests;
+					sendTelemetry.h264AwaitingSyncKeyFrameRequests =
+						h264AwaitingSyncKeyFrameRequests;
+					sendTelemetry.h264PeriodicIdrRequests =
+						h264PeriodicIdrRequests;
+					sendTelemetry.h264IdrFrames =
+						h264IdrFrames;
+					sendTelemetry.h264DecoderSyncFrames =
+						h264DecoderSyncFrames;
+					sendTelemetry.h264ConsecutiveIdrFrames =
+						h264ConsecutiveIdrFrames;
+					sendTelemetry.h264MaxConsecutiveIdrFrames =
+						h264MaxConsecutiveIdrFrames;
 					sendTelemetry.h264AuProtectionLevel =
 						h264SkippedInputWaitingForFreshCamera
 						? "fresh-camera-wait"
@@ -4775,6 +5061,23 @@ int AppMain::Run() {
 				h264AuHeaderValid &&
 				((h264AuHeader.flags &
 					net::H264AccessUnitFlag_DecoderSync) != 0);
+			if (sendCodec == net::CodecType::H264 &&
+				!encodedPayload.empty()) {
+				if (h264AuIsIdr) {
+					h264IdrFrames++;
+					h264ConsecutiveIdrFrames++;
+					h264MaxConsecutiveIdrFrames =
+						(std::max)(
+							h264MaxConsecutiveIdrFrames,
+							h264ConsecutiveIdrFrames);
+				}
+				else {
+					h264ConsecutiveIdrFrames = 0;
+				}
+				if (h264AuIsDecoderSync) {
+					h264DecoderSyncFrames++;
+				}
+			}
 			const uint32_t h264AuChunkCount =
 				sendCodec == net::CodecType::H264 && !encodedPayload.empty()
 				? static_cast<uint32_t>(
@@ -4809,13 +5112,47 @@ int AppMain::Run() {
 				sendCodec == net::CodecType::H264 ? "none" : "";
 			const bool h264AuProtectionEnabled =
 				ReadEnvBool("RNVP_H264_AU_PROTECTION_ENABLED", false);
+			const bool h264KeyProtectionEnabled =
+				ReadEnvBool("RNVP_H264_KEY_PROTECTION_ENABLED", true);
+			const double h264KeyProtectionIntervalMs =
+				ReadEnvDoubleClamped(
+					"RNVP_H264_KEY_PROTECTION_INTERVAL_MS",
+					900.0,
+					250.0,
+					5000.0);
 			if (sendCodec == net::CodecType::H264 &&
 				(h264AuIsIdr || h264AuIsDecoderSync)) {
-				if (h264AuProtectionEnabled) {
+				const auto keyProtectionNow =
+					std::chrono::steady_clock::now();
+				const bool keyProtectionNeverSent =
+					h264LastKeyProtectionTime.time_since_epoch().count() == 0;
+				const double keyProtectionElapsedMs =
+					keyProtectionNeverSent
+					? h264KeyProtectionIntervalMs
+					: std::chrono::duration<double, std::milli>(
+						keyProtectionNow -
+						h264LastKeyProtectionTime).count();
+				const bool h264StrongKeyProtectionDue =
+					h264KeyProtectionEnabled &&
+					h264AuIsIdr &&
+					(keyProtectionNeverSent ||
+						keyProtectionElapsedMs >=
+							h264KeyProtectionIntervalMs);
+				if (h264AuProtectionEnabled ||
+					h264StrongKeyProtectionDue) {
 					protection.fecGroupChunkCountOverride = 4;
 					protection.forceFec = true;
-					h264AuProtectionLevel = "decoder-sync-g4";
+					protection.highPriorityData = true;
+					protection.highPriorityFec = true;
+					protection.extraPacingDeadlineUs = 30000;
+					h264AuProtectionLevel =
+						h264StrongKeyProtectionDue
+						? "keyframe-g4-priority"
+						: "decoder-sync-g4";
 					fecProtectedH264KeyFrames++;
+					if (h264StrongKeyProtectionDue) {
+						h264LastKeyProtectionTime = keyProtectionNow;
+					}
 				}
 				else {
 					h264AuProtectionLevel = "decoder-sync-observed";
@@ -4939,6 +5276,24 @@ int AppMain::Run() {
 					h264AuIsIdr;
 				sendTelemetry.h264AuIsDecoderSync =
 					h264AuIsDecoderSync;
+				sendTelemetry.h264RequestedKeyFrameConsumedFrames =
+					h264RequestedKeyFrameConsumedFrames;
+				sendTelemetry.h264EncoderKeyFrameRequests =
+					h264EncoderKeyFrameRequests;
+				sendTelemetry.h264RecoveryKeyFrameRequests =
+					h264RecoveryKeyFrameRequests;
+				sendTelemetry.h264AwaitingSyncKeyFrameRequests =
+					h264AwaitingSyncKeyFrameRequests;
+				sendTelemetry.h264PeriodicIdrRequests =
+					h264PeriodicIdrRequests;
+				sendTelemetry.h264IdrFrames =
+					h264IdrFrames;
+				sendTelemetry.h264DecoderSyncFrames =
+					h264DecoderSyncFrames;
+				sendTelemetry.h264ConsecutiveIdrFrames =
+					h264ConsecutiveIdrFrames;
+				sendTelemetry.h264MaxConsecutiveIdrFrames =
+					h264MaxConsecutiveIdrFrames;
 				sendTelemetry.h264AuProtectionLevel =
 					h264AuProtectionLevel;
 				sendTelemetry.h264AuDroppedBeforeSend =
@@ -5436,8 +5791,24 @@ int AppMain::Run() {
 					videoReceiverStats.latestDecodedFrameAgeMs;
 				adaptiveInput.receiveFreshnessDropThresholdMs =
 					videoReceiverStats.freshnessDropThresholdMs;
+				adaptiveInput.receiveDecodeLastDropReason =
+					videoReceiverStats.lastDropReason;
+				adaptiveInput.receiveLastFreshnessDropAgeMs =
+					videoReceiverStats.lastFreshnessDropAgeMs;
 				adaptiveInput.lastOutputQueueDropReason =
 					receiverStats.lastOutputQueueDropReason;
+				adaptiveInput.receiveStartupElapsedMs =
+					videoReceiverStats.startupElapsedMs;
+				adaptiveInput.receiveSteadyDecodeLoopMaxPopGapMs =
+					videoReceiverStats.steadyDecodeLoopMaxPopGapMs;
+				adaptiveInput.receiveSteadyDecodeLoopMaxPopGapAtMs =
+					videoReceiverStats.steadyDecodeLoopMaxPopGapAtMs;
+				adaptiveInput.receiveSteadyDecodeLoopMaxPopGapArrivalRatio =
+					videoReceiverStats.steadyDecodeLoopMaxPopGapArrivalRatio;
+				adaptiveInput.receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs =
+					videoReceiverStats.steadyDecodeLoopMaxPopGapReceiverJitterMs;
+				adaptiveInput.receiveSteadyDecodeLoopMaxPopGapClass =
+					videoReceiverStats.steadyDecodeLoopMaxPopGapClass;
 				const net::PacketPacerStats pacingStats =
 					networkManager->GetPacingStats();
 				adaptiveInput.pacingEnabled = pacingStats.enabled;

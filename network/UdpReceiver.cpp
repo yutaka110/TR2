@@ -1009,8 +1009,10 @@ namespace {
 
         header.sendTimeUs = NowMicroseconds();
         header.payloadSize = static_cast<uint32_t>(payloadSize);
-        header.flags = PacketFlag_None;
-        header.codecType = static_cast<uint8_t>(CodecType::Unknown);
+        header.flags = ackInfo.keyFrame
+            ? PacketFlag_KeyFrame
+            : PacketFlag_None;
+        header.codecType = static_cast<uint8_t>(ackInfo.codecType);
 
         EncodeRnvpHeaderV1(packet.data(), header);
         EncodeAckPayload(packet.data() + kRnvpHeaderV1Size, ack);

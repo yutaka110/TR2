@@ -21,6 +21,16 @@ namespace net {
 
     const char* ToString(AdaptiveDegradationCause cause);
 
+    enum class AdaptiveFreshnessDropClass {
+        None,
+        QueuePressure,
+        LatencyPressure,
+        RepairBudgetPressure,
+        CadenceLimited,
+        TrueStaleFrame,
+        Unclassified
+    };
+
     enum class AdaptiveControlMode {
         FixedQuality = 0,
         LossReactive = 1,
@@ -61,7 +71,15 @@ namespace net {
         double receiveDecodeInputFrameAgeMs = 0.0;
         double receiveLatestDecodedFrameAgeMs = 0.0;
         double receiveFreshnessDropThresholdMs = 0.0;
+        std::string receiveDecodeLastDropReason;
+        double receiveLastFreshnessDropAgeMs = 0.0;
         std::string lastOutputQueueDropReason;
+        double receiveStartupElapsedMs = 0.0;
+        double receiveSteadyDecodeLoopMaxPopGapMs = 0.0;
+        double receiveSteadyDecodeLoopMaxPopGapAtMs = 0.0;
+        double receiveSteadyDecodeLoopMaxPopGapArrivalRatio = 0.0;
+        double receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs = 0.0;
+        std::string receiveSteadyDecodeLoopMaxPopGapClass;
         bool pacingEnabled = false;
         uint64_t pacingDeadlineDroppedPackets = 0;
         uint64_t pacingHighPriorityDeadlineDroppedPackets = 0;
@@ -166,6 +184,10 @@ namespace net {
         uint64_t lastDeadlineNackMissingChunks = 0;
         double h264VideoBudgetScale = 1.0;
         bool lastPacingBurstGuardActive = false;
+        double fixedPacingRecentMaxQueueDelayMs = 0.0;
+        double fixedPacingQueueReleaseStableSec = 0.0;
+        bool fixedPacingQueueRecovered = false;
+        bool fixedPacingQueueReleaseEligible = false;
         double lastRepairBudgetUtilization = 0.0;
         double lastRepairBorrowedRatio = 0.0;
         uint64_t lastRepairSentBytesDelta = 0;
@@ -283,7 +305,9 @@ namespace net {
             uint64_t deadlineNackMissingChunkDelta,
             uint64_t recoveryDeadlineDropDelta,
             uint64_t retransmitStaleDropDelta,
-            uint64_t freshnessDropDelta
+            uint64_t freshnessDropDelta,
+            AdaptiveFreshnessDropClass freshnessDropClass,
+            uint64_t receiveDecodeRenderOverwriteDelta
         ) const;
         double CalculateQoeScore(
             const AdaptiveStreamingInput& input,
@@ -291,7 +315,14 @@ namespace net {
             uint64_t outputQueueDropDelta,
             uint64_t recoveryDeadlineDropDelta,
             uint64_t retransmitStaleDropDelta,
-            uint64_t freshnessDropDelta
+            uint64_t freshnessDropDelta,
+            AdaptiveFreshnessDropClass freshnessDropClass,
+            uint64_t receiveDecodeRenderOverwriteDelta
+        ) const;
+        AdaptiveFreshnessDropClass ClassifyFreshnessDrop(
+            const AdaptiveStreamingInput& input,
+            uint64_t freshnessDropDelta,
+            double recentMaxQueueDelayMs
         ) const;
 
         int ClampQuality(int value) const;
@@ -370,6 +401,9 @@ namespace net {
         double pacingBurstGuardSec_ = 0.0;
         double pacingBurstPressureSec_ = 0.0;
         double pacingBurstVideoBudgetScale_ = 1.0;
+        double latencyFreshnessGuardSec_ = 0.0;
+        double fixedPacingRecentMaxQueueDelayMs_ = 0.0;
+        double fixedPacingQueueReleaseStableSec_ = 0.0;
         double repairBudgetGuardSec_ = 0.0;
         double repairBorrowPressureSec_ = 0.0;
         double retransmitNotArrivedPressureSec_ = 0.0;

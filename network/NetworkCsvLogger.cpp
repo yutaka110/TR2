@@ -101,6 +101,90 @@ namespace {
         return current >= previous ? current - previous : current;
     }
 
+    bool StartsWith(const std::string& value, const char* prefix) {
+        const std::string prefixText(prefix != nullptr ? prefix : "");
+        return value.size() >= prefixText.size() &&
+            value.compare(0, prefixText.size(), prefixText) == 0;
+    }
+
+    std::pair<std::string, std::string> ClassifyFreshnessDrop(
+        const NetworkStatsSnapshot& stats,
+        uint64_t freshnessDropDelta) {
+        if (freshnessDropDelta == 0) {
+            return { "", "" };
+        }
+
+        const double observedFrameAgeMs = (std::max)(
+            stats.receiveDecodeInputFrameAgeMs,
+            stats.receiveLatestDecodedFrameAgeMs);
+        const double freshnessAgeMs =
+            stats.receiveLastFreshnessDropAgeMs > 0.0
+            ? stats.receiveLastFreshnessDropAgeMs
+            : observedFrameAgeMs;
+        const bool staleAgeEvidence =
+            stats.receiveFreshnessDropThresholdMs > 0.0 &&
+            freshnessAgeMs >= stats.receiveFreshnessDropThresholdMs;
+        const bool staleDropReason =
+            StartsWith(stats.receiveDecodeLastDropReason, "stale-");
+
+        const bool activeQueuePressure =
+            stats.pacingCurrentQueueDelayMs >= 30.0 ||
+            stats.fixedPacingRecentMaxQueueDelayMs >= 60.0;
+        if (activeQueuePressure) {
+            return {
+                "queue-active freshness",
+                "pacing-queue-delay"
+            };
+        }
+
+        const bool latencyPressure = stats.currentLatencyMs >= 80.0;
+        if (latencyPressure) {
+            return {
+                "latency-pressure freshness",
+                "latency-over-80ms"
+            };
+        }
+
+        const bool repairBudgetPressure =
+            stats.adaptiveRepairBudgetUtilization >= 3.0 ||
+            stats.adaptiveRepairDecisionReason ==
+                "fixed-pacing-queue-pressure" ||
+            stats.adaptiveRepairDecisionReason ==
+                "fixed-pacing-queue-hard-pressure" ||
+            stats.adaptiveRepairDecisionReason ==
+                "fixed-pacing-receive-queue-hold";
+        if (repairBudgetPressure) {
+            return {
+                "repair-budget-pressure freshness",
+                "repair-budget-or-fixed-pacing-reason"
+            };
+        }
+
+        const bool cadenceLimited =
+            (stats.h264InputCadenceFps > 0 &&
+                stats.h264InputCadenceFps <= 24) ||
+            stats.sendH264VideoBudgetScale <= 0.85 ||
+            stats.adaptiveRepairDecisionReason ==
+                "fixed-pacing-queue-hold" ||
+            stats.adaptiveRepairDecisionReason ==
+                "fixed-pacing-queue-release";
+        if (cadenceLimited) {
+            return {
+                "cadence-limited freshness",
+                "input-cadence-or-video-budget"
+            };
+        }
+
+        if (staleAgeEvidence || staleDropReason) {
+            return {
+                "true-stale-frame freshness",
+                staleAgeEvidence ? "frame-age-threshold" : "receiver-stale-drop"
+            };
+        }
+
+        return { "unclassified freshness", "missing-freshness-context" };
+    }
+
 } // namespace
 
     bool NetworkCsvLogger::Start(const std::string& directory) {
@@ -128,6 +212,7 @@ namespace {
         previousOutputQueueDroppedFrames_ = 0;
         previousOutputQueueDropEvents_ = 0;
         previousOutputQueueDropBurstEvents_ = 0;
+        previousReceiveFreshnessDroppedFrames_ = 0;
         startupOutputQueueDroppedFrames_ = 0;
         startupOutputQueueDropEvents_ = 0;
         startupOutputQueueDropBurstEvents_ = 0;
@@ -180,12 +265,20 @@ namespace {
             CounterDelta(
                 stats.outputQueueDropBurstEvents,
                 previousOutputQueueDropBurstEvents_);
+        const uint64_t receiveFreshnessDroppedFramesDelta =
+            CounterDelta(
+                stats.receiveFreshnessDroppedFrames,
+                previousReceiveFreshnessDroppedFrames_);
+        const auto freshnessDropClassification =
+            ClassifyFreshnessDrop(stats, receiveFreshnessDroppedFramesDelta);
         previousOutputQueueDroppedFrames_ =
             stats.outputQueueDroppedFrames;
         previousOutputQueueDropEvents_ =
             stats.outputQueueDropEvents;
         previousOutputQueueDropBurstEvents_ =
             stats.outputQueueDropBurstEvents;
+        previousReceiveFreshnessDroppedFrames_ =
+            stats.receiveFreshnessDroppedFrames;
 
         if (startupWarmupActive) {
             startupOutputQueueDroppedFrames_ +=
@@ -385,6 +478,45 @@ namespace {
             << stats.repairFecLikelySuppressedPendingPackets << ','
             << stats.repairFecLikelySuppressionRescueFrames << ','
             << stats.repairFecLikelySuppressionRescuePackets << ','
+            << stats.h264KeyTinyMissingCriticalFrames << ','
+            << stats.h264KeyTinyMissingCriticalPackets << ','
+            << stats.h264KeyTinyMissingCriticalSentPackets << ','
+            << stats.h264KeyTinyMissingCriticalSkippedPackets << ','
+            << stats.h264KeyTinyMissingCriticalLastFrameId << ','
+            << stats.h264KeyTinyMissingCriticalLastAckMissingChunks << ','
+            << stats.h264KeyTinyMissingCriticalLastRequestedChunks << ','
+            << EscapeCsv(stats.h264KeyTinyMissingCriticalLastEvent) << ','
+            << stats.h264KeySmallMissingAckFrames << ','
+            << stats.h264KeySmallMissingAckMissingChunks << ','
+            << stats.h264KeySmallMissingAckHistoryMissingFrames << ','
+            << stats.h264KeySmallMissingAckStaleFrameLagFrames << ','
+            << stats.h264KeySmallMissingAckStaleAgeFrames << ','
+            << stats.h264KeySmallMissingAckRetransmitBudgetExhaustedFrames << ','
+            << stats.h264KeySmallMissingAckDynamicBudgetSuppressedFrames << ','
+            << stats.h264KeySmallMissingAckDynamicBudgetSuppressedPackets << ','
+            << stats.h264KeySmallMissingAckSelectedRepairFrames << ','
+            << stats.h264KeySmallMissingAckSelectedRepairPackets << ','
+            << stats.h264KeySelectedRepair1To2Frames << ','
+            << stats.h264KeySelectedRepair1To2Packets << ','
+            << stats.h264KeySelectedRepair3To4Frames << ','
+            << stats.h264KeySelectedRepair3To4Packets << ','
+            << stats.h264KeySmallMissingAckLastFrameId << ','
+            << stats.h264KeySmallMissingAckLastMissingChunks << ','
+            << EscapeCsv(stats.h264KeySmallMissingAckLastGate) << ','
+            << stats.h264KeyRepair1To2CompletedFrames << ','
+            << stats.h264KeyRepair1To2ExpiredFrames << ','
+            << stats.h264KeyRepair1To2ArrivedPackets << ','
+            << stats.h264KeyRepair1To2DuplicatePackets << ','
+            << stats.h264KeyRepair1To2LateCompletedPackets << ','
+            << stats.h264KeyRepair1To2LateExpiredPackets << ','
+            << stats.h264KeyRepair1To2LateRejectedPackets << ','
+            << stats.h264KeyRepair3To4CompletedFrames << ','
+            << stats.h264KeyRepair3To4ExpiredFrames << ','
+            << stats.h264KeyRepair3To4ArrivedPackets << ','
+            << stats.h264KeyRepair3To4DuplicatePackets << ','
+            << stats.h264KeyRepair3To4LateCompletedPackets << ','
+            << stats.h264KeyRepair3To4LateExpiredPackets << ','
+            << stats.h264KeyRepair3To4LateRejectedPackets << ','
             << stats.lateRepairSavedPackets << ','
             << stats.ackStaleDroppedFrames << ','
             << stats.ackKeyFrameRequests << ','
@@ -402,6 +534,13 @@ namespace {
             << stats.pacingRepairSentBytes << ','
             << stats.pacingRepairBorrowedPackets << ','
             << stats.pacingRepairBorrowedBytes << ','
+            << stats.pacingEmergencySentPackets << ','
+            << stats.pacingEmergencySentBytes << ','
+            << stats.pacingEmergencyBorrowedPackets << ','
+            << stats.pacingEmergencyBorrowedBytes << ','
+            << stats.h264KeyTinyEmergencyLastQueueAgeMs << ','
+            << stats.h264KeyTinyEmergencyMaxQueueAgeMs << ','
+            << stats.h264KeyTinyEmergencyAvgQueueAgeMs << ','
             << stats.pacingDroppedPackets << ','
             << stats.pacingDeadlineDroppedPackets << ','
             << stats.pacingHighPriorityDeadlineDroppedPackets << ','
@@ -438,6 +577,20 @@ namespace {
             << stats.deadlineNackExpiredAfterNackFrames << ','
             << stats.deadlineNackExpiredMissingChunks << ','
             << stats.deadlineNackExpiredH264KeyFrames << ','
+            << stats.deadlineNackExpiredH264KeyMissingChunks << ','
+            << stats.deadlineNackLastExpiredH264KeyMissingChunks << ','
+            << stats.deadlineNackExpiredH264KeyMissingChunks1 << ','
+            << stats.deadlineNackExpiredH264KeyMissingChunks2To4 << ','
+            << stats.deadlineNackExpiredH264KeyMissingChunks5To8 << ','
+            << stats.deadlineNackExpiredH264KeyMissingChunks9To16 << ','
+            << stats.deadlineNackExpiredH264KeyMissingChunks17Plus << ','
+            << stats.h264KeySmallMissingDeadlineRescueFrames << ','
+            << stats.h264KeySmallMissingDeadlineRescueMissingChunks << ','
+            << stats.h264KeySmallMissingDeadlineRescueCompletedFrames << ','
+            << stats.h264KeySmallMissingDeadlineRescueRejectedFrames << ','
+            << stats.h264KeySmallMissingDeadlineRescueExpiredFrames << ','
+            << stats.h264KeySmallMissingDeadlineRescueCompletedMissingChunks << ','
+            << stats.h264KeySmallMissingDeadlineRescueExpiredMissingChunks << ','
             << stats.deadlineNackExpiredH264LargeFrames << ','
             << stats.deadlineNackExpiredH264DeltaFrames << ','
             << (stats.fecEnabled ? 1 : 0) << ','
@@ -495,6 +648,10 @@ namespace {
             << stats.sendPacingTargetBitrateKbps << ','
             << stats.sendH264VideoBudgetScale << ','
             << (stats.pacingBurstGuardActive ? 1 : 0) << ','
+            << stats.fixedPacingRecentMaxQueueDelayMs << ','
+            << stats.fixedPacingQueueReleaseStableSec << ','
+            << (stats.fixedPacingQueueRecovered ? 1 : 0) << ','
+            << (stats.fixedPacingQueueReleaseEligible ? 1 : 0) << ','
             << stats.adaptiveRepairBudgetUtilization << ','
             << stats.adaptiveRepairBorrowedRatio << ','
             << stats.adaptiveRepairSentBytesDelta << ','
@@ -511,6 +668,15 @@ namespace {
             << stats.h264AuChunkCount << ','
             << (stats.h264AuIsIdr ? 1 : 0) << ','
             << (stats.h264AuIsDecoderSync ? 1 : 0) << ','
+            << stats.h264RequestedKeyFrameConsumedFrames << ','
+            << stats.h264EncoderKeyFrameRequests << ','
+            << stats.h264RecoveryKeyFrameRequests << ','
+            << stats.h264AwaitingSyncKeyFrameRequests << ','
+            << stats.h264PeriodicIdrRequests << ','
+            << stats.h264IdrFrames << ','
+            << stats.h264DecoderSyncFrames << ','
+            << stats.h264ConsecutiveIdrFrames << ','
+            << stats.h264MaxConsecutiveIdrFrames << ','
             << EscapeCsv(stats.h264AuProtectionLevel) << ','
             << (stats.h264AuDroppedBeforeSend ? 1 : 0) << ','
             << EscapeCsv(stats.h264AuDropReason) << ','
@@ -593,11 +759,46 @@ namespace {
             << stats.receiveDecodePopEmptyPolls << ','
             << stats.receiveDecodeLoopLastPopGapMs << ','
             << stats.receiveDecodeLoopMaxPopGapMs << ','
+            << stats.receiveStartupDecodeLoopMaxPopGapMs << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapMs << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapAtMs << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapFrameId << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapStreamId << ','
+            << EscapeCsv(stats.receiveSteadyDecodeLoopMaxPopGapCodec) << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapInputFrameAgeMs << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapDecodedQueueSize << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapCompletedQueueSize << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapCompletedQueuePopAgeMs << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapCompletedQueuePushIntervalMs << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapArrivalRatio << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapReceiverLatencyMs << ','
+            << EscapeCsv(stats.receiveSteadyDecodeLoopMaxPopGapClass) << ','
+            << stats.receiveSteadyDecodeLoopMaxPopGapAgeMs << ','
+            << (stats.receiveH264StartupActive ? 1 : 0) << ','
+            << (stats.receiveH264StartupDecoderSynced ? 1 : 0) << ','
+            << (stats.receiveH264StartupFirstDecoded ? 1 : 0) << ','
+            << (stats.receiveH264StartupFirstDisplayed ? 1 : 0) << ','
+            << (stats.receiveH264StartupReady ? 1 : 0) << ','
+            << stats.receiveH264StartupElapsedMs << ','
+            << stats.receiveH264StartupDecoderSyncMs << ','
+            << stats.receiveH264StartupFirstDecodedMs << ','
+            << stats.receiveH264StartupFirstDisplayedMs << ','
+            << stats.receiveH264StartupReadyMs << ','
+            << stats.receiveH264StartupQueueFlushFrames << ','
             << stats.receiveDecodeOverwrittenFrames << ','
             << stats.receiveDecodeQueueDroppedFrames << ','
             << stats.receiveDecodeRenderOverwriteFrames << ','
             << stats.receiveDecodeFailures << ','
             << stats.receiveFreshnessDroppedFrames << ','
+            << receiveFreshnessDroppedFramesDelta << ','
+            << EscapeCsv(freshnessDropClassification.first) << ','
+            << EscapeCsv(freshnessDropClassification.second) << ','
+            << stats.receiveLastFreshnessDropAgeMs << ','
+            << stats.receiveMaxFreshnessDropAgeMs << ','
+            << stats.receiveLastFreshnessDropFrameId << ','
+            << stats.receiveLastFreshnessDropStreamId << ','
+            << EscapeCsv(stats.receiveLastFreshnessDropCodec) << ','
             << stats.receiveH264AuInvalidFrames << ','
             << stats.receiveH264AuCrcMismatches << ','
             << stats.receiveH264AuPayloadSizeMismatches << ','
@@ -639,6 +840,7 @@ namespace {
             << stats.adaptiveLastDisplayFps << ','
             << stats.adaptiveLastQoeScore << ','
             << EscapeCsv(stats.adaptiveDegradationCause) << ','
+            << (stats.adaptiveArrivalGapJitterSpikeActive ? 1 : 0) << ','
             << (stats.adaptiveFecRecoveryWorking ? 1 : 0) << ','
             << (stats.adaptiveFecGuardActive ? 1 : 0) << ','
             << stats.adaptiveFecRecoveryEfficiency << ','
@@ -856,6 +1058,45 @@ namespace {
             << "repairFecLikelySuppressedPendingPackets,"
             << "repairFecLikelySuppressionRescueFrames,"
             << "repairFecLikelySuppressionRescuePackets,"
+            << "h264KeyTinyMissingCriticalFrames,"
+            << "h264KeyTinyMissingCriticalPackets,"
+            << "h264KeyTinyMissingCriticalSentPackets,"
+            << "h264KeyTinyMissingCriticalSkippedPackets,"
+            << "h264KeyTinyMissingCriticalLastFrameId,"
+            << "h264KeyTinyMissingCriticalLastAckMissingChunks,"
+            << "h264KeyTinyMissingCriticalLastRequestedChunks,"
+            << "h264KeyTinyMissingCriticalLastEvent,"
+            << "h264KeySmallMissingAckFrames,"
+            << "h264KeySmallMissingAckMissingChunks,"
+            << "h264KeySmallMissingAckHistoryMissingFrames,"
+            << "h264KeySmallMissingAckStaleFrameLagFrames,"
+            << "h264KeySmallMissingAckStaleAgeFrames,"
+            << "h264KeySmallMissingAckRetransmitBudgetExhaustedFrames,"
+            << "h264KeySmallMissingAckDynamicBudgetSuppressedFrames,"
+            << "h264KeySmallMissingAckDynamicBudgetSuppressedPackets,"
+            << "h264KeySmallMissingAckSelectedRepairFrames,"
+            << "h264KeySmallMissingAckSelectedRepairPackets,"
+            << "h264KeySelectedRepair1To2Frames,"
+            << "h264KeySelectedRepair1To2Packets,"
+            << "h264KeySelectedRepair3To4Frames,"
+            << "h264KeySelectedRepair3To4Packets,"
+            << "h264KeySmallMissingAckLastFrameId,"
+            << "h264KeySmallMissingAckLastMissingChunks,"
+            << "h264KeySmallMissingAckLastGate,"
+            << "h264KeyRepair1To2CompletedFrames,"
+            << "h264KeyRepair1To2ExpiredFrames,"
+            << "h264KeyRepair1To2ArrivedPackets,"
+            << "h264KeyRepair1To2DuplicatePackets,"
+            << "h264KeyRepair1To2LateCompletedPackets,"
+            << "h264KeyRepair1To2LateExpiredPackets,"
+            << "h264KeyRepair1To2LateRejectedPackets,"
+            << "h264KeyRepair3To4CompletedFrames,"
+            << "h264KeyRepair3To4ExpiredFrames,"
+            << "h264KeyRepair3To4ArrivedPackets,"
+            << "h264KeyRepair3To4DuplicatePackets,"
+            << "h264KeyRepair3To4LateCompletedPackets,"
+            << "h264KeyRepair3To4LateExpiredPackets,"
+            << "h264KeyRepair3To4LateRejectedPackets,"
             << "lateRepairSavedPackets,"
             << "ackStaleDroppedFrames,"
             << "ackKeyFrameRequests,"
@@ -873,6 +1114,13 @@ namespace {
             << "pacingRepairSentBytes,"
             << "pacingRepairBorrowedPackets,"
             << "pacingRepairBorrowedBytes,"
+            << "pacingEmergencySentPackets,"
+            << "pacingEmergencySentBytes,"
+            << "pacingEmergencyBorrowedPackets,"
+            << "pacingEmergencyBorrowedBytes,"
+            << "h264KeyTinyEmergencyLastQueueAgeMs,"
+            << "h264KeyTinyEmergencyMaxQueueAgeMs,"
+            << "h264KeyTinyEmergencyAvgQueueAgeMs,"
             << "pacingDroppedPackets,"
             << "pacingDeadlineDroppedPackets,"
             << "pacingHighPriorityDeadlineDroppedPackets,"
@@ -909,6 +1157,20 @@ namespace {
             << "deadlineNackExpiredAfterNackFrames,"
             << "deadlineNackExpiredMissingChunks,"
             << "deadlineNackExpiredH264KeyFrames,"
+            << "deadlineNackExpiredH264KeyMissingChunks,"
+            << "deadlineNackLastExpiredH264KeyMissingChunks,"
+            << "deadlineNackExpiredH264KeyMissingChunks1,"
+            << "deadlineNackExpiredH264KeyMissingChunks2To4,"
+            << "deadlineNackExpiredH264KeyMissingChunks5To8,"
+            << "deadlineNackExpiredH264KeyMissingChunks9To16,"
+            << "deadlineNackExpiredH264KeyMissingChunks17Plus,"
+            << "h264KeySmallMissingDeadlineRescueFrames,"
+            << "h264KeySmallMissingDeadlineRescueMissingChunks,"
+            << "h264KeySmallMissingDeadlineRescueCompletedFrames,"
+            << "h264KeySmallMissingDeadlineRescueRejectedFrames,"
+            << "h264KeySmallMissingDeadlineRescueExpiredFrames,"
+            << "h264KeySmallMissingDeadlineRescueCompletedMissingChunks,"
+            << "h264KeySmallMissingDeadlineRescueExpiredMissingChunks,"
             << "deadlineNackExpiredH264LargeFrames,"
             << "deadlineNackExpiredH264DeltaFrames,"
             << "fecEnabled,"
@@ -966,6 +1228,10 @@ namespace {
             << "pacingBudgetTargetBitrateKbps,"
             << "h264VideoBudgetScale,"
             << "pacingBurstGuardActive,"
+            << "fixedPacingRecentMaxQueueDelayMs,"
+            << "fixedPacingQueueReleaseStableSec,"
+            << "fixedPacingQueueRecovered,"
+            << "fixedPacingQueueReleaseEligible,"
             << "adaptiveRepairBudgetUtilization,"
             << "adaptiveRepairBorrowedRatio,"
             << "adaptiveRepairSentBytesDelta,"
@@ -982,6 +1248,15 @@ namespace {
             << "h264AuChunkCount,"
             << "h264AuIsIdr,"
             << "h264AuIsDecoderSync,"
+            << "h264RequestedKeyFrameConsumedFrames,"
+            << "h264EncoderKeyFrameRequests,"
+            << "h264RecoveryKeyFrameRequests,"
+            << "h264AwaitingSyncKeyFrameRequests,"
+            << "h264PeriodicIdrRequests,"
+            << "h264IdrFrames,"
+            << "h264DecoderSyncFrames,"
+            << "h264ConsecutiveIdrFrames,"
+            << "h264MaxConsecutiveIdrFrames,"
             << "h264AuProtectionLevel,"
             << "h264AuDroppedBeforeSend,"
             << "h264AuDropReason,"
@@ -1064,11 +1339,46 @@ namespace {
             << "receiveDecodePopEmptyPolls,"
             << "receiveDecodeLoopLastPopGapMs,"
             << "receiveDecodeLoopMaxPopGapMs,"
+            << "receiveStartupDecodeLoopMaxPopGapMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapAtMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapFrameId,"
+            << "receiveSteadyDecodeLoopMaxPopGapStreamId,"
+            << "receiveSteadyDecodeLoopMaxPopGapCodec,"
+            << "receiveSteadyDecodeLoopMaxPopGapInputFrameAgeMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapDecodedQueueSize,"
+            << "receiveSteadyDecodeLoopMaxPopGapCompletedQueueSize,"
+            << "receiveSteadyDecodeLoopMaxPopGapCompletedQueuePopAgeMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapCompletedQueuePushIntervalMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapArrivalRatio,"
+            << "receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapReceiverLatencyMs,"
+            << "receiveSteadyDecodeLoopMaxPopGapClass,"
+            << "receiveSteadyDecodeLoopMaxPopGapAgeMs,"
+            << "receiveH264StartupActive,"
+            << "receiveH264StartupDecoderSynced,"
+            << "receiveH264StartupFirstDecoded,"
+            << "receiveH264StartupFirstDisplayed,"
+            << "receiveH264StartupReady,"
+            << "receiveH264StartupElapsedMs,"
+            << "receiveH264StartupDecoderSyncMs,"
+            << "receiveH264StartupFirstDecodedMs,"
+            << "receiveH264StartupFirstDisplayedMs,"
+            << "receiveH264StartupReadyMs,"
+            << "receiveH264StartupQueueFlushFrames,"
             << "receiveDecodeOverwrittenFrames,"
             << "receiveDecodeQueueDroppedFrames,"
             << "receiveDecodeRenderOverwriteFrames,"
             << "receiveDecodeFailures,"
             << "receiveFreshnessDroppedFrames,"
+            << "receiveFreshnessDroppedFramesDelta,"
+            << "receiveFreshnessDropClass,"
+            << "receiveFreshnessDropEvidence,"
+            << "receiveLastFreshnessDropAgeMs,"
+            << "receiveMaxFreshnessDropAgeMs,"
+            << "receiveLastFreshnessDropFrameId,"
+            << "receiveLastFreshnessDropStreamId,"
+            << "receiveLastFreshnessDropCodec,"
             << "receiveH264AuInvalidFrames,"
             << "receiveH264AuCrcMismatches,"
             << "receiveH264AuPayloadSizeMismatches,"
@@ -1110,6 +1420,7 @@ namespace {
             << "adaptiveInputDisplayFps,"
             << "adaptiveQoeScore,"
             << "adaptiveDegradationCause,"
+            << "adaptiveArrivalGapJitterSpikeActive,"
             << "adaptiveFecRecoveryWorking,"
             << "adaptiveFecGuardActive,"
             << "adaptiveFecRecoveryEfficiency,"

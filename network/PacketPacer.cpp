@@ -90,6 +90,8 @@ namespace {
 
     int PriorityRank(PacketPacingPriority priority) {
         switch (priority) {
+        case PacketPacingPriority::Emergency:
+            return 3;
         case PacketPacingPriority::Critical:
             return 2;
         case PacketPacingPriority::High:
@@ -380,6 +382,11 @@ namespace {
                     }
 
                     bool repairBorrowedFromVideo = false;
+                    const bool emergencyPacket =
+                        candidate.priority == PacketPacingPriority::Emergency;
+                    const double queueAgeMs =
+                        static_cast<double>(
+                            nowUs - candidate.enqueueTimeUs) / 1000.0;
                     if (useHighPriority &&
                         repairCreditBytes_ >= static_cast<double>(packetBytes)) {
                         repairCreditBytes_ -= static_cast<double>(packetBytes);
@@ -404,8 +411,7 @@ namespace {
                         static_cast<uint32_t>(normalQueue_.size());
 
                     stats_.currentQueueDelayMs =
-                        static_cast<double>(
-                            nowUs - packet.enqueueTimeUs) / 1000.0;
+                        queueAgeMs;
                     stats_.maxQueueDelayMs =
                         (std::max)(
                             stats_.maxQueueDelayMs,
@@ -419,6 +425,31 @@ namespace {
                         if (repairBorrowedFromVideo) {
                             stats_.repairBorrowedPackets++;
                             stats_.repairBorrowedBytes += packetBytes;
+                        }
+                        if (emergencyPacket) {
+                            stats_.emergencySentPackets++;
+                            stats_.emergencySentBytes += packetBytes;
+                            stats_.emergencyLastQueueAgeMs = queueAgeMs;
+                            stats_.emergencyMaxQueueAgeMs =
+                                (std::max)(
+                                    stats_.emergencyMaxQueueAgeMs,
+                                    queueAgeMs);
+                            stats_.emergencyAvgQueueAgeMs =
+                                stats_.emergencySentPackets > 0
+                                ? (
+                                    (
+                                        stats_.emergencyAvgQueueAgeMs *
+                                        static_cast<double>(
+                                            stats_.emergencySentPackets - 1)
+                                    ) + queueAgeMs
+                                ) /
+                                    static_cast<double>(
+                                        stats_.emergencySentPackets)
+                                : queueAgeMs;
+                            if (repairBorrowedFromVideo) {
+                                stats_.emergencyBorrowedPackets++;
+                                stats_.emergencyBorrowedBytes += packetBytes;
+                            }
                         }
                     }
 
@@ -584,6 +615,10 @@ namespace {
         const QueuedPacket& packet,
         bool highPriority
     ) const {
+        if (packet.priority == PacketPacingPriority::Emergency) {
+            return true;
+        }
+
         const double packetBytes = static_cast<double>(packet.data.size());
         if (highPriority &&
             repairCreditBytes_ >= packetBytes) {

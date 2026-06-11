@@ -5,6 +5,67 @@
 
 namespace net {
 
+    namespace {
+        constexpr double kArrivalGapAdaptiveWindowMs = 1500.0;
+        constexpr double kArrivalGapMinPopGapMs = 20.0;
+        constexpr double kArrivalGapMinRatio = 0.70;
+        constexpr double kArrivalGapJitterSpikeMs = 20.0;
+        constexpr double kFixedPacingRecentMaxDecayMsPerSec = 260.0;
+        constexpr double kFixedPacingReleaseCurrentQueueMs = 14.0;
+        constexpr double kFixedPacingReleaseRecentMaxQueueMs = 48.0;
+        constexpr double kFixedPacingReleaseLatencyMs = 35.0;
+        constexpr double kFixedPacingReleaseStableSec = 0.20;
+        constexpr double kFixedPacingReleaseGuardDecayScale = 8.0;
+        constexpr double kFixedPacingReleaseRecoveryRate = 2.0;
+        constexpr double kFixedLatencyFreshnessPressureMs = 80.0;
+
+        bool IsArrivalGapPopClass(const std::string& value) {
+            return value == "arrival-gap" ||
+                value == "arrival-gap-jitter-spike";
+        }
+
+        bool IsRecentArrivalGapPopSpike(
+            const AdaptiveStreamingInput& input
+        ) {
+            if (!IsArrivalGapPopClass(
+                input.receiveSteadyDecodeLoopMaxPopGapClass)) {
+                return false;
+            }
+            if (input.receiveSteadyDecodeLoopMaxPopGapMs <
+                kArrivalGapMinPopGapMs ||
+                input.receiveSteadyDecodeLoopMaxPopGapArrivalRatio <
+                kArrivalGapMinRatio) {
+                return false;
+            }
+            if (input.receiveStartupElapsedMs <= 0.0 ||
+                input.receiveSteadyDecodeLoopMaxPopGapAtMs <= 0.0) {
+                return false;
+            }
+
+            const double spikeAgeMs =
+                input.receiveStartupElapsedMs -
+                input.receiveSteadyDecodeLoopMaxPopGapAtMs;
+            return spikeAgeMs >= 0.0 &&
+                spikeAgeMs <= kArrivalGapAdaptiveWindowMs;
+        }
+
+        bool IsRecentArrivalGapJitterSpike(
+            const AdaptiveStreamingInput& input
+        ) {
+            return IsRecentArrivalGapPopSpike(input) &&
+                input.receiveSteadyDecodeLoopMaxPopGapClass ==
+                "arrival-gap-jitter-spike" &&
+                input.receiveSteadyDecodeLoopMaxPopGapReceiverJitterMs >=
+                kArrivalGapJitterSpikeMs;
+        }
+
+        bool StartsWith(const std::string& value, const char* prefix) {
+            const std::string prefixText(prefix != nullptr ? prefix : "");
+            return value.size() >= prefixText.size() &&
+                value.compare(0, prefixText.size(), prefixText) == 0;
+        }
+    }
+
     const char* ToString(AdaptiveDegradationCause cause) {
         switch (cause) {
         case AdaptiveDegradationCause::PacketLoss:
@@ -132,6 +193,9 @@ namespace net {
         pacingBurstGuardSec_ = 0.0;
         pacingBurstPressureSec_ = 0.0;
         pacingBurstVideoBudgetScale_ = 1.0;
+        latencyFreshnessGuardSec_ = 0.0;
+        fixedPacingRecentMaxQueueDelayMs_ = 0.0;
+        fixedPacingQueueReleaseStableSec_ = 0.0;
         repairBudgetGuardSec_ = 0.0;
         repairBorrowPressureSec_ = 0.0;
         retransmitNotArrivedPressureSec_ = 0.0;
@@ -673,6 +737,21 @@ namespace net {
         state_.lastFecRecoveryGuardActive = false;
         state_.lastFecRecoveryWorking =
             fecRecoveryWorkingNow || fecRecoveryGuardTimerActive;
+        const double projectedFixedPacingRecentMaxQueueDelayMs =
+            input.pacingEnabled
+            ? (std::max)(
+                input.pacingCurrentQueueDelayMs,
+                (std::max)(
+                    0.0,
+                    fixedPacingRecentMaxQueueDelayMs_ -
+                        positiveDeltaSec *
+                            kFixedPacingRecentMaxDecayMsPerSec))
+            : 0.0;
+        const AdaptiveFreshnessDropClass freshnessDropClass =
+            ClassifyFreshnessDrop(
+                input,
+                freshnessDropDelta,
+                projectedFixedPacingRecentMaxQueueDelayMs);
 
         const uint64_t qualityDeadlineDropDelta =
             suppressPacingDropForQuality ? 0 : deadlineDropDelta;
@@ -688,7 +767,9 @@ namespace net {
                 outputQueueDropDelta,
                 recoveryDeadlineDropDelta,
                 retransmitStaleDropDelta,
-                freshnessDropDelta);
+                freshnessDropDelta,
+                freshnessDropClass,
+                receiveDecodeRenderOverwriteDelta);
         const AdaptiveDegradationCause qualityDegradationCause =
             DetermineDegradationCause(
                 input,
@@ -698,7 +779,9 @@ namespace net {
                 qualityDeadlineNackMissingChunkDelta,
                 recoveryDeadlineDropDelta,
                 retransmitStaleDropDelta,
-                freshnessDropDelta);
+                freshnessDropDelta,
+                freshnessDropClass,
+                receiveDecodeRenderOverwriteDelta);
         const AdaptiveDegradationCause rawDegradationCause =
             qualityDegradationCause == AdaptiveDegradationCause::None &&
             HasPacingDropPressure(input, pacingDeadlineDropDelta)
@@ -740,37 +823,124 @@ namespace net {
 
         if (!enabled_ ||
             controlMode_ == AdaptiveControlMode::FixedQuality) {
-            const bool fixedPacingQueuePressure =
+            if (input.pacingEnabled) {
+                fixedPacingRecentMaxQueueDelayMs_ =
+                    (std::max)(
+                        input.pacingCurrentQueueDelayMs,
+                        (std::max)(
+                            0.0,
+                            fixedPacingRecentMaxQueueDelayMs_ -
+                                positiveDeltaSec *
+                                    kFixedPacingRecentMaxDecayMsPerSec));
+            }
+            else {
+                fixedPacingRecentMaxQueueDelayMs_ = 0.0;
+                fixedPacingQueueReleaseStableSec_ = 0.0;
+            }
+
+            const bool fixedReceiveQueuePressure =
+                outputQueueDropDelta > 0 ||
+                (freshnessDropDelta > 0 &&
+                    (freshnessDropClass ==
+                        AdaptiveFreshnessDropClass::QueuePressure ||
+                    freshnessDropClass ==
+                        AdaptiveFreshnessDropClass::TrueStaleFrame ||
+                    freshnessDropClass ==
+                        AdaptiveFreshnessDropClass::Unclassified)) ||
+                receiveDecodeQueueDropDelta > 0 ||
+                receiveDecodeRenderOverwriteDelta > 0;
+            const bool fixedPacingQueueRecovered =
+                input.pacingEnabled &&
+                input.pacingCurrentQueueDelayMs <=
+                    kFixedPacingReleaseCurrentQueueMs &&
+                fixedPacingRecentMaxQueueDelayMs_ <=
+                    kFixedPacingReleaseRecentMaxQueueMs &&
+                input.latencyMs < kFixedPacingReleaseLatencyMs &&
+                !fixedReceiveQueuePressure;
+            if (fixedPacingQueueRecovered) {
+                fixedPacingQueueReleaseStableSec_ += positiveDeltaSec;
+            }
+            else {
+                fixedPacingQueueReleaseStableSec_ =
+                    (std::max)(
+                        0.0,
+                        fixedPacingQueueReleaseStableSec_ - positiveDeltaSec);
+            }
+            const bool fixedPacingQueueReleaseEligible =
+                fixedPacingQueueReleaseStableSec_ >=
+                kFixedPacingReleaseStableSec;
+            state_.fixedPacingRecentMaxQueueDelayMs =
+                fixedPacingRecentMaxQueueDelayMs_;
+            state_.fixedPacingQueueReleaseStableSec =
+                fixedPacingQueueReleaseStableSec_;
+            state_.fixedPacingQueueRecovered =
+                fixedPacingQueueRecovered;
+            state_.fixedPacingQueueReleaseEligible =
+                fixedPacingQueueReleaseEligible;
+
+            const bool fixedQueuePressure =
                 enabled_ &&
                 controlMode_ == AdaptiveControlMode::FixedQuality &&
                 input.pacingEnabled &&
                 (input.pacingCurrentQueueDelayMs >= 35.0 ||
-                    (input.pacingMaxQueueDelayMs >= 90.0 &&
-                        input.pacingCurrentQueueDelayMs >= 18.0) ||
-                    input.latencyMs >= 80.0);
-            if (fixedPacingQueuePressure) {
+                    (fixedPacingRecentMaxQueueDelayMs_ >= 90.0 &&
+                        input.pacingCurrentQueueDelayMs >= 18.0));
+            const bool fixedLatencyFreshnessPressure =
+                enabled_ &&
+                controlMode_ == AdaptiveControlMode::FixedQuality &&
+                input.pacingEnabled &&
+                !fixedQueuePressure &&
+                freshnessDropDelta > 0 &&
+                freshnessDropClass ==
+                    AdaptiveFreshnessDropClass::LatencyPressure &&
+                input.latencyMs >= kFixedLatencyFreshnessPressureMs;
+            if (fixedQueuePressure || fixedLatencyFreshnessPressure) {
                 const bool hardFixedPacingQueuePressure =
-                    input.pacingCurrentQueueDelayMs >= 70.0 ||
-                    (input.pacingMaxQueueDelayMs >= 110.0 &&
-                        input.pacingCurrentQueueDelayMs >= 30.0) ||
-                    input.latencyMs >= 90.0;
+                    fixedQueuePressure &&
+                    (input.pacingCurrentQueueDelayMs >= 70.0 ||
+                    (fixedPacingRecentMaxQueueDelayMs_ >= 110.0 &&
+                        input.pacingCurrentQueueDelayMs >= 30.0));
+                const bool hardLatencyFreshnessPressure =
+                    fixedLatencyFreshnessPressure &&
+                    (input.latencyMs >= 115.0 ||
+                    (input.receiveFreshnessDropThresholdMs > 0.0 &&
+                        input.receiveLastFreshnessDropAgeMs >=
+                            input.receiveFreshnessDropThresholdMs + 15.0));
                 pacingBurstPressureSec_ += positiveDeltaSec;
+                if (fixedQueuePressure) {
+                    fixedPacingQueueReleaseStableSec_ = 0.0;
+                }
+                if (fixedLatencyFreshnessPressure) {
+                    latencyFreshnessGuardSec_ =
+                        (std::max)(
+                            latencyFreshnessGuardSec_,
+                            hardLatencyFreshnessPressure ? 1.10 : 0.75);
+                }
                 pacingBurstGuardSec_ =
                     (std::max)(
                         pacingBurstGuardSec_,
-                        hardFixedPacingQueuePressure ? 1.25 : 0.80);
+                        fixedLatencyFreshnessPressure
+                        ? (hardLatencyFreshnessPressure ? 0.85 : 0.55)
+                        : (hardFixedPacingQueuePressure ? 1.25 : 0.80));
                 pacingBurstVideoBudgetScale_ =
                     (std::min)(
                         pacingBurstVideoBudgetScale_,
-                        hardFixedPacingQueuePressure ? 0.68 : 0.82);
+                        fixedLatencyFreshnessPressure
+                        ? (hardLatencyFreshnessPressure ? 0.82 : 0.88)
+                        : (hardFixedPacingQueuePressure ? 0.68 : 0.82));
                 state_.h264VideoBudgetScale =
                     std::clamp(pacingBurstVideoBudgetScale_, 0.55, 1.0);
                 state_.lastPacingBurstGuardActive = true;
-                state_.lastRepairBudgetGuardActive = true;
+                state_.lastRepairBudgetGuardActive = fixedQueuePressure;
                 state_.lastRepairVideoBudgetPressure = false;
                 state_.lastLateRepairWastePressure = false;
                 state_.lastRetransmitNotArrivedPressure = false;
                 state_.lastRepairDecisionReason =
+                    fixedLatencyFreshnessPressure
+                    ? (hardLatencyFreshnessPressure
+                        ? "latency-pressure-freshness-hard"
+                        : "latency-pressure-freshness")
+                    :
                     hardFixedPacingQueuePressure
                     ? "fixed-pacing-queue-hard-pressure"
                     : "fixed-pacing-queue-pressure";
@@ -785,23 +955,37 @@ namespace net {
             lossOnlyBadTimeSec_ = 0.0;
             pacingBurstPressureSec_ =
                 (std::max)(0.0, pacingBurstPressureSec_ - positiveDeltaSec);
-            const bool fixedReceiveQueuePressure =
-                outputQueueDropDelta > 0 ||
-                freshnessDropDelta > 0 ||
-                receiveDecodeQueueDropDelta > 0 ||
-                receiveDecodeRenderOverwriteDelta > 0;
+            latencyFreshnessGuardSec_ =
+                (std::max)(
+                    0.0,
+                    latencyFreshnessGuardSec_ - positiveDeltaSec);
             if (pacingBurstGuardSec_ > 0.0) {
+                const double guardDecayScale =
+                    fixedPacingQueueReleaseEligible
+                    ? kFixedPacingReleaseGuardDecayScale
+                    : 1.0;
                 pacingBurstGuardSec_ =
-                    (std::max)(0.0, pacingBurstGuardSec_ - positiveDeltaSec);
+                    (std::max)(
+                        0.0,
+                        pacingBurstGuardSec_ -
+                            positiveDeltaSec * guardDecayScale);
             }
             else {
                 const double fixedRecoveryRate =
-                    fixedReceiveQueuePressure ? 0.10 : 0.25;
+                    fixedReceiveQueuePressure
+                    ? 0.10
+                    : (fixedPacingQueueReleaseEligible
+                        ? kFixedPacingReleaseRecoveryRate
+                        : 0.25);
                 pacingBurstVideoBudgetScale_ =
                     (std::min)(
                         1.0,
                         pacingBurstVideoBudgetScale_ +
                             positiveDeltaSec * fixedRecoveryRate);
+                if (fixedPacingQueueReleaseEligible &&
+                    pacingBurstVideoBudgetScale_ >= 0.97) {
+                    pacingBurstVideoBudgetScale_ = 1.0;
+                }
             }
             repairBudgetGuardSec_ = 0.0;
             repairBorrowPressureSec_ = 0.0;
@@ -818,10 +1002,14 @@ namespace net {
             state_.lastRetransmitNotArrivedPressure = false;
             state_.lastRepairDecisionReason =
                 state_.lastPacingBurstGuardActive
-                ? (
+                ? (latencyFreshnessGuardSec_ > 0.0
+                    ? "latency-pressure-freshness-hold"
+                    :
                     fixedReceiveQueuePressure
                     ? "fixed-pacing-receive-queue-hold"
-                    : "fixed-pacing-queue-hold")
+                    : (fixedPacingQueueReleaseEligible
+                        ? "fixed-pacing-queue-release"
+                        : "fixed-pacing-queue-hold"))
                 : "disabled";
             return;
         }
@@ -829,7 +1017,14 @@ namespace net {
         if (controlMode_ == AdaptiveControlMode::LossReactive) {
             pacingBurstGuardSec_ = 0.0;
             pacingBurstPressureSec_ = 0.0;
+            latencyFreshnessGuardSec_ = 0.0;
             pacingBurstVideoBudgetScale_ = 1.0;
+            fixedPacingRecentMaxQueueDelayMs_ = 0.0;
+            fixedPacingQueueReleaseStableSec_ = 0.0;
+            state_.fixedPacingRecentMaxQueueDelayMs = 0.0;
+            state_.fixedPacingQueueReleaseStableSec = 0.0;
+            state_.fixedPacingQueueRecovered = false;
+            state_.fixedPacingQueueReleaseEligible = false;
             repairBudgetGuardSec_ = 0.0;
             repairBorrowPressureSec_ = 0.0;
             retransmitNotArrivedPressureSec_ = 0.0;
@@ -1958,7 +2153,9 @@ namespace net {
         uint64_t deadlineNackMissingChunkDelta,
         uint64_t recoveryDeadlineDropDelta,
         uint64_t retransmitStaleDropDelta,
-        uint64_t freshnessDropDelta
+        uint64_t freshnessDropDelta,
+        AdaptiveFreshnessDropClass freshnessDropClass,
+        uint64_t receiveDecodeRenderOverwriteDelta
     ) const {
         const double freshnessThresholdMs =
             input.receiveFreshnessDropThresholdMs;
@@ -1971,7 +2168,15 @@ namespace net {
             input.receiveLatestDecodedFrameAgeMs >=
             freshnessThresholdMs * 1.25;
 
-        if (freshnessDropDelta > 0 ||
+        if (freshnessDropClass ==
+            AdaptiveFreshnessDropClass::QueuePressure) {
+            return AdaptiveDegradationCause::PacingQueue;
+        }
+
+        if (freshnessDropClass ==
+                AdaptiveFreshnessDropClass::TrueStaleFrame ||
+            freshnessDropClass ==
+                AdaptiveFreshnessDropClass::Unclassified ||
             decodeInputStale ||
             latestDecodedStale) {
             return AdaptiveDegradationCause::FrameFreshness;
@@ -1984,6 +2189,10 @@ namespace net {
 
         const CongestionControlMode congestionMode =
             ResolveActiveCongestionControlMode();
+        const bool arrivalGapPopSpike =
+            IsRecentArrivalGapPopSpike(input);
+        const bool arrivalGapJitterSpike =
+            IsRecentArrivalGapJitterSpike(input);
 
         if (congestionMode == CongestionControlMode::LossBased) {
             return HasLossPressure(
@@ -2004,6 +2213,7 @@ namespace net {
                 return AdaptiveDegradationCause::Rtt;
             }
             if (input.jitterMs >= 35.0 ||
+                arrivalGapJitterSpike ||
                 input.bandwidthJitterTrendMs >= 20.0 ||
                 input.bandwidthQueueDelayMs >= 30.0) {
                 return AdaptiveDegradationCause::Jitter;
@@ -2017,26 +2227,26 @@ namespace net {
             input.receiveFps >= 5.0 &&
             input.decodeFps > 0.0;
 
-        const bool enoughDisplayData =
-            observedTimeSec_ >= 2.0 &&
-            input.displayedFrames >= 10 &&
-            input.decodeFps >= 5.0 &&
-            input.displayFps > 0.0;
-
         const bool rendererLag =
             outputQueueDropDelta > 0 &&
             input.lastOutputQueueDropReason == "renderer-lag";
         const bool jitterBurst =
             outputQueueDropDelta > 0 &&
             input.lastOutputQueueDropReason == "jitter-burst-release";
+        const bool displayBacklogEvidence =
+            rendererLag ||
+            receiveDecodeRenderOverwriteDelta > 0;
 
-        if (rendererLag ||
-            (enoughDisplayData &&
-                input.displayFps < input.decodeFps * 0.75)) {
+        if (arrivalGapJitterSpike) {
+            return AdaptiveDegradationCause::Jitter;
+        }
+
+        if (!arrivalGapPopSpike && displayBacklogEvidence) {
             return AdaptiveDegradationCause::DisplayLoad;
         }
 
-        if (enoughDecodeData &&
+        if (!arrivalGapPopSpike &&
+            enoughDecodeData &&
             input.decodeFps < input.receiveFps * 0.75) {
             return AdaptiveDegradationCause::DecodeLoad;
         }
@@ -2059,6 +2269,7 @@ namespace net {
         }
 
         if (input.jitterMs >= 35.0 ||
+            arrivalGapJitterSpike ||
             jitterBurst ||
             (outputQueueDropDelta > 0 && input.jitterMs >= 15.0)) {
             return AdaptiveDegradationCause::Jitter;
@@ -2081,15 +2292,28 @@ namespace net {
         uint64_t outputQueueDropDelta,
         uint64_t recoveryDeadlineDropDelta,
         uint64_t retransmitStaleDropDelta,
-        uint64_t freshnessDropDelta
+        uint64_t freshnessDropDelta,
+        AdaptiveFreshnessDropClass freshnessDropClass,
+        uint64_t receiveDecodeRenderOverwriteDelta
     ) const {
         double score = 0.0;
+        const bool arrivalGapPopSpike =
+            IsRecentArrivalGapPopSpike(input);
+        const bool arrivalGapJitterSpike =
+            IsRecentArrivalGapJitterSpike(input);
+        const bool displayBacklogEvidence =
+            (outputQueueDropDelta > 0 &&
+                input.lastOutputQueueDropReason == "renderer-lag") ||
+            receiveDecodeRenderOverwriteDelta > 0;
 
         if (deadlineDropDelta > 0) {
             score = (std::max)(score, 3.0);
         }
         if (outputQueueDropDelta > 0) {
-            if (input.lastOutputQueueDropReason == "renderer-lag") {
+            if (arrivalGapJitterSpike) {
+                score = (std::max)(score, 1.0);
+            }
+            else if (input.lastOutputQueueDropReason == "renderer-lag") {
                 score = (std::max)(score, 2.0);
             }
             else if (input.lastOutputQueueDropReason == "jitter-burst-release") {
@@ -2100,8 +2324,25 @@ namespace net {
             }
         }
 
-        if (freshnessDropDelta > 0) {
+        if (freshnessDropClass ==
+            AdaptiveFreshnessDropClass::TrueStaleFrame) {
             score = (std::max)(score, 3.0);
+        }
+        else if (freshnessDropClass ==
+                AdaptiveFreshnessDropClass::QueuePressure ||
+            freshnessDropClass ==
+                AdaptiveFreshnessDropClass::LatencyPressure ||
+            freshnessDropClass ==
+                AdaptiveFreshnessDropClass::RepairBudgetPressure) {
+            score = (std::max)(score, 1.0);
+        }
+        else if (freshnessDropClass ==
+            AdaptiveFreshnessDropClass::CadenceLimited) {
+            score = (std::max)(score, 1.0);
+        }
+        else if (freshnessDropClass ==
+            AdaptiveFreshnessDropClass::Unclassified) {
+            score = (std::max)(score, 2.0);
         }
         else if (input.receiveFreshnessDropThresholdMs > 0.0) {
             const double thresholdMs = input.receiveFreshnessDropThresholdMs;
@@ -2143,7 +2384,9 @@ namespace net {
             input.displayFps > 0.0 &&
             state_.targetFps > 0;
 
-        if (displayFpsReady) {
+        if (!arrivalGapPopSpike &&
+            displayBacklogEvidence &&
+            displayFpsReady) {
             const double displayRatio =
                 input.displayFps / static_cast<double>(state_.targetFps);
 
@@ -2160,7 +2403,7 @@ namespace net {
             input.receiveFps >= 5.0 &&
             input.decodeFps > 0.0;
 
-        if (decodeFpsReady) {
+        if (!arrivalGapPopSpike && decodeFpsReady) {
             const double decodeRatio = input.decodeFps / input.receiveFps;
             if (decodeRatio < 0.60) {
                 score = (std::max)(score, 2.0);
@@ -2176,7 +2419,9 @@ namespace net {
             input.decodeFps >= 5.0 &&
             input.displayFps > 0.0;
 
-        if (displayVsDecodeReady) {
+        if (!arrivalGapPopSpike &&
+            displayBacklogEvidence &&
+            displayVsDecodeReady) {
             const double displayDecodeRatio =
                 input.displayFps / input.decodeFps;
             if (displayDecodeRatio < 0.60) {
@@ -2190,7 +2435,7 @@ namespace net {
         if (input.jitterMs >= 50.0) {
             score = (std::max)(score, 2.0);
         }
-        else if (input.jitterMs >= 30.0) {
+        else if (input.jitterMs >= 30.0 || arrivalGapJitterSpike) {
             score = (std::max)(score, 1.0);
         }
 
@@ -2204,6 +2449,61 @@ namespace net {
         }
 
         return score;
+    }
+
+    AdaptiveFreshnessDropClass AdaptiveStreamingController::ClassifyFreshnessDrop(
+        const AdaptiveStreamingInput& input,
+        uint64_t freshnessDropDelta,
+        double recentMaxQueueDelayMs
+    ) const {
+        const double observedFrameAgeMs = (std::max)(
+            input.receiveDecodeInputFrameAgeMs,
+            input.receiveLatestDecodedFrameAgeMs);
+        const bool hasCurrentFreshnessDrop = freshnessDropDelta > 0;
+        const double freshnessAgeMs =
+            hasCurrentFreshnessDrop &&
+            input.receiveLastFreshnessDropAgeMs > 0.0
+            ? input.receiveLastFreshnessDropAgeMs
+            : observedFrameAgeMs;
+        const bool staleAgeEvidence =
+            input.receiveFreshnessDropThresholdMs > 0.0 &&
+            freshnessAgeMs >= input.receiveFreshnessDropThresholdMs;
+        const bool staleDropReason =
+            hasCurrentFreshnessDrop &&
+            StartsWith(input.receiveDecodeLastDropReason, "stale-");
+
+        if (!hasCurrentFreshnessDrop) {
+            return staleAgeEvidence
+                ? AdaptiveFreshnessDropClass::TrueStaleFrame
+                : AdaptiveFreshnessDropClass::None;
+        }
+
+        const bool activeQueuePressure =
+            input.pacingCurrentQueueDelayMs >= 30.0 ||
+            recentMaxQueueDelayMs >= 60.0;
+        if (activeQueuePressure) {
+            return AdaptiveFreshnessDropClass::QueuePressure;
+        }
+
+        if (input.latencyMs >= 80.0) {
+            return AdaptiveFreshnessDropClass::LatencyPressure;
+        }
+
+        const bool cadenceLimited =
+            pacingBurstVideoBudgetScale_ <= 0.85 ||
+            state_.h264VideoBudgetScale <= 0.85 ||
+            (pacingBurstGuardSec_ > 0.0 &&
+                input.pacingCurrentQueueDelayMs < 30.0 &&
+                recentMaxQueueDelayMs < 60.0);
+        if (cadenceLimited) {
+            return AdaptiveFreshnessDropClass::CadenceLimited;
+        }
+
+        if (staleAgeEvidence || staleDropReason) {
+            return AdaptiveFreshnessDropClass::TrueStaleFrame;
+        }
+
+        return AdaptiveFreshnessDropClass::Unclassified;
     }
 
     int AdaptiveStreamingController::ClampQuality(int value) const {

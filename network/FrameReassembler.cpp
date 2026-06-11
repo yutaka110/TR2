@@ -12,7 +12,18 @@ namespace net {
         constexpr uint16_t kH264LargeAuChunkThreshold = 8;
         constexpr uint64_t kH264DeltaRecoveryExpireUs = 140000;
         constexpr uint64_t kH264LargeRecoveryExtraUs = 30000;
-        constexpr uint64_t kH264KeyRecoveryExtraUs = 30000;
+        constexpr uint64_t kH264KeyRecoveryExtraUs = 45000;
+        constexpr uint64_t kH264KeyNackDeadlineUs = 22000;
+        constexpr uint64_t kH264KeyNackIntervalUs = 18000;
+        constexpr uint64_t kH264KeyTinyMissingNackDeadlineUs = 12000;
+        constexpr uint64_t kH264KeyTinyMissingNackIntervalUs = 9000;
+        constexpr uint32_t kH264KeyExtraNacks = 0;
+        constexpr uint32_t kH264KeySmallMissingChunkThreshold = 4;
+        constexpr uint32_t kH264KeyTinyMissingChunkThreshold = 2;
+        constexpr uint32_t kH264KeySmallMissingMaxDeadlineRescues = 0;
+        constexpr uint64_t kH264KeySmallMissingDeadlineRescueUs = 22000;
+        constexpr uint64_t kH264KeyTinyMissingDeadlineRescueUs = 30000;
+        constexpr uint64_t kH264KeySmallMissingLateRescueWindowUs = 15000;
         constexpr uint64_t kNackFecGraceUs = 5000;
         constexpr uint64_t kNackLikelyArrivalGraceUs = 4000;
         constexpr uint64_t kRecentArrivalWindowUs = 7000;
@@ -311,6 +322,12 @@ namespace net {
             if (frame.nackSent && completed && stats_) {
                 stats_->OnDeadlineNackRecoveredFrame();
             }
+            if (frame.keySmallMissingDeadlineRescueCount > 0 && stats_) {
+                stats_->OnH264KeySmallMissingDeadlineRescueOutcome(
+                    frame.keySmallMissingDeadlineRescueMissingChunks,
+                    completed.has_value(),
+                    !completed.has_value());
+            }
             frame.recoveryState = FrameRecoveryState::Recovered;
             EmitFrameRecoveryOutcome(
                 frame,
@@ -417,23 +434,79 @@ namespace net {
                     recoveryBaseTimeUs + effectiveRecoveryExpireUs;
             }
 
-            const uint64_t effectiveNackDeadlineUs = nackDeadlineUs;
-            const uint64_t effectiveNackIntervalUs = nackIntervalUs;
+            const bool keyH264Frame = frame.keyFrame && h264Frame;
             const uint32_t effectiveMaxNacksPerFrame =
-                protectedH264Frame
-                ? maxNacksPerFrame
+                keyH264Frame
+                ? maxNacksPerFrame + kH264KeyExtraNacks
                 : maxNacksPerFrame;
 
-            const bool expiredByLifetime =
-                nowUs >= frame.recoveryExpireTimeUs;
+            FrameAckInfo pendingAckInfo = BuildAckInfoFromPendingFrame(frame);
+            const bool smallMissingH264KeyFrame =
+                keyH264Frame &&
+                pendingAckInfo.valid &&
+                pendingAckInfo.missingChunkCount > 0 &&
+                pendingAckInfo.missingChunkCount <=
+                    kH264KeySmallMissingChunkThreshold;
+            const bool tinyMissingH264KeyFrame =
+                smallMissingH264KeyFrame &&
+                pendingAckInfo.missingChunkCount <=
+                    kH264KeyTinyMissingChunkThreshold;
+            const uint64_t effectiveNackDeadlineUs =
+                tinyMissingH264KeyFrame
+                ? (std::min)(
+                    nackDeadlineUs,
+                    kH264KeyTinyMissingNackDeadlineUs)
+                : (
+                    keyH264Frame
+                    ? (std::min)(nackDeadlineUs, kH264KeyNackDeadlineUs)
+                    : nackDeadlineUs);
+            const uint64_t effectiveNackIntervalUs =
+                tinyMissingH264KeyFrame
+                ? (std::min)(
+                    nackIntervalUs,
+                    kH264KeyTinyMissingNackIntervalUs)
+                : (
+                    keyH264Frame
+                    ? (std::min)(nackIntervalUs, kH264KeyNackIntervalUs)
+                    : nackIntervalUs);
 
+            bool expiredByLifetime =
+                nowUs >= frame.recoveryExpireTimeUs;
+            if (expiredByLifetime &&
+                smallMissingH264KeyFrame &&
+                frame.keySmallMissingDeadlineRescueCount <
+                    kH264KeySmallMissingMaxDeadlineRescues &&
+                nowUs - frame.recoveryExpireTimeUs <=
+                    kH264KeySmallMissingLateRescueWindowUs) {
+                frame.recoveryExpireTimeUs +=
+                    tinyMissingH264KeyFrame
+                    ? kH264KeyTinyMissingDeadlineRescueUs
+                    : kH264KeySmallMissingDeadlineRescueUs;
+                frame.keySmallMissingDeadlineRescueCount++;
+                frame.keySmallMissingDeadlineRescueMissingChunks =
+                    pendingAckInfo.missingChunkCount;
+                if (stats_) {
+                    stats_->OnH264KeySmallMissingDeadlineRescue(
+                        pendingAckInfo.missingChunkCount);
+                }
+                expiredByLifetime = false;
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "keyframe-small-missing-deadline-rescue",
+                    "pending",
+                    pendingAckInfo.missingChunkCount,
+                    nowUs);
+            }
+
+            const uint64_t effectiveMinRecoverySlackUs = minRecoverySlackUs;
             const bool notEnoughRecoverySlack =
-                minRecoverySlackUs > 0 &&
-                nowUs + minRecoverySlackUs >= frame.recoveryExpireTimeUs;
+                effectiveMinRecoverySlackUs > 0 &&
+                nowUs + effectiveMinRecoverySlackUs >=
+                    frame.recoveryExpireTimeUs;
 
             if (expiredByLifetime || notEnoughRecoverySlack) {
                 const FrameAckInfo expiredInfo =
-                    BuildAckInfoFromPendingFrame(frame);
+                    pendingAckInfo;
 
                 actions.expiredFrameCount++;
                 actions.expiredAfterNackCount += frame.nackSent ? 1 : 0;
@@ -458,6 +531,12 @@ namespace net {
                         expiredInfo.keyFrame,
                         expiredInfo.largeFrame
                     );
+                    if (frame.keySmallMissingDeadlineRescueCount > 0) {
+                        stats_->OnH264KeySmallMissingDeadlineRescueOutcome(
+                            frame.keySmallMissingDeadlineRescueMissingChunks,
+                            false,
+                            false);
+                    }
                 }
 
                 RetireFrame(
@@ -591,6 +670,12 @@ namespace net {
                         ackInfo.codecType,
                         ackInfo.keyFrame,
                         ackInfo.largeFrame);
+                    if (frame.keySmallMissingDeadlineRescueCount > 0) {
+                        stats_->OnH264KeySmallMissingDeadlineRescueOutcome(
+                            frame.keySmallMissingDeadlineRescueMissingChunks,
+                            false,
+                            false);
+                    }
                 }
                 EmitFrameRecoveryOutcome(
                     frame,
@@ -610,6 +695,7 @@ namespace net {
             frame.lastNackTimeUs = nowUs;
             frame.nackCount++;
             frame.nackSent = true;
+            frame.lastNackMissingChunks = ackInfo.missingChunkCount;
             frame.nackRequestedChunks +=
                 static_cast<uint32_t>(ackInfo.missingChunkIndices.size());
             frame.recoveryState = FrameRecoveryState::NackSent;
@@ -1232,6 +1318,7 @@ namespace net {
         record.chunkCount = frame.chunkCount;
         record.receivedCount = frame.receivedCount;
         record.nackCount = frame.nackCount;
+        record.lastNackMissingChunks = frame.lastNackMissingChunks;
         record.retransmitReceivedChunks =
             frame.retransmitReceivedChunks;
         record.retransmitDuplicatePackets =
@@ -1303,7 +1390,7 @@ namespace net {
             0,
             retired.nackCount,
             0,
-            0,
+            retired.lastNackMissingChunks,
             retired.retransmitReceivedChunks,
             retired.retransmitDuplicatePackets,
             packet.sequence,
@@ -1339,7 +1426,12 @@ namespace net {
             frame.chunkCount >= kH264LargeAuChunkThreshold;
         (void)largeH264Frame;
         if (h264Frame && frame.keyFrame) {
-            return false;
+            const bool keySingletonFecCandidate =
+                ackInfo.missingChunkCount == 1 &&
+                !frame.fecParityGroups.empty();
+            if (!keySingletonFecCandidate) {
+                return false;
+            }
         }
 
         const uint64_t requiredSlackUs =
