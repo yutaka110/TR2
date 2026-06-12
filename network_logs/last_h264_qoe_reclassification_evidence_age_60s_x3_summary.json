@@ -1,0 +1,260 @@
+﻿{
+    "Runs":  [
+                 {
+                     "Seed":  8960,
+                     "Csv":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260613_015207.csv",
+                     "Rows":  59,
+                     "Qoe2Rows":  8,
+                     "Qoe3Rows":  0,
+                     "CauseCounts":  [
+                                         {
+                                             "Cause":  "Jitter",
+                                             "Count":  5
+                                         },
+                                         {
+                                             "Cause":  "RecoveryDeadline",
+                                             "Count":  2
+                                         },
+                                         {
+                                             "Cause":  "RTT",
+                                             "Count":  1
+                                         }
+                                     ],
+                     "RawRecovery":  0,
+                     "EffectiveRecovery":  0,
+                     "RawRetransmitStale":  34,
+                     "EffectiveRetransmitStale":  14,
+                     "NoiseDelta":  41,
+                     "SyncRiskDelta":  39,
+                     "HardSyncLossDelta":  0,
+                     "EvidenceRows":  58,
+                     "MaxEvidenceAgeMs":  330.308,
+                     "MaxLatencyMs":  148.44,
+                     "MaxRttMs":  130.218,
+                     "MaxJitterMs":  102.214,
+                     "DisplayedFramesLast":  "1123",
+                     "ExpiredH264KeyLast":  "65"
+                 },
+                 {
+                     "Seed":  8961,
+                     "Csv":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260613_015307.csv",
+                     "Rows":  59,
+                     "Qoe2Rows":  7,
+                     "Qoe3Rows":  1,
+                     "CauseCounts":  [
+                                         {
+                                             "Cause":  "Jitter",
+                                             "Count":  6
+                                         },
+                                         {
+                                             "Cause":  "RecoveryDeadline",
+                                             "Count":  2
+                                         }
+                                     ],
+                     "RawRecovery":  1,
+                     "EffectiveRecovery":  1,
+                     "RawRetransmitStale":  27,
+                     "EffectiveRetransmitStale":  10,
+                     "NoiseDelta":  33,
+                     "SyncRiskDelta":  25,
+                     "HardSyncLossDelta":  0,
+                     "EvidenceRows":  58,
+                     "MaxEvidenceAgeMs":  399.989,
+                     "MaxLatencyMs":  169.861,
+                     "MaxRttMs":  128.512,
+                     "MaxJitterMs":  129.092,
+                     "DisplayedFramesLast":  "1128",
+                     "ExpiredH264KeyLast":  "56"
+                 },
+                 {
+                     "Seed":  8962,
+                     "Csv":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260613_015408.csv",
+                     "Rows":  59,
+                     "Qoe2Rows":  10,
+                     "Qoe3Rows":  0,
+                     "CauseCounts":  [
+                                         {
+                                             "Cause":  "Loss",
+                                             "Count":  4
+                                         },
+                                         {
+                                             "Cause":  "Jitter",
+                                             "Count":  4
+                                         },
+                                         {
+                                             "Cause":  "RecoveryDeadline",
+                                             "Count":  1
+                                         },
+                                         {
+                                             "Cause":  "RTT",
+                                             "Count":  1
+                                         }
+                                     ],
+                     "RawRecovery":  2,
+                     "EffectiveRecovery":  0,
+                     "RawRetransmitStale":  36,
+                     "EffectiveRetransmitStale":  14,
+                     "NoiseDelta":  41,
+                     "SyncRiskDelta":  37,
+                     "HardSyncLossDelta":  0,
+                     "EvidenceRows":  58,
+                     "MaxEvidenceAgeMs":  389.292,
+                     "MaxLatencyMs":  131.504,
+                     "MaxRttMs":  186.179,
+                     "MaxJitterMs":  130.346,
+                     "DisplayedFramesLast":  "1161",
+                     "ExpiredH264KeyLast":  "62"
+                 }
+             ],
+    "Totals":  {
+                   "Rows":  177,
+                   "Qoe2Rows":  25,
+                   "Qoe3Rows":  1,
+                   "QoeCauseCounts":  [
+                                          {
+                                              "Cause":  "Jitter",
+                                              "Count":  15
+                                          },
+                                          {
+                                              "Cause":  "RecoveryDeadline",
+                                              "Count":  5
+                                          },
+                                          {
+                                              "Cause":  "Loss",
+                                              "Count":  4
+                                          },
+                                          {
+                                              "Cause":  "RTT",
+                                              "Count":  2
+                                          }
+                                      ],
+                   "RawRecoverySum":  3,
+                   "EffectiveRecoverySum":  1,
+                   "RawRetransmitStaleSum":  97,
+                   "EffectiveRetransmitStaleSum":  38,
+                   "NoiseDeltaSum":  115,
+                   "SyncRiskDeltaSum":  101,
+                   "HardSyncLossDeltaSum":  0,
+                   "ReclassifiedRawRows":  48,
+                   "ReclassifiedRawQoe2PlusRows":  6,
+                   "MissedSyncRiskHardRows":  0,
+                   "RecoveryQoeRows":  5,
+                   "RecoveryCurrentSyncRows":  4,
+                   "RecoveryRecentOnlyRows":  1,
+                   "MaxEvidenceAgeMs":  399.989
+               },
+    "RecoveryQoeRows":  [
+                            {
+                                "Seed":  8960,
+                                "timeSec":  "5.044",
+                                "adaptiveQoeScore":  "2.000",
+                                "adaptiveRecoveryDeadlineRawDelta":  "0",
+                                "adaptiveRecoveryDeadlineEffectiveDelta":  "0",
+                                "adaptiveRetransmitStaleRawDelta":  "2",
+                                "adaptiveRetransmitStaleEffectiveDelta":  "2",
+                                "adaptiveRecoveryDeadlineNoiseDelta":  "1",
+                                "adaptiveRecoveryDeadlineSyncRiskDelta":  "3",
+                                "adaptiveRecoveryDeadlineHardSyncLossDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncEvidenceActive":  "1",
+                                "adaptiveRecoveryDeadlineSyncEvidenceAgeMs":  "0.000",
+                                "adaptiveRecoveryDeadlineSyncEvidenceSource":  "receiver-deadline-nack-sync-risk+ack-stale-age-sync-risk",
+                                "currentLatencyMs":  "103.725",
+                                "currentRttMs":  "57.951",
+                                "currentJitterMs":  "61.485"
+                            },
+                            {
+                                "Seed":  8960,
+                                "timeSec":  "54.221",
+                                "adaptiveQoeScore":  "2.000",
+                                "adaptiveRecoveryDeadlineRawDelta":  "0",
+                                "adaptiveRecoveryDeadlineEffectiveDelta":  "0",
+                                "adaptiveRetransmitStaleRawDelta":  "1",
+                                "adaptiveRetransmitStaleEffectiveDelta":  "1",
+                                "adaptiveRecoveryDeadlineNoiseDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncRiskDelta":  "3",
+                                "adaptiveRecoveryDeadlineHardSyncLossDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncEvidenceActive":  "1",
+                                "adaptiveRecoveryDeadlineSyncEvidenceAgeMs":  "0.000",
+                                "adaptiveRecoveryDeadlineSyncEvidenceSource":  "receiver-deadline-nack-sync-risk+ack-stale-age-sync-risk",
+                                "currentLatencyMs":  "91.191",
+                                "currentRttMs":  "16.775",
+                                "currentJitterMs":  "50.143"
+                            },
+                            {
+                                "Seed":  8961,
+                                "timeSec":  "46.367",
+                                "adaptiveQoeScore":  "2.000",
+                                "adaptiveRecoveryDeadlineRawDelta":  "0",
+                                "adaptiveRecoveryDeadlineEffectiveDelta":  "0",
+                                "adaptiveRetransmitStaleRawDelta":  "1",
+                                "adaptiveRetransmitStaleEffectiveDelta":  "1",
+                                "adaptiveRecoveryDeadlineNoiseDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncRiskDelta":  "3",
+                                "adaptiveRecoveryDeadlineHardSyncLossDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncEvidenceActive":  "1",
+                                "adaptiveRecoveryDeadlineSyncEvidenceAgeMs":  "0.000",
+                                "adaptiveRecoveryDeadlineSyncEvidenceSource":  "receiver-deadline-nack-sync-risk+ack-stale-age-sync-risk",
+                                "currentLatencyMs":  "98.423",
+                                "currentRttMs":  "128.512",
+                                "currentJitterMs":  "74.306"
+                            },
+                            {
+                                "Seed":  8961,
+                                "timeSec":  "57.403",
+                                "adaptiveQoeScore":  "2.000",
+                                "adaptiveRecoveryDeadlineRawDelta":  "1",
+                                "adaptiveRecoveryDeadlineEffectiveDelta":  "1",
+                                "adaptiveRetransmitStaleRawDelta":  "0",
+                                "adaptiveRetransmitStaleEffectiveDelta":  "0",
+                                "adaptiveRecoveryDeadlineNoiseDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncRiskDelta":  "0",
+                                "adaptiveRecoveryDeadlineHardSyncLossDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncEvidenceActive":  "1",
+                                "adaptiveRecoveryDeadlineSyncEvidenceAgeMs":  "323.272",
+                                "adaptiveRecoveryDeadlineSyncEvidenceSource":  "receiver-deadline-nack-sync-risk+ack-stale-age-sync-risk",
+                                "currentLatencyMs":  "98.442",
+                                "currentRttMs":  "9.276",
+                                "currentJitterMs":  "34.957"
+                            },
+                            {
+                                "Seed":  8962,
+                                "timeSec":  "53.354",
+                                "adaptiveQoeScore":  "2.000",
+                                "adaptiveRecoveryDeadlineRawDelta":  "0",
+                                "adaptiveRecoveryDeadlineEffectiveDelta":  "0",
+                                "adaptiveRetransmitStaleRawDelta":  "1",
+                                "adaptiveRetransmitStaleEffectiveDelta":  "1",
+                                "adaptiveRecoveryDeadlineNoiseDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncRiskDelta":  "1",
+                                "adaptiveRecoveryDeadlineHardSyncLossDelta":  "0",
+                                "adaptiveRecoveryDeadlineSyncEvidenceActive":  "1",
+                                "adaptiveRecoveryDeadlineSyncEvidenceAgeMs":  "0.000",
+                                "adaptiveRecoveryDeadlineSyncEvidenceSource":  "receiver-sync-risk",
+                                "currentLatencyMs":  "118.594",
+                                "currentRttMs":  "125.580",
+                                "currentJitterMs":  "50.176"
+                            }
+                        ],
+    "RecentOnlyRecoveryRows":  [
+                                   {
+                                       "Seed":  8961,
+                                       "timeSec":  "57.403",
+                                       "adaptiveQoeScore":  "2.000",
+                                       "adaptiveRecoveryDeadlineRawDelta":  "1",
+                                       "adaptiveRecoveryDeadlineEffectiveDelta":  "1",
+                                       "adaptiveRetransmitStaleRawDelta":  "0",
+                                       "adaptiveRetransmitStaleEffectiveDelta":  "0",
+                                       "adaptiveRecoveryDeadlineNoiseDelta":  "0",
+                                       "adaptiveRecoveryDeadlineSyncRiskDelta":  "0",
+                                       "adaptiveRecoveryDeadlineHardSyncLossDelta":  "0",
+                                       "adaptiveRecoveryDeadlineSyncEvidenceAgeMs":  "323.272",
+                                       "adaptiveRecoveryDeadlineSyncEvidenceSource":  "receiver-deadline-nack-sync-risk+ack-stale-age-sync-risk",
+                                       "currentLatencyMs":  "98.442",
+                                       "currentRttMs":  "9.276",
+                                       "currentJitterMs":  "34.957"
+                                   }
+                               ],
+    "MissedSyncRiskHardRows":  [
+
+                               ]
+}

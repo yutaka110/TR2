@@ -1409,7 +1409,9 @@ void NetworkVideoReceiver::DecodeLoop() {
                 stats_.decodeFailures++;
                 RecordH264AuInvalidLocked("payload-header-failure");
                 RecordDropLocked("h264-payload-header-failure", false);
-                receiver->RequestKeyFrame(frame.frameId);
+                receiver->RequestKeyFrame(
+                    frame.frameId,
+                    "payload-header-failure");
                 continue;
             }
 
@@ -1433,7 +1435,9 @@ void NetworkVideoReceiver::DecodeLoop() {
                 stats_.decodeFailures++;
                 RecordH264AuInvalidLocked(auValidation.reason.c_str());
                 RecordDropLocked("h264-au-invalid", false);
-                receiver->RequestKeyFrame(frame.frameId);
+                receiver->RequestKeyFrame(
+                    frame.frameId,
+                    "au-invalid");
                 continue;
             }
 
@@ -1478,7 +1482,9 @@ void NetworkVideoReceiver::DecodeLoop() {
                     std::lock_guard<std::mutex> lock(mutex_);
                     stats_.decodeQueueDroppedFrames++;
                     RecordDropLocked("h264-waiting-for-idr", true);
-                    receiver->RequestKeyFrame(frame.frameId);
+                    receiver->RequestKeyFrame(
+                        frame.frameId,
+                        "init-wait-idr");
                     continue;
                 }
             }
@@ -1541,7 +1547,9 @@ void NetworkVideoReceiver::DecodeLoop() {
                         true);
                 }
                 if (shouldRequestKeyFrame) {
-                    receiver->RequestKeyFrame(frame.frameId);
+                    receiver->RequestKeyFrame(
+                        frame.frameId,
+                        "waiting-for-idr");
                 }
                 continue;
             }
@@ -1565,7 +1573,9 @@ void NetworkVideoReceiver::DecodeLoop() {
                 UpdateDecodeMs(decodeMs);
                 stats_.decodeFailures++;
                 RecordDropLocked("h264-decode-failure", false);
-                receiver->RequestKeyFrame(frame.frameId);
+                receiver->RequestKeyFrame(
+                    frame.frameId,
+                    "decode-failure");
                 continue;
             }
 
@@ -1603,7 +1613,9 @@ void NetworkVideoReceiver::DecodeLoop() {
                     decodedFrame.frameId,
                     decodedFrame.streamId,
                     "H.264");
-                receiver->RequestKeyFrame(frame.frameId);
+                receiver->RequestKeyFrame(
+                    frame.frameId,
+                    "stale-after-decode");
                 continue;
             }
 

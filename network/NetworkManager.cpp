@@ -27,6 +27,8 @@ namespace {
     constexpr uint32_t kKeyH264TinyMissingRepairChunks = 2;
     constexpr uint32_t kKeyH264SmallMissingAckChunks = 4;
     constexpr uint64_t kKeyH264TinyMissingEmergencyPacerDeadlineUs = 30000;
+    constexpr uint64_t kKeyH264TinyMissing2FirstRetryBypassMaxDeficitUs =
+        20000;
     constexpr uint64_t kMinRepairTtlUs = 45000;
     constexpr uint64_t kUrgentRepairRemainingUs = 30000;
     constexpr uint64_t kRepairDeliveryGuardUs = 8000;
@@ -42,6 +44,32 @@ namespace {
     constexpr uint64_t kFecRescueMinObservationUs = 8000;
     constexpr uint64_t kFecRescueLargeSingletonObservationUs = 12000;
     constexpr uint64_t kFecRescueSingletonObservationUs = 12000;
+
+    bool IsTruthyEnvValue(const char* value) {
+        if (value == nullptr || value[0] == '\0') {
+            return true;
+        }
+        return _stricmp(value, "0") != 0 &&
+            _stricmp(value, "false") != 0 &&
+            _stricmp(value, "off") != 0 &&
+            _stricmp(value, "no") != 0;
+    }
+
+    bool H264KeyTinyFeasibilityGateEnabled() {
+        static const bool enabled = [] {
+            char value[32]{};
+            const DWORD length = GetEnvironmentVariableA(
+                "RNVP_H264_KEY_TINY_FEASIBILITY_GATE",
+                value,
+                static_cast<DWORD>(sizeof(value))
+            );
+            if (length == 0 || length >= sizeof(value)) {
+                return true;
+            }
+            return IsTruthyEnvValue(value);
+        }();
+        return enabled;
+    }
 
     void NetworkDebugLog(const std::string& message) {
         OutputDebugStringA(message.c_str());
@@ -1053,6 +1081,8 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
         : sendTimeUs;
     repairRecord.keyFrame = keyFrame;
     bool h264KeyTinyMissingCriticalFrameRecorded = false;
+    bool h264KeyTinyMissingCriticalInfeasibleFrameRecorded = false;
+    bool h264KeyTinyMissingCriticalBypassedFrameRecorded = false;
 
     for (uint16_t chunkIndex : chunkIndices) {
         if (chunkIndex >= chunkCount) {
@@ -1075,6 +1105,7 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
             ackMissingChunks <= kKeyH264TinyMissingRepairChunks;
         bool predictedLate = false;
         uint64_t predictedDeliveryUs = 0;
+        uint64_t repairRemainingUs = 0;
         uint64_t effectiveRepairDeadlineUs = repairPolicy.deadlineUs;
         {
             const net::PacketPacerStats pacingStats = packetPacer_.GetStats();
@@ -1099,6 +1130,10 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                 pacingQueueDelayUs +
                 (std::max)(simulatorOneWayDelayUs, rttOneWayDelayUs) +
                 kRepairDeliveryGuardUs;
+            repairRemainingUs =
+                repairPolicy.deadlineUs > nowUs
+                ? repairPolicy.deadlineUs - nowUs
+                : 0;
             predictedLate =
                 repairPolicy.deadlineUs > 0 &&
                 nowUs + predictedDeliveryUs >= repairPolicy.deadlineUs;
@@ -1107,6 +1142,17 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                     nowUs + kKeyH264TinyMissingEmergencyPacerDeadlineUs;
             }
         }
+        const bool missing2FirstRetryFeasibilityBypass =
+            h264KeyTinyMissingCritical &&
+            ackMissingChunks == 2 &&
+            retransmitAttempt <= 1 &&
+            predictedDeliveryUs <=
+                repairRemainingUs +
+                    kKeyH264TinyMissing2FirstRetryBypassMaxDeficitUs;
+        const bool applyPredictedLateGate =
+            !h264KeyTinyMissingCritical ||
+            (H264KeyTinyFeasibilityGateEnabled() &&
+                !missing2FirstRetryFeasibilityBypass);
         {
             std::lock_guard<std::mutex> lock(sentFramesMutex_);
             if (h264KeyTinyMissingCritical) {
@@ -1120,6 +1166,10 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
                     ackMissingChunks;
                 h264KeyTinyMissingCriticalLastRequestedChunks_ =
                     static_cast<uint32_t>(chunkIndices.size());
+                h264KeyTinyMissingCriticalLastPredictedDeliveryMs_ =
+                    static_cast<double>(predictedDeliveryUs) / 1000.0;
+                h264KeyTinyMissingCriticalLastRemainingSlackMs_ =
+                    static_cast<double>(repairRemainingUs) / 1000.0;
                 h264KeyTinyMissingCriticalLastEvent_ = "policy";
             }
             if (ShouldSkipRepairForFrameLocked(
@@ -1140,11 +1190,41 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
         if (!completedAck &&
             !ttlExpired &&
             predictedLate &&
-            !h264KeyTinyMissingCritical) {
+            applyPredictedLateGate) {
             ttlExpired = true;
             std::lock_guard<std::mutex> lock(sentFramesMutex_);
             lateRepairSavedPackets_++;
             repairSkippedByTtlPackets_++;
+            if (h264KeyTinyMissingCritical) {
+                if (!h264KeyTinyMissingCriticalInfeasibleFrameRecorded) {
+                    h264KeyTinyMissingCriticalFeasibilitySuppressedFrames_++;
+                    h264KeyTinyMissingCriticalInfeasibleFrameRecorded = true;
+                }
+                h264KeyTinyMissingCriticalFeasibilitySuppressedPackets_++;
+                h264KeyTinyMissingCriticalLastPredictedDeliveryMs_ =
+                    static_cast<double>(predictedDeliveryUs) / 1000.0;
+                h264KeyTinyMissingCriticalLastRemainingSlackMs_ =
+                    static_cast<double>(repairRemainingUs) / 1000.0;
+            }
+        }
+        else if (!completedAck &&
+            !ttlExpired &&
+            predictedLate &&
+            h264KeyTinyMissingCritical &&
+            missing2FirstRetryFeasibilityBypass &&
+            H264KeyTinyFeasibilityGateEnabled()) {
+            std::lock_guard<std::mutex> lock(sentFramesMutex_);
+            if (!h264KeyTinyMissingCriticalBypassedFrameRecorded) {
+                h264KeyTinyMissingCriticalFeasibilityBypassedFrames_++;
+                h264KeyTinyMissingCriticalBypassedFrameRecorded = true;
+            }
+            h264KeyTinyMissingCriticalFeasibilityBypassedPackets_++;
+            h264KeyTinyMissingCriticalLastPredictedDeliveryMs_ =
+                static_cast<double>(predictedDeliveryUs) / 1000.0;
+            h264KeyTinyMissingCriticalLastRemainingSlackMs_ =
+                static_cast<double>(repairRemainingUs) / 1000.0;
+            h264KeyTinyMissingCriticalLastEvent_ =
+                "feasibility-bypass-missing2-first-retry";
         }
         if (completedAck || ttlExpired) {
             if (h264KeyTinyMissingCritical) {
@@ -1223,6 +1303,11 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
             header.flags,
             net::PacketFlag_Retransmit
         );
+        if (h264KeyTinyMissingCritical) {
+            header.flags = net::AddPacketFlag(
+                header.flags,
+                net::PacketFlag_EmergencyRepair);
+        }
         if (keyFrame) {
             header.flags = net::AddPacketFlag(header.flags, net::PacketFlag_KeyFrame);
         }
@@ -3138,6 +3223,8 @@ void NetworkManager::HandleAckControl(
     bool shouldRetransmit = false;
     bool shouldRequestKeyFrame = false;
     bool shouldCountStaleDrop = false;
+    std::string keyFrameRequestReason;
+    bool keyFrameRequestSyncRisk = false;
     uint32_t retransmitAttempt = 0;
 
     const uint64_t nowUs = NowMicroseconds();
@@ -3278,6 +3365,9 @@ void NetworkManager::HandleAckControl(
         if (record == sentFrames_.end()) {
             shouldCountStaleDrop = true;
             shouldRequestKeyFrame = true;
+            keyFrameRequestReason = "history-missing";
+            keyFrameRequestSyncRisk =
+                ackCodecType == net::CodecType::H264 && ackKeyFrame;
             recordSmallMissingGate(
                 nullptr,
                 "history-missing",
@@ -3325,6 +3415,16 @@ void NetworkManager::HandleAckControl(
                 (retransmitBudgetExhausted && !budgetRescueAllowed)) {
                 shouldCountStaleDrop = true;
                 shouldRequestKeyFrame = true;
+                keyFrameRequestReason =
+                    staleByFrameLag
+                    ? "stale-frame-lag"
+                    : (
+                        staleByAge
+                        ? "stale-age"
+                        : "retransmit-budget-exhausted");
+                keyFrameRequestSyncRisk =
+                    record->codecType == net::CodecType::H264 &&
+                    record->keyFrame;
                 recordSmallMissingGate(
                     &(*record),
                     staleByFrameLag
@@ -3400,6 +3500,10 @@ void NetworkManager::HandleAckControl(
 
                     if (missingRate >= 0.25) {
                         shouldRequestKeyFrame = true;
+                        keyFrameRequestReason = "high-missing-rate";
+                        keyFrameRequestSyncRisk =
+                            record->codecType == net::CodecType::H264 &&
+                            record->keyFrame;
                     }
                 }
             }
@@ -3410,6 +3514,9 @@ void NetworkManager::HandleAckControl(
         }
 
         if (shouldRequestKeyFrame) {
+            if (keyFrameRequestReason.empty()) {
+                keyFrameRequestReason = "unknown";
+            }
             const bool requestPending =
                 forceNextKeyFrame_.load(std::memory_order_relaxed);
             const bool cooldownElapsed =
@@ -3420,6 +3527,48 @@ void NetworkManager::HandleAckControl(
                 forceNextKeyFrame_.store(true, std::memory_order_relaxed);
                 ackKeyFrameRequestCount_++;
                 lastAckKeyFrameRequestUs_ = nowUs;
+                if (keyFrameRequestReason == "history-missing") {
+                    h264AckKeyFrameRequestHistoryMissing_++;
+                }
+                else if (keyFrameRequestReason == "stale-frame-lag") {
+                    h264AckKeyFrameRequestStaleFrameLag_++;
+                }
+                else if (keyFrameRequestReason == "stale-age") {
+                    h264AckKeyFrameRequestStaleAge_++;
+                }
+                else if (keyFrameRequestReason ==
+                    "retransmit-budget-exhausted") {
+                    h264AckKeyFrameRequestRetransmitBudgetExhausted_++;
+                }
+                else if (keyFrameRequestReason == "high-missing-rate") {
+                    h264AckKeyFrameRequestHighMissingRate_++;
+                }
+                h264AckKeyFrameRequestLastReason_ = keyFrameRequestReason;
+            }
+            else if (requestPending) {
+                h264AckKeyFrameRequestAlreadyPending_++;
+                h264AckKeyFrameRequestLastReason_ =
+                    keyFrameRequestReason + "-already-pending";
+            }
+            else {
+                h264AckKeyFrameRequestCooldownSuppressed_++;
+                if (keyFrameRequestSyncRisk) {
+                    h264AckKeyFrameRequestCooldownSyncRisk_++;
+                    if (keyFrameRequestReason == "stale-age") {
+                        h264AckKeyFrameRequestStaleAgeCooldownSyncRisk_++;
+                    }
+                }
+                else {
+                    h264AckKeyFrameRequestCooldownNoise_++;
+                    if (keyFrameRequestReason == "stale-age") {
+                        h264AckKeyFrameRequestStaleAgeCooldownNoise_++;
+                    }
+                }
+                h264AckKeyFrameRequestLastReason_ =
+                    keyFrameRequestReason +
+                    (keyFrameRequestSyncRisk
+                        ? "-cooldown-sync-risk"
+                        : "-cooldown-noise");
             }
         }
     }
@@ -3961,6 +4110,46 @@ NetworkManager::GetH264KeyTinyMissingCriticalSkippedPacketCount() const {
     return h264KeyTinyMissingCriticalSkippedPackets_;
 }
 
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalFeasibilitySuppressedFrameCount()
+const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalFeasibilitySuppressedFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalFeasibilitySuppressedPacketCount()
+const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalFeasibilitySuppressedPackets_;
+}
+
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalFeasibilityBypassedFrameCount()
+const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalFeasibilityBypassedFrames_;
+}
+
+uint64_t
+NetworkManager::GetH264KeyTinyMissingCriticalFeasibilityBypassedPacketCount()
+const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalFeasibilityBypassedPackets_;
+}
+
+double
+NetworkManager::GetH264KeyTinyMissingCriticalLastPredictedDeliveryMs() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalLastPredictedDeliveryMs_;
+}
+
+double
+NetworkManager::GetH264KeyTinyMissingCriticalLastRemainingSlackMs() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    return h264KeyTinyMissingCriticalLastRemainingSlackMs_;
+}
+
 uint32_t
 NetworkManager::GetH264KeyTinyMissingCriticalLastFrameId() const {
     std::lock_guard<std::mutex> lock(sentFramesMutex_);
@@ -4103,6 +4292,29 @@ uint64_t NetworkManager::GetAckStaleDroppedFrameCount() const {
 uint64_t NetworkManager::GetAckKeyFrameRequestCount() const {
     std::lock_guard<std::mutex> lock(sentFramesMutex_);
     return ackKeyFrameRequestCount_;
+}
+
+NetworkManager::H264AckKeyFrameRequestTelemetry
+NetworkManager::GetH264AckKeyFrameRequestTelemetry() const {
+    std::lock_guard<std::mutex> lock(sentFramesMutex_);
+    H264AckKeyFrameRequestTelemetry telemetry{};
+    telemetry.historyMissing = h264AckKeyFrameRequestHistoryMissing_;
+    telemetry.staleFrameLag = h264AckKeyFrameRequestStaleFrameLag_;
+    telemetry.staleAge = h264AckKeyFrameRequestStaleAge_;
+    telemetry.retransmitBudgetExhausted =
+        h264AckKeyFrameRequestRetransmitBudgetExhausted_;
+    telemetry.highMissingRate = h264AckKeyFrameRequestHighMissingRate_;
+    telemetry.cooldownSuppressed =
+        h264AckKeyFrameRequestCooldownSuppressed_;
+    telemetry.alreadyPending = h264AckKeyFrameRequestAlreadyPending_;
+    telemetry.cooldownNoise = h264AckKeyFrameRequestCooldownNoise_;
+    telemetry.cooldownSyncRisk = h264AckKeyFrameRequestCooldownSyncRisk_;
+    telemetry.staleAgeCooldownNoise =
+        h264AckKeyFrameRequestStaleAgeCooldownNoise_;
+    telemetry.staleAgeCooldownSyncRisk =
+        h264AckKeyFrameRequestStaleAgeCooldownSyncRisk_;
+    telemetry.lastReason = h264AckKeyFrameRequestLastReason_;
+    return telemetry;
 }
 
 bool NetworkManager::IsKeyFrameRequestPending() const {
@@ -4929,6 +5141,12 @@ void NetworkManager::ResetStats() {
         h264KeyTinyMissingCriticalPackets_ = 0;
         h264KeyTinyMissingCriticalSentPackets_ = 0;
         h264KeyTinyMissingCriticalSkippedPackets_ = 0;
+        h264KeyTinyMissingCriticalFeasibilitySuppressedFrames_ = 0;
+        h264KeyTinyMissingCriticalFeasibilitySuppressedPackets_ = 0;
+        h264KeyTinyMissingCriticalFeasibilityBypassedFrames_ = 0;
+        h264KeyTinyMissingCriticalFeasibilityBypassedPackets_ = 0;
+        h264KeyTinyMissingCriticalLastPredictedDeliveryMs_ = 0.0;
+        h264KeyTinyMissingCriticalLastRemainingSlackMs_ = 0.0;
         h264KeyTinyMissingCriticalLastFrameId_ = 0;
         h264KeyTinyMissingCriticalLastAckMissingChunks_ = 0;
         h264KeyTinyMissingCriticalLastRequestedChunks_ = 0;
@@ -4954,6 +5172,18 @@ void NetworkManager::ResetStats() {
         ackStaleDroppedFrameCount_ = 0;
         ackKeyFrameRequestCount_ = 0;
         lastAckKeyFrameRequestUs_ = 0;
+        h264AckKeyFrameRequestHistoryMissing_ = 0;
+        h264AckKeyFrameRequestStaleFrameLag_ = 0;
+        h264AckKeyFrameRequestStaleAge_ = 0;
+        h264AckKeyFrameRequestRetransmitBudgetExhausted_ = 0;
+        h264AckKeyFrameRequestHighMissingRate_ = 0;
+        h264AckKeyFrameRequestCooldownSuppressed_ = 0;
+        h264AckKeyFrameRequestAlreadyPending_ = 0;
+        h264AckKeyFrameRequestCooldownNoise_ = 0;
+        h264AckKeyFrameRequestCooldownSyncRisk_ = 0;
+        h264AckKeyFrameRequestStaleAgeCooldownNoise_ = 0;
+        h264AckKeyFrameRequestStaleAgeCooldownSyncRisk_ = 0;
+        h264AckKeyFrameRequestLastReason_.clear();
         completedFrameAcks_.clear();
         fecLikelySuppressionRecords_.clear();
         forceNextKeyFrame_.store(false, std::memory_order_relaxed);

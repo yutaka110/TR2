@@ -208,10 +208,18 @@ namespace net {
 		uint64_t h264KeyTinyMissingCriticalPackets = 0;
 		uint64_t h264KeyTinyMissingCriticalSentPackets = 0;
 		uint64_t h264KeyTinyMissingCriticalSkippedPackets = 0;
+		uint64_t h264KeyTinyMissingCriticalFeasibilitySuppressedFrames = 0;
+		uint64_t h264KeyTinyMissingCriticalFeasibilitySuppressedPackets = 0;
+		uint64_t h264KeyTinyMissingCriticalFeasibilityBypassedFrames = 0;
+		uint64_t h264KeyTinyMissingCriticalFeasibilityBypassedPackets = 0;
+		double h264KeyTinyMissingCriticalLastPredictedDeliveryMs = 0.0;
+		double h264KeyTinyMissingCriticalLastRemainingSlackMs = 0.0;
 		uint32_t h264KeyTinyMissingCriticalLastFrameId = 0;
 		uint32_t h264KeyTinyMissingCriticalLastAckMissingChunks = 0;
 		uint32_t h264KeyTinyMissingCriticalLastRequestedChunks = 0;
 		std::string h264KeyTinyMissingCriticalLastEvent;
+		uint64_t h264KeyTinyEarlyNackFrames = 0;
+		uint64_t h264KeyTinyEarlyNackMissingChunks = 0;
 		uint64_t h264KeySmallMissingAckFrames = 0;
 		uint64_t h264KeySmallMissingAckMissingChunks = 0;
 		uint64_t h264KeySmallMissingAckHistoryMissingFrames = 0;
@@ -236,6 +244,27 @@ namespace net {
 		uint64_t h264KeyRepair1To2LateCompletedPackets = 0;
 		uint64_t h264KeyRepair1To2LateExpiredPackets = 0;
 		uint64_t h264KeyRepair1To2LateRejectedPackets = 0;
+		uint64_t h264KeyTinyEmergencyCompletedFrames = 0;
+		uint64_t h264KeyTinyEmergencyArrivedBeforeRetirePackets = 0;
+		uint64_t h264KeyTinyEmergencyDuplicateBeforeRetirePackets = 0;
+		uint64_t h264KeyTinyEmergencyArrivedAfterCompletePackets = 0;
+		uint64_t h264KeyTinyEmergencyArrivedAfterExpirePackets = 0;
+		uint64_t h264KeyTinyEmergencyArrivedAfterRejectedPackets = 0;
+		uint64_t h264KeyTinyEmergencyNotArrivedPackets = 0;
+		double h264KeyTinyEmergencySendToArrivalAvgMs = 0.0;
+		double h264KeyTinyEmergencySendToArrivalMaxMs = 0.0;
+		uint64_t h264KeyTinyLastChanceNackFrames = 0;
+		uint64_t h264KeyTinyLastChanceMissing1Frames = 0;
+		uint64_t h264KeyTinyLastChanceCompletedFrames = 0;
+		uint64_t h264KeyTinyLastChanceExpiredFrames = 0;
+		uint64_t h264KeyTinyLastChanceArrivedBeforeRetirePackets = 0;
+		uint64_t h264KeyTinyLastChanceDuplicateBeforeRetirePackets = 0;
+		uint64_t h264KeyTinyLastChanceLateCompletedPackets = 0;
+		uint64_t h264KeyTinyLastChanceLateExpiredPackets = 0;
+		uint64_t h264KeyTinyLastChanceLateRejectedPackets = 0;
+		double h264KeyTinyLastChanceSlackAvgMs = 0.0;
+		double h264KeyTinyLastChanceSlackMinMs = 0.0;
+		double h264KeyTinyLastChanceSlackMaxMs = 0.0;
 		uint64_t h264KeyRepair3To4CompletedFrames = 0;
 		uint64_t h264KeyRepair3To4ExpiredFrames = 0;
 		uint64_t h264KeyRepair3To4ArrivedPackets = 0;
@@ -246,6 +275,35 @@ namespace net {
 		uint64_t lateRepairSavedPackets = 0;
 		uint64_t ackStaleDroppedFrames = 0;
 		uint64_t ackKeyFrameRequests = 0;
+		uint64_t h264KeyFrameRequestAckHistoryMissing = 0;
+		uint64_t h264KeyFrameRequestAckStaleFrameLag = 0;
+		uint64_t h264KeyFrameRequestAckStaleAge = 0;
+		uint64_t h264KeyFrameRequestAckRetransmitBudgetExhausted = 0;
+		uint64_t h264KeyFrameRequestAckHighMissingRate = 0;
+		uint64_t h264KeyFrameRequestAckCooldownSuppressed = 0;
+		uint64_t h264KeyFrameRequestAckAlreadyPending = 0;
+		uint64_t h264KeyFrameRequestAckCooldownNoise = 0;
+		uint64_t h264KeyFrameRequestAckCooldownSyncRisk = 0;
+		uint64_t h264KeyFrameRequestAckStaleAgeCooldownNoise = 0;
+		uint64_t h264KeyFrameRequestAckStaleAgeCooldownSyncRisk = 0;
+		std::string h264KeyFrameRequestAckLastReason;
+		uint64_t h264KeyFrameRequestReceiverRequests = 0;
+		uint64_t h264KeyFrameRequestReceiverCooldownSuppressed = 0;
+		uint64_t h264KeyFrameRequestReceiverCooldownNoise = 0;
+		uint64_t h264KeyFrameRequestReceiverCooldownSyncRisk = 0;
+		uint64_t h264KeyFrameRequestReceiverTrueSyncLoss = 0;
+		uint64_t h264KeyFrameRequestReceiverMissingAck = 0;
+		uint64_t h264KeyFrameRequestReceiverDeadlineExpired = 0;
+		uint64_t h264KeyFrameRequestReceiverDeadlineNackMissing = 0;
+		uint64_t h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise = 0;
+		uint64_t h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk = 0;
+		uint64_t h264KeyFrameRequestReceiverPayloadHeaderFailure = 0;
+		uint64_t h264KeyFrameRequestReceiverAuInvalid = 0;
+		uint64_t h264KeyFrameRequestReceiverInitWaitIdr = 0;
+		uint64_t h264KeyFrameRequestReceiverWaitingForIdr = 0;
+		uint64_t h264KeyFrameRequestReceiverDecodeFailure = 0;
+		uint64_t h264KeyFrameRequestReceiverStaleAfterDecode = 0;
+		std::string h264KeyFrameRequestReceiverLastReason;
 		bool ackKeyFramePending = false;
 		bool pacingEnabled = false;
 		uint32_t pacingTargetBitrateBps = 0;
@@ -581,6 +639,16 @@ namespace net {
 		double adaptiveLastQoeScore = 0.0;
 		std::string adaptiveDegradationCause;
 		bool adaptiveArrivalGapJitterSpikeActive = false;
+		uint64_t adaptiveRecoveryDeadlineRawDelta = 0;
+		uint64_t adaptiveRecoveryDeadlineEffectiveDelta = 0;
+		uint64_t adaptiveRetransmitStaleRawDelta = 0;
+		uint64_t adaptiveRetransmitStaleEffectiveDelta = 0;
+		uint64_t adaptiveRecoveryDeadlineNoiseDelta = 0;
+		uint64_t adaptiveRecoveryDeadlineSyncRiskDelta = 0;
+		uint64_t adaptiveRecoveryDeadlineHardSyncLossDelta = 0;
+		bool adaptiveRecoveryDeadlineSyncEvidenceActive = false;
+		double adaptiveRecoveryDeadlineSyncEvidenceAgeMs = 0.0;
+		std::string adaptiveRecoveryDeadlineSyncEvidenceSource = "none";
 		bool adaptiveFecRecoveryWorking = false;
 		bool adaptiveFecGuardActive = false;
 		double adaptiveFecRecoveryEfficiency = 0.0;
@@ -728,6 +796,8 @@ namespace net {
 			uint32_t nackRequestedChunks,
 			uint32_t retransmitReceivedChunks,
 			uint32_t retransmitDuplicatePackets,
+			uint32_t emergencyRepairReceivedChunks,
+			uint32_t emergencyRepairDuplicatePackets,
 			uint32_t lastPacketSequence,
 			uint32_t lastPacketChunkIndex,
 			uint32_t lastRetransmitSequence,
@@ -735,6 +805,19 @@ namespace net {
 			uint32_t eventPacketSequence,
 			uint32_t eventPacketChunkIndex,
 			bool eventPacketWasRetransmit,
+			bool eventPacketWasEmergencyRepair,
+			uint64_t recoveryExpireTimeUs,
+			uint64_t lastUpdateTimeUs,
+			uint64_t recentArrivalIntervalUs,
+			uint32_t likelyArrivalSuppressionCount,
+			bool likelyArrivalWindowHit,
+			bool likelyArrivalRecentHit,
+			bool likelyArrivalTightCadenceHit,
+			bool likelyArrivalFecParityHit,
+			bool likelyArrivalFecRecoverableHit,
+			bool keyTinyLastChanceNackSent,
+			uint32_t keyTinyLastChanceMissingChunks,
+			uint64_t keyTinyLastChanceSlackUs,
 			uint64_t sendTimeUs,
 			uint64_t firstReceiveTimeUs,
 			uint64_t eventTimeUs
@@ -776,6 +859,12 @@ namespace net {
 
 		// 画面表示成功時に呼ぶ。DX12表示側で使う
 		void OnDisplayFrame();
+
+		void OnH264ReceiverKeyFrameRequest(
+			const char* reason,
+			bool sent,
+			bool syncRisk = false
+		);
 
 		// RNVP sequence の欠番を検出したときに呼ぶ
 		void OnMissingPackets(uint64_t missingCount);
@@ -836,6 +925,10 @@ namespace net {
 		uint64_t retransmitLateAfterCompletedDelaySamples_ = 0;
 		double retransmitLateAfterCompletedSendToCompleteSumMs_ = 0.0;
 		uint64_t retransmitLateAfterCompletedSendToCompleteSamples_ = 0;
+		double h264KeyTinyEmergencySendToArrivalSumMs_ = 0.0;
+		uint64_t h264KeyTinyEmergencySendToArrivalSamples_ = 0;
+		double h264KeyTinyLastChanceSlackSumMs_ = 0.0;
+		uint64_t h264KeyTinyLastChanceSlackSamples_ = 0;
 
 		// jitter
 		bool hasPreviousFrameArrival_ = false;

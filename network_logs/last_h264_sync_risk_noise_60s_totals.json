@@ -1,0 +1,33 @@
+﻿{
+    "Totals":  {
+                   "Runs":  3,
+                   "DisplayedFrames":  3529,
+                   "Qoe2Rows":  25,
+                   "Qoe3Rows":  2,
+                   "AckCooldownNoise":  11962,
+                   "AckCooldownSyncRisk":  4286,
+                   "AckStaleAgeCooldownNoise":  11282,
+                   "AckStaleAgeCooldownSyncRisk":  2843,
+                   "ReceiverCooldownNoise":  13304,
+                   "ReceiverCooldownSyncRisk":  4771,
+                   "ReceiverTrueSyncLoss":  4778,
+                   "ReceiverDeadlineNackMissingCooldownNoise":  9332,
+                   "ReceiverDeadlineNackMissingCooldownSyncRisk":  3580,
+                   "ReceiverWaitingForIdr":  0,
+                   "ReceiverDecodeFailure":  0,
+                   "DeadlineExpired":  1252,
+                   "DeadlineExpiredKey":  215,
+                   "AckStaleDropped":  15933
+               },
+    "Ratios":  {
+                   "AckNoisePct":  73.62,
+                   "AckSyncRiskPct":  26.38,
+                   "AckStaleAgeNoisePct":  79.87,
+                   "AckStaleAgeSyncRiskPct":  20.13,
+                   "ReceiverNoisePct":  73.6,
+                   "ReceiverSyncRiskPct":  26.4,
+                   "ReceiverDeadlineNackNoisePct":  72.27,
+                   "ReceiverDeadlineNackSyncRiskPct":  27.73,
+                   "HardDecoderSyncLossEvents":  0
+               }
+}

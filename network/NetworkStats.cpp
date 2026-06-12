@@ -51,12 +51,19 @@ namespace {
         }
 
         initialized = true;
-        std::error_code ec;
-        std::filesystem::create_directories("logs", ec);
-        const std::filesystem::path path =
-            std::filesystem::path("logs") /
-            ("frame_recovery_trace_" + MakeTimestamp() + ".csv");
-        file.open(path, std::ios::out | std::ios::trunc);
+        const std::string fileName =
+            "frame_recovery_trace_" + MakeTimestamp() + ".csv";
+        for (const char* directory : {"logs", "network_logs"}) {
+            std::error_code ec;
+            std::filesystem::create_directories(directory, ec);
+            const std::filesystem::path path =
+                std::filesystem::path(directory) / fileName;
+            file.open(path, std::ios::out | std::ios::trunc);
+            if (file) {
+                break;
+            }
+            file.clear();
+        }
         if (file) {
             file
                 << "eventTimeUs,"
@@ -77,6 +84,8 @@ namespace {
                 << "nackRequestedChunks,"
                 << "retransmitReceivedChunks,"
                 << "retransmitDuplicatePackets,"
+                << "emergencyRepairReceivedChunks,"
+                << "emergencyRepairDuplicatePackets,"
                 << "lastPacketSequence,"
                 << "lastPacketChunkIndex,"
                 << "lastRetransmitSequence,"
@@ -84,6 +93,21 @@ namespace {
                 << "eventPacketSequence,"
                 << "eventPacketChunkIndex,"
                 << "eventPacketWasRetransmit,"
+                << "eventPacketWasEmergencyRepair,"
+                << "recoveryExpireTimeUs,"
+                << "recoverySlackMs,"
+                << "lastUpdateTimeUs,"
+                << "lastUpdateAgeMs,"
+                << "recentArrivalIntervalMs,"
+                << "likelyArrivalSuppressionCount,"
+                << "likelyArrivalWindowHit,"
+                << "likelyArrivalRecentHit,"
+                << "likelyArrivalTightCadenceHit,"
+                << "likelyArrivalFecParityHit,"
+                << "likelyArrivalFecRecoverableHit,"
+                << "keyTinyLastChanceNackSent,"
+                << "keyTinyLastChanceMissingChunks,"
+                << "keyTinyLastChanceSlackMs,"
                 << "sendTimeUs,"
                 << "firstReceiveTimeUs,"
                 << "ageMs\n";
@@ -110,6 +134,8 @@ namespace {
         uint32_t nackRequestedChunks,
         uint32_t retransmitReceivedChunks,
         uint32_t retransmitDuplicatePackets,
+        uint32_t emergencyRepairReceivedChunks,
+        uint32_t emergencyRepairDuplicatePackets,
         uint32_t lastPacketSequence,
         uint32_t lastPacketChunkIndex,
         uint32_t lastRetransmitSequence,
@@ -117,6 +143,19 @@ namespace {
         uint32_t eventPacketSequence,
         uint32_t eventPacketChunkIndex,
         bool eventPacketWasRetransmit,
+        bool eventPacketWasEmergencyRepair,
+        uint64_t recoveryExpireTimeUs,
+        uint64_t lastUpdateTimeUs,
+        uint64_t recentArrivalIntervalUs,
+        uint32_t likelyArrivalSuppressionCount,
+        bool likelyArrivalWindowHit,
+        bool likelyArrivalRecentHit,
+        bool likelyArrivalTightCadenceHit,
+        bool likelyArrivalFecParityHit,
+        bool likelyArrivalFecRecoverableHit,
+        bool keyTinyLastChanceNackSent,
+        uint32_t keyTinyLastChanceMissingChunks,
+        uint64_t keyTinyLastChanceSlackUs,
         uint64_t sendTimeUs,
         uint64_t firstReceiveTimeUs,
         double ageMs
@@ -125,6 +164,32 @@ namespace {
         if (!file) {
             return;
         }
+
+        double recoverySlackMs = 0.0;
+        if (recoveryExpireTimeUs != 0) {
+            if (recoveryExpireTimeUs >= eventTimeUs) {
+                recoverySlackMs =
+                    static_cast<double>(recoveryExpireTimeUs - eventTimeUs) /
+                    1000.0;
+            }
+            else {
+                recoverySlackMs =
+                    -static_cast<double>(eventTimeUs - recoveryExpireTimeUs) /
+                    1000.0;
+            }
+        }
+
+        double lastUpdateAgeMs = 0.0;
+        if (lastUpdateTimeUs != 0 && eventTimeUs >= lastUpdateTimeUs) {
+            lastUpdateAgeMs =
+                static_cast<double>(eventTimeUs - lastUpdateTimeUs) /
+                1000.0;
+        }
+
+        const double recentArrivalIntervalMs =
+            static_cast<double>(recentArrivalIntervalUs) / 1000.0;
+        const double keyTinyLastChanceSlackMs =
+            static_cast<double>(keyTinyLastChanceSlackUs) / 1000.0;
 
         file
             << eventTimeUs << ','
@@ -145,6 +210,8 @@ namespace {
             << nackRequestedChunks << ','
             << retransmitReceivedChunks << ','
             << retransmitDuplicatePackets << ','
+            << emergencyRepairReceivedChunks << ','
+            << emergencyRepairDuplicatePackets << ','
             << lastPacketSequence << ','
             << lastPacketChunkIndex << ','
             << lastRetransmitSequence << ','
@@ -152,6 +219,21 @@ namespace {
             << eventPacketSequence << ','
             << eventPacketChunkIndex << ','
             << (eventPacketWasRetransmit ? 1 : 0) << ','
+            << (eventPacketWasEmergencyRepair ? 1 : 0) << ','
+            << recoveryExpireTimeUs << ','
+            << recoverySlackMs << ','
+            << lastUpdateTimeUs << ','
+            << lastUpdateAgeMs << ','
+            << recentArrivalIntervalMs << ','
+            << likelyArrivalSuppressionCount << ','
+            << (likelyArrivalWindowHit ? 1 : 0) << ','
+            << (likelyArrivalRecentHit ? 1 : 0) << ','
+            << (likelyArrivalTightCadenceHit ? 1 : 0) << ','
+            << (likelyArrivalFecParityHit ? 1 : 0) << ','
+            << (likelyArrivalFecRecoverableHit ? 1 : 0) << ','
+            << (keyTinyLastChanceNackSent ? 1 : 0) << ','
+            << keyTinyLastChanceMissingChunks << ','
+            << keyTinyLastChanceSlackMs << ','
             << sendTimeUs << ','
             << firstReceiveTimeUs << ','
             << ageMs
@@ -188,6 +270,14 @@ namespace {
         totalFrameBytes_ = 0;
 
         latencySumMs_ = 0.0;
+        retransmitLateAfterCompletedDelaySumMs_ = 0.0;
+        retransmitLateAfterCompletedDelaySamples_ = 0;
+        retransmitLateAfterCompletedSendToCompleteSumMs_ = 0.0;
+        retransmitLateAfterCompletedSendToCompleteSamples_ = 0;
+        h264KeyTinyEmergencySendToArrivalSumMs_ = 0.0;
+        h264KeyTinyEmergencySendToArrivalSamples_ = 0;
+        h264KeyTinyLastChanceSlackSumMs_ = 0.0;
+        h264KeyTinyLastChanceSlackSamples_ = 0;
 
         hasPreviousFrameArrival_ = false;
         previousFrameReceiveTimeUs_ = 0;
@@ -649,6 +739,8 @@ namespace {
         uint32_t nackRequestedChunks,
         uint32_t retransmitReceivedChunks,
         uint32_t retransmitDuplicatePackets,
+        uint32_t emergencyRepairReceivedChunks,
+        uint32_t emergencyRepairDuplicatePackets,
         uint32_t lastPacketSequence,
         uint32_t lastPacketChunkIndex,
         uint32_t lastRetransmitSequence,
@@ -656,6 +748,19 @@ namespace {
         uint32_t eventPacketSequence,
         uint32_t eventPacketChunkIndex,
         bool eventPacketWasRetransmit,
+        bool eventPacketWasEmergencyRepair,
+        uint64_t recoveryExpireTimeUs,
+        uint64_t lastUpdateTimeUs,
+        uint64_t recentArrivalIntervalUs,
+        uint32_t likelyArrivalSuppressionCount,
+        bool likelyArrivalWindowHit,
+        bool likelyArrivalRecentHit,
+        bool likelyArrivalTightCadenceHit,
+        bool likelyArrivalFecParityHit,
+        bool likelyArrivalFecRecoverableHit,
+        bool keyTinyLastChanceNackSent,
+        uint32_t keyTinyLastChanceMissingChunks,
+        uint64_t keyTinyLastChanceSlackUs,
         uint64_t sendTimeUs,
         uint64_t firstReceiveTimeUs,
         uint64_t eventTimeUs
@@ -684,7 +789,9 @@ namespace {
             snapshot_.frameRecoveryRejectedFrames++;
         }
 
-        if (eventText == "nack-sent") {
+        if (eventText == "nack-sent" ||
+            eventText == "nack-sent-key-tiny-early" ||
+            eventText == "nack-sent-last-chance-key-tiny") {
             snapshot_.frameRecoveryNackSentFrames++;
         }
         else if (eventText == "fec-recovered") {
@@ -759,6 +866,125 @@ namespace {
             }
             else if (eventText == "retransmit-late-after-rejected") {
                 lateRejectedPackets++;
+            }
+        }
+
+        const bool h264KeyTinyEmergencyBucket =
+            codecType == CodecType::H264 &&
+            keyFrame &&
+            nackRequestedChunks > 0 &&
+            nackRequestedChunks <= 2;
+        if (h264KeyTinyEmergencyBucket) {
+            if (eventText == "completed" &&
+                outcomeText == "completed" &&
+                emergencyRepairReceivedChunks > 0) {
+                snapshot_.h264KeyTinyEmergencyCompletedFrames++;
+            }
+            else if (eventPacketWasEmergencyRepair &&
+                eventText == "retransmit-arrived") {
+                snapshot_
+                    .h264KeyTinyEmergencyArrivedBeforeRetirePackets++;
+            }
+            else if (eventPacketWasEmergencyRepair &&
+                eventText == "retransmit-duplicate") {
+                snapshot_
+                    .h264KeyTinyEmergencyDuplicateBeforeRetirePackets++;
+            }
+            else if (eventPacketWasEmergencyRepair &&
+                eventText == "retransmit-late-after-completed") {
+                snapshot_
+                    .h264KeyTinyEmergencyArrivedAfterCompletePackets++;
+            }
+            else if (eventPacketWasEmergencyRepair &&
+                eventText == "retransmit-late-after-expired") {
+                snapshot_
+                    .h264KeyTinyEmergencyArrivedAfterExpirePackets++;
+            }
+            else if (eventPacketWasEmergencyRepair &&
+                eventText == "retransmit-late-after-rejected") {
+                snapshot_
+                    .h264KeyTinyEmergencyArrivedAfterRejectedPackets++;
+            }
+
+            if (eventPacketWasEmergencyRepair &&
+                sendTimeUs != 0 &&
+                eventTimeUs >= sendTimeUs) {
+                const double sendToArrivalMs =
+                    static_cast<double>(eventTimeUs - sendTimeUs) / 1000.0;
+                h264KeyTinyEmergencySendToArrivalSumMs_ +=
+                    sendToArrivalMs;
+                h264KeyTinyEmergencySendToArrivalSamples_++;
+                snapshot_.h264KeyTinyEmergencySendToArrivalAvgMs =
+                    h264KeyTinyEmergencySendToArrivalSumMs_ /
+                    static_cast<double>(
+                        h264KeyTinyEmergencySendToArrivalSamples_);
+                snapshot_.h264KeyTinyEmergencySendToArrivalMaxMs =
+                    (std::max)(
+                        snapshot_.h264KeyTinyEmergencySendToArrivalMaxMs,
+                        sendToArrivalMs);
+            }
+        }
+
+        if (eventText == "nack-sent-key-tiny-early") {
+            snapshot_.h264KeyTinyEarlyNackFrames++;
+            snapshot_.h264KeyTinyEarlyNackMissingChunks +=
+                missingChunks;
+        }
+
+        if (keyTinyLastChanceNackSent) {
+            if (eventText == "nack-sent-last-chance-key-tiny") {
+                snapshot_.h264KeyTinyLastChanceNackFrames++;
+                if (keyTinyLastChanceMissingChunks == 1) {
+                    snapshot_.h264KeyTinyLastChanceMissing1Frames++;
+                }
+
+                const double slackMs =
+                    static_cast<double>(keyTinyLastChanceSlackUs) / 1000.0;
+                h264KeyTinyLastChanceSlackSumMs_ += slackMs;
+                h264KeyTinyLastChanceSlackSamples_++;
+                snapshot_.h264KeyTinyLastChanceSlackAvgMs =
+                    h264KeyTinyLastChanceSlackSumMs_ /
+                    static_cast<double>(
+                        h264KeyTinyLastChanceSlackSamples_);
+                if (h264KeyTinyLastChanceSlackSamples_ == 1) {
+                    snapshot_.h264KeyTinyLastChanceSlackMinMs = slackMs;
+                    snapshot_.h264KeyTinyLastChanceSlackMaxMs = slackMs;
+                }
+                else {
+                    snapshot_.h264KeyTinyLastChanceSlackMinMs =
+                        (std::min)(
+                            snapshot_.h264KeyTinyLastChanceSlackMinMs,
+                            slackMs);
+                    snapshot_.h264KeyTinyLastChanceSlackMaxMs =
+                        (std::max)(
+                            snapshot_.h264KeyTinyLastChanceSlackMaxMs,
+                            slackMs);
+                }
+            }
+            else if (eventText == "completed" &&
+                outcomeText == "completed") {
+                snapshot_.h264KeyTinyLastChanceCompletedFrames++;
+            }
+            else if (outcomeText == "expired" &&
+                eventText != "retransmit-late-after-expired") {
+                snapshot_.h264KeyTinyLastChanceExpiredFrames++;
+            }
+            else if (eventText == "retransmit-arrived") {
+                snapshot_
+                    .h264KeyTinyLastChanceArrivedBeforeRetirePackets++;
+            }
+            else if (eventText == "retransmit-duplicate") {
+                snapshot_
+                    .h264KeyTinyLastChanceDuplicateBeforeRetirePackets++;
+            }
+            else if (eventText == "retransmit-late-after-completed") {
+                snapshot_.h264KeyTinyLastChanceLateCompletedPackets++;
+            }
+            else if (eventText == "retransmit-late-after-expired") {
+                snapshot_.h264KeyTinyLastChanceLateExpiredPackets++;
+            }
+            else if (eventText == "retransmit-late-after-rejected") {
+                snapshot_.h264KeyTinyLastChanceLateRejectedPackets++;
             }
         }
 
@@ -852,6 +1078,8 @@ namespace {
             nackRequestedChunks,
             retransmitReceivedChunks,
             retransmitDuplicatePackets,
+            emergencyRepairReceivedChunks,
+            emergencyRepairDuplicatePackets,
             lastPacketSequence,
             lastPacketChunkIndex,
             lastRetransmitSequence,
@@ -859,6 +1087,19 @@ namespace {
             eventPacketSequence,
             eventPacketChunkIndex,
             eventPacketWasRetransmit,
+            eventPacketWasEmergencyRepair,
+            recoveryExpireTimeUs,
+            lastUpdateTimeUs,
+            recentArrivalIntervalUs,
+            likelyArrivalSuppressionCount,
+            likelyArrivalWindowHit,
+            likelyArrivalRecentHit,
+            likelyArrivalTightCadenceHit,
+            likelyArrivalFecParityHit,
+            likelyArrivalFecRecoverableHit,
+            keyTinyLastChanceNackSent,
+            keyTinyLastChanceMissingChunks,
+            keyTinyLastChanceSlackUs,
             sendTimeUs,
             firstReceiveTimeUs,
             ageMs);
@@ -1138,6 +1379,89 @@ namespace {
         snapshot_.lastUpdateTimeUs = nowUs;
 
         UpdateDisplayFps(nowUs);
+    }
+
+    void NetworkStats::OnH264ReceiverKeyFrameRequest(
+        const char* reason,
+        bool sent,
+        bool syncRisk
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const uint64_t nowUs = NowMicroseconds();
+        const std::string reasonText =
+            reason != nullptr ? reason : "unknown";
+        const bool trueSyncLoss =
+            syncRisk ||
+            reasonText == "payload-header-failure" ||
+            reasonText == "au-invalid" ||
+            reasonText == "init-wait-idr" ||
+            reasonText == "waiting-for-idr" ||
+            reasonText == "decode-failure";
+
+        if (sent) {
+            snapshot_.h264KeyFrameRequestReceiverRequests++;
+        }
+        else {
+            snapshot_.h264KeyFrameRequestReceiverCooldownSuppressed++;
+            if (trueSyncLoss) {
+                snapshot_.h264KeyFrameRequestReceiverCooldownSyncRisk++;
+            }
+            else {
+                snapshot_.h264KeyFrameRequestReceiverCooldownNoise++;
+            }
+        }
+
+        if (trueSyncLoss) {
+            snapshot_.h264KeyFrameRequestReceiverTrueSyncLoss++;
+        }
+
+        if (reasonText == "missing-ack") {
+            snapshot_.h264KeyFrameRequestReceiverMissingAck++;
+        }
+        else if (reasonText == "deadline-expired") {
+            snapshot_.h264KeyFrameRequestReceiverDeadlineExpired++;
+        }
+        else if (reasonText == "deadline-nack-missing") {
+            snapshot_.h264KeyFrameRequestReceiverDeadlineNackMissing++;
+            if (!sent) {
+                if (trueSyncLoss) {
+                    snapshot_
+                        .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk++;
+                }
+                else {
+                    snapshot_
+                        .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise++;
+                }
+            }
+        }
+        else if (reasonText == "payload-header-failure") {
+            snapshot_.h264KeyFrameRequestReceiverPayloadHeaderFailure++;
+        }
+        else if (reasonText == "au-invalid") {
+            snapshot_.h264KeyFrameRequestReceiverAuInvalid++;
+        }
+        else if (reasonText == "init-wait-idr") {
+            snapshot_.h264KeyFrameRequestReceiverInitWaitIdr++;
+        }
+        else if (reasonText == "waiting-for-idr") {
+            snapshot_.h264KeyFrameRequestReceiverWaitingForIdr++;
+        }
+        else if (reasonText == "decode-failure") {
+            snapshot_.h264KeyFrameRequestReceiverDecodeFailure++;
+        }
+        else if (reasonText == "stale-after-decode") {
+            snapshot_.h264KeyFrameRequestReceiverStaleAfterDecode++;
+        }
+
+        snapshot_.h264KeyFrameRequestReceiverLastReason =
+            sent
+            ? reasonText
+            : reasonText +
+                (trueSyncLoss
+                    ? "-cooldown-sync-risk"
+                    : "-cooldown-noise");
+        snapshot_.lastUpdateTimeUs = nowUs;
     }
 
     NetworkStatsSnapshot NetworkStats::GetSnapshot() const {

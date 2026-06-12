@@ -43,7 +43,10 @@ namespace net {
 
         void NotifyDecodeFrame();
         void NotifyDisplayFrame();
-        void RequestKeyFrame(uint32_t frameId);
+        void RequestKeyFrame(
+            uint32_t frameId,
+            const char* reason = "unspecified"
+        );
     private:
         void ReceiveLoop();
 

@@ -1,0 +1,16 @@
+{
+  "sourceCsv": "network_logs\\network_20260613_020820.csv",
+  "eventCsv": "network_logs\\network_events_20260613_020820.csv",
+  "totalRows": 2,
+  "eventRows": 0,
+  "qoe2Rows": 0,
+  "qoe3Rows": 0,
+  "recoveryDeadlineRawRows": 0,
+  "recoveryDeadlineEffectiveRows": 0,
+  "retransmitStaleEffectiveRows": 0,
+  "syncRiskRows": 0,
+  "hardSyncLossRows": 0,
+  "outputDropRows": 0,
+  "freshnessDropRows": 0,
+  "arrivalGapJitterRows": 0
+}

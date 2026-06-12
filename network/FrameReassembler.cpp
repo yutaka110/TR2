@@ -17,9 +17,13 @@ namespace net {
         constexpr uint64_t kH264KeyNackIntervalUs = 18000;
         constexpr uint64_t kH264KeyTinyMissingNackDeadlineUs = 12000;
         constexpr uint64_t kH264KeyTinyMissingNackIntervalUs = 9000;
+        constexpr uint64_t kH264KeyTinyEarlyMissingNackDeadlineUs = 6000;
+        constexpr uint64_t kH264KeyTinyEarlyMissingNackIntervalUs = 6000;
         constexpr uint32_t kH264KeyExtraNacks = 0;
         constexpr uint32_t kH264KeySmallMissingChunkThreshold = 4;
         constexpr uint32_t kH264KeyTinyMissingChunkThreshold = 2;
+        constexpr uint64_t kH264KeyTinyLastChanceMinSlackUs = 8000;
+        constexpr uint64_t kH264KeyTinyLastChanceMaxSlackUs = 12000;
         constexpr uint32_t kH264KeySmallMissingMaxDeadlineRescues = 0;
         constexpr uint64_t kH264KeySmallMissingDeadlineRescueUs = 22000;
         constexpr uint64_t kH264KeyTinyMissingDeadlineRescueUs = 30000;
@@ -29,6 +33,48 @@ namespace net {
         constexpr uint64_t kRecentArrivalWindowUs = 7000;
         constexpr uint64_t kRepairChunkBudgetUs = 2500;
         constexpr uint64_t kTooLateDecisionWindowUs = 45000;
+
+        bool IsTruthyEnvValue(const char* value) {
+            if (value == nullptr || value[0] == '\0') {
+                return true;
+            }
+            return _stricmp(value, "0") != 0 &&
+                _stricmp(value, "false") != 0 &&
+                _stricmp(value, "off") != 0 &&
+                _stricmp(value, "no") != 0;
+        }
+
+        bool H264KeyTinyLastChanceEnabled() {
+            static const bool enabled = [] {
+                char value[32]{};
+                const DWORD length = GetEnvironmentVariableA(
+                    "RNVP_H264_KEY_TINY_LAST_CHANCE",
+                    value,
+                    static_cast<DWORD>(sizeof(value))
+                );
+                if (length == 0 || length >= sizeof(value)) {
+                    return false;
+                }
+                return IsTruthyEnvValue(value);
+            }();
+            return enabled;
+        }
+
+        bool H264KeyTinyEarlyNackEnabled() {
+            static const bool enabled = [] {
+                char value[32]{};
+                const DWORD length = GetEnvironmentVariableA(
+                    "RNVP_H264_KEY_TINY_EARLY_NACK",
+                    value,
+                    static_cast<DWORD>(sizeof(value))
+                );
+                if (length == 0 || length >= sizeof(value)) {
+                    return true;
+                }
+                return IsTruthyEnvValue(value);
+            }();
+            return enabled;
+        }
     }
 
     FrameReassembler::FrameReassembler(NetworkStats* stats)
@@ -245,6 +291,9 @@ namespace net {
                 frame.retransmitDuplicatePackets++;
                 frame.lastRetransmitSequence = parsed.sequence;
                 frame.lastRetransmitChunkIndex = parsed.chunkIndex;
+                if (parsed.isEmergencyRepair) {
+                    frame.emergencyRepairDuplicatePackets++;
+                }
                 EmitFrameRecoveryOutcome(
                     frame,
                     "retransmit-duplicate",
@@ -253,7 +302,8 @@ namespace net {
                     receiveTimeUs,
                     parsed.sequence,
                     parsed.chunkIndex,
-                    true);
+                    true,
+                    parsed.isEmergencyRepair);
             }
             if (stats_) {
                 stats_->OnDuplicatePacket(
@@ -276,6 +326,9 @@ namespace net {
             frame.retransmitReceivedChunks++;
             frame.lastRetransmitSequence = parsed.sequence;
             frame.lastRetransmitChunkIndex = parsed.chunkIndex;
+            if (parsed.isEmergencyRepair) {
+                frame.emergencyRepairReceivedChunks++;
+            }
             EmitFrameRecoveryOutcome(
                 frame,
                 "retransmit-arrived",
@@ -284,7 +337,8 @@ namespace net {
                 receiveTimeUs,
                 parsed.sequence,
                 parsed.chunkIndex,
-                true);
+                true,
+                parsed.isEmergencyRepair);
         }
 
         frame.chunks[parsed.chunkIndex].assign(
@@ -451,24 +505,37 @@ namespace net {
                 smallMissingH264KeyFrame &&
                 pendingAckInfo.missingChunkCount <=
                     kH264KeyTinyMissingChunkThreshold;
+            const bool earlyTinyMissingH264KeyFrame =
+                H264KeyTinyEarlyNackEnabled() &&
+                tinyMissingH264KeyFrame &&
+                pendingAckInfo.missingChunkCount == 1 &&
+                !HasRecoverableFecParity(frame);
             const uint64_t effectiveNackDeadlineUs =
-                tinyMissingH264KeyFrame
+                earlyTinyMissingH264KeyFrame
+                ? (std::min)(
+                    nackDeadlineUs,
+                    kH264KeyTinyEarlyMissingNackDeadlineUs)
+                : (tinyMissingH264KeyFrame
                 ? (std::min)(
                     nackDeadlineUs,
                     kH264KeyTinyMissingNackDeadlineUs)
                 : (
                     keyH264Frame
                     ? (std::min)(nackDeadlineUs, kH264KeyNackDeadlineUs)
-                    : nackDeadlineUs);
+                    : nackDeadlineUs));
             const uint64_t effectiveNackIntervalUs =
-                tinyMissingH264KeyFrame
+                earlyTinyMissingH264KeyFrame
+                ? (std::min)(
+                    nackIntervalUs,
+                    kH264KeyTinyEarlyMissingNackIntervalUs)
+                : (tinyMissingH264KeyFrame
                 ? (std::min)(
                     nackIntervalUs,
                     kH264KeyTinyMissingNackIntervalUs)
                 : (
                     keyH264Frame
                     ? (std::min)(nackIntervalUs, kH264KeyNackIntervalUs)
-                    : nackIntervalUs);
+                    : nackIntervalUs));
 
             bool expiredByLifetime =
                 nowUs >= frame.recoveryExpireTimeUs;
@@ -503,6 +570,55 @@ namespace net {
                 effectiveMinRecoverySlackUs > 0 &&
                 nowUs + effectiveMinRecoverySlackUs >=
                     frame.recoveryExpireTimeUs;
+            const uint64_t recoverySlackUs =
+                frame.recoveryExpireTimeUs > nowUs
+                ? frame.recoveryExpireTimeUs - nowUs
+                : 0;
+            const bool lastChanceTinyKeyRepair =
+                H264KeyTinyLastChanceEnabled() &&
+                !expiredByLifetime &&
+                notEnoughRecoverySlack &&
+                tinyMissingH264KeyFrame &&
+                pendingAckInfo.missingChunkCount == 1 &&
+                frame.nackCount >= 2 &&
+                frame.nackCount <= effectiveMaxNacksPerFrame &&
+                recoverySlackUs >= kH264KeyTinyLastChanceMinSlackUs &&
+                recoverySlackUs <= kH264KeyTinyLastChanceMaxSlackUs &&
+                !HasRecoverableFecParity(frame);
+            if (lastChanceTinyKeyRepair) {
+                frame.lastNackTimeUs = nowUs;
+                frame.nackCount++;
+                frame.nackSent = true;
+                frame.lastNackMissingChunks =
+                    pendingAckInfo.missingChunkCount;
+                frame.keyTinyLastChanceNackSent = true;
+                frame.keyTinyLastChanceMissingChunks =
+                    pendingAckInfo.missingChunkCount;
+                frame.keyTinyLastChanceSlackUs = recoverySlackUs;
+                frame.nackRequestedChunks +=
+                    static_cast<uint32_t>(
+                        pendingAckInfo.missingChunkIndices.size());
+                frame.recoveryState = FrameRecoveryState::NackSent;
+                actions.predictedUsefulNackCount++;
+                actions.requestedChunkBudget +=
+                    pendingAckInfo.missingChunkCount;
+                if (stats_) {
+                    stats_->OnNackShapingDecision(
+                        "last-chance-key-tiny",
+                        pendingAckInfo.missingChunkCount,
+                        pendingAckInfo.missingChunkCount,
+                        true);
+                }
+                EmitFrameRecoveryOutcome(
+                    frame,
+                    "nack-sent-last-chance-key-tiny",
+                    "pending",
+                    pendingAckInfo.missingChunkCount,
+                    nowUs);
+                actions.nackAckInfos.push_back(std::move(pendingAckInfo));
+                ++it;
+                continue;
+            }
 
             if (expiredByLifetime || notEnoughRecoverySlack) {
                 const FrameAckInfo expiredInfo =
@@ -514,6 +630,8 @@ namespace net {
                     expiredInfo.missingChunkCount;
                 actions.lastExpiredFrameId = frame.frameId;
                 actions.lastExpiredStreamId = frame.streamId;
+                actions.lastExpiredCodecType = expiredInfo.codecType;
+                actions.lastExpiredKeyFrame = expiredInfo.keyFrame;
 
                 frame.recoveryState = FrameRecoveryState::Expired;
                 EmitFrameRecoveryOutcome(
@@ -704,9 +822,16 @@ namespace net {
                 (std::min)(
                     ackInfo.missingChunkCount,
                     requestedChunkBudget);
+            const bool earlyTinyKeyNack =
+                H264KeyTinyEarlyNackEnabled() &&
+                keyH264Frame &&
+                ackInfo.missingChunkCount == 1 &&
+                !HasRecoverableFecParity(frame);
             if (stats_) {
                 stats_->OnNackShapingDecision(
-                    "predicted-useful",
+                    earlyTinyKeyNack
+                        ? "key-tiny-early"
+                        : "predicted-useful",
                     ackInfo.missingChunkCount,
                     (std::min)(
                         ackInfo.missingChunkCount,
@@ -715,7 +840,9 @@ namespace net {
             }
             EmitFrameRecoveryOutcome(
                 frame,
-                "nack-sent",
+                earlyTinyKeyNack
+                    ? "nack-sent-key-tiny-early"
+                    : "nack-sent",
                 "pending",
                 ackInfo.missingChunkCount,
                 nowUs);
@@ -898,6 +1025,9 @@ namespace net {
             outPacket.isFec = packetType == PacketType::Fec;
             outPacket.isRetransmit =
                 HasPacketFlag(header.flags, PacketFlag_Retransmit);
+            outPacket.isEmergencyRepair =
+                outPacket.isRetransmit &&
+                HasPacketFlag(header.flags, PacketFlag_EmergencyRepair);
             outPacket.sequence = header.sequence;
             outPacket.streamId = header.streamId;
 
@@ -1323,8 +1453,42 @@ namespace net {
             frame.retransmitReceivedChunks;
         record.retransmitDuplicatePackets =
             frame.retransmitDuplicatePackets;
+        record.emergencyRepairReceivedChunks =
+            frame.emergencyRepairReceivedChunks;
+        record.emergencyRepairDuplicatePackets =
+            frame.emergencyRepairDuplicatePackets;
+        record.keyTinyLastChanceNackSent =
+            frame.keyTinyLastChanceNackSent;
+        record.keyTinyLastChanceMissingChunks =
+            frame.keyTinyLastChanceMissingChunks;
+        record.keyTinyLastChanceSlackUs =
+            frame.keyTinyLastChanceSlackUs;
         record.sendTimeUs = frame.sendTimeUs;
         record.firstReceiveTimeUs = frame.firstReceiveTimeUs;
+        record.recoveryExpireTimeUs = frame.recoveryExpireTimeUs;
+        record.lastUpdateTimeUs = frame.lastUpdateTimeUs;
+        record.recentArrivalIntervalUs = frame.recentArrivalIntervalUs;
+        record.likelyArrivalSuppressionCount =
+            frame.likelyArrivalSuppressionCount;
+        const bool recentArrival =
+            frame.lastUpdateTimeUs != 0 &&
+            eventTimeUs >= frame.lastUpdateTimeUs &&
+            eventTimeUs - frame.lastUpdateTimeUs <=
+                kRecentArrivalWindowUs;
+        const bool tightArrivalCadence =
+            frame.recentArrivalIntervalUs > 0 &&
+            frame.recentArrivalIntervalUs <= kRecentArrivalWindowUs;
+        const bool hasFecParity = !frame.fecParityGroups.empty();
+        const bool hasRecoverableFecParity =
+            HasRecoverableFecParity(frame);
+        record.likelyArrivalWindowHit =
+            recentArrival ||
+            tightArrivalCadence ||
+            hasRecoverableFecParity;
+        record.likelyArrivalRecentHit = recentArrival;
+        record.likelyArrivalTightCadenceHit = tightArrivalCadence;
+        record.likelyArrivalFecParityHit = hasFecParity;
+        record.likelyArrivalFecRecoverableHit = hasRecoverableFecParity;
         record.eventTimeUs = eventTimeUs;
         record.outcome = outcome;
 
@@ -1393,6 +1557,8 @@ namespace net {
             retired.lastNackMissingChunks,
             retired.retransmitReceivedChunks,
             retired.retransmitDuplicatePackets,
+            retired.emergencyRepairReceivedChunks,
+            retired.emergencyRepairDuplicatePackets,
             packet.sequence,
             packet.chunkIndex,
             packet.sequence,
@@ -1400,6 +1566,19 @@ namespace net {
             packet.sequence,
             packet.chunkIndex,
             true,
+            packet.isEmergencyRepair,
+            retired.recoveryExpireTimeUs,
+            retired.lastUpdateTimeUs,
+            retired.recentArrivalIntervalUs,
+            retired.likelyArrivalSuppressionCount,
+            retired.likelyArrivalWindowHit,
+            retired.likelyArrivalRecentHit,
+            retired.likelyArrivalTightCadenceHit,
+            retired.likelyArrivalFecParityHit,
+            retired.likelyArrivalFecRecoverableHit,
+            retired.keyTinyLastChanceNackSent,
+            retired.keyTinyLastChanceMissingChunks,
+            retired.keyTinyLastChanceSlackUs,
             retired.sendTimeUs,
             retired.firstReceiveTimeUs != 0
                 ? retired.firstReceiveTimeUs
@@ -1428,7 +1607,7 @@ namespace net {
         if (h264Frame && frame.keyFrame) {
             const bool keySingletonFecCandidate =
                 ackInfo.missingChunkCount == 1 &&
-                !frame.fecParityGroups.empty();
+                HasRecoverableFecParity(frame);
             if (!keySingletonFecCandidate) {
                 return false;
             }
@@ -1440,11 +1619,12 @@ namespace net {
             return false;
         }
 
-        const bool hasFecParity = !frame.fecParityGroups.empty();
+        const bool hasRecoverableFecParity =
+            HasRecoverableFecParity(frame);
         const bool smallLoss = h264Frame
             ? ackInfo.missingChunkCount <= 2
             : ackInfo.missingChunkCount == 1;
-        return hasFecParity || smallLoss;
+        return hasRecoverableFecParity || smallLoss;
     }
 
     bool FrameReassembler::ShouldDeferNackForLikelyArrival(
@@ -1461,13 +1641,13 @@ namespace net {
             return false;
         }
 
+        const bool h264Frame = frame.codecType == CodecType::H264;
         const uint64_t requiredSlackUs =
             kNackLikelyArrivalGraceUs + minRecoverySlackUs;
         if (nowUs + requiredSlackUs >= frame.recoveryExpireTimeUs) {
             return false;
         }
 
-        const bool h264Frame = frame.codecType == CodecType::H264;
         const bool smallLoss = h264Frame
             ? ackInfo.missingChunkCount <= 2
             : ackInfo.missingChunkCount == 1;
@@ -1482,9 +1662,59 @@ namespace net {
         const bool tightArrivalCadence =
             frame.recentArrivalIntervalUs > 0 &&
             frame.recentArrivalIntervalUs <= kRecentArrivalWindowUs;
-        const bool hasFecParity = !frame.fecParityGroups.empty();
+        const bool hasRecoverableFecParity =
+            HasRecoverableFecParity(frame);
 
-        return recentArrival || tightArrivalCadence || hasFecParity;
+        return recentArrival || tightArrivalCadence ||
+            hasRecoverableFecParity;
+    }
+
+    bool FrameReassembler::HasRecoverableFecParity(
+        const PendingFrame& frame
+    ) const {
+        if (frame.fecFramePayloadBytes == 0 ||
+            frame.fecParityGroups.empty() ||
+            frame.chunkCount == 0) {
+            return false;
+        }
+
+        for (const FecParityGroup& group : frame.fecParityGroups) {
+            if (group.parity.empty() ||
+                group.startChunkIndex >= frame.chunkCount ||
+                group.protectedChunkCount == 0 ||
+                static_cast<uint32_t>(group.startChunkIndex) +
+                    group.protectedChunkCount > frame.chunkCount) {
+                continue;
+            }
+
+            uint16_t missingChunkIndex = 0;
+            uint32_t missingInGroup = 0;
+
+            const uint16_t groupEnd = static_cast<uint16_t>(
+                group.startChunkIndex + group.protectedChunkCount
+            );
+            for (uint16_t chunkIndex = group.startChunkIndex;
+                chunkIndex < groupEnd;
+                ++chunkIndex) {
+                if (!frame.received[chunkIndex]) {
+                    missingChunkIndex = chunkIndex;
+                    missingInGroup++;
+                }
+            }
+
+            if (missingInGroup != 1) {
+                continue;
+            }
+
+            const size_t recoveredChunkSize =
+                ExpectedChunkSize(frame, missingChunkIndex);
+            if (recoveredChunkSize > 0 &&
+                recoveredChunkSize <= group.parity.size()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     uint32_t FrameReassembler::CalculateNackRequestedChunkBudget(
@@ -1603,11 +1833,28 @@ namespace net {
         uint64_t eventTimeUs,
         uint32_t packetSequence,
         uint16_t packetChunkIndex,
-        bool packetWasRetransmit
+        bool packetWasRetransmit,
+        bool packetWasEmergencyRepair
     ) const {
         if (stats_ == nullptr || frame.chunkCount == 0) {
             return;
         }
+
+        const bool recentArrival =
+            frame.lastUpdateTimeUs != 0 &&
+            eventTimeUs >= frame.lastUpdateTimeUs &&
+            eventTimeUs - frame.lastUpdateTimeUs <=
+                kRecentArrivalWindowUs;
+        const bool tightArrivalCadence =
+            frame.recentArrivalIntervalUs > 0 &&
+            frame.recentArrivalIntervalUs <= kRecentArrivalWindowUs;
+        const bool hasFecParity = !frame.fecParityGroups.empty();
+        const bool hasRecoverableFecParity =
+            HasRecoverableFecParity(frame);
+        const bool likelyArrivalWindowHit =
+            recentArrival ||
+            tightArrivalCadence ||
+            hasRecoverableFecParity;
 
         stats_->OnFrameRecoveryOutcome(
             eventName,
@@ -1628,6 +1875,8 @@ namespace net {
             frame.nackRequestedChunks,
             frame.retransmitReceivedChunks,
             frame.retransmitDuplicatePackets,
+            frame.emergencyRepairReceivedChunks,
+            frame.emergencyRepairDuplicatePackets,
             frame.lastPacketSequence,
             frame.lastPacketChunkIndex,
             frame.lastRetransmitSequence,
@@ -1635,6 +1884,19 @@ namespace net {
             packetSequence,
             packetChunkIndex,
             packetWasRetransmit,
+            packetWasEmergencyRepair,
+            frame.recoveryExpireTimeUs,
+            frame.lastUpdateTimeUs,
+            frame.recentArrivalIntervalUs,
+            frame.likelyArrivalSuppressionCount,
+            likelyArrivalWindowHit,
+            recentArrival,
+            tightArrivalCadence,
+            hasFecParity,
+            hasRecoverableFecParity,
+            frame.keyTinyLastChanceNackSent,
+            frame.keyTinyLastChanceMissingChunks,
+            frame.keyTinyLastChanceSlackUs,
             frame.sendTimeUs,
             frame.firstReceiveTimeUs,
             eventTimeUs);

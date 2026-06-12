@@ -2470,6 +2470,24 @@ int AppMain::Run() {
 				sender->GetH264KeyTinyMissingCriticalSentPacketCount();
 			stats.h264KeyTinyMissingCriticalSkippedPackets =
 				sender->GetH264KeyTinyMissingCriticalSkippedPacketCount();
+			stats.h264KeyTinyMissingCriticalFeasibilitySuppressedFrames =
+				sender
+					->GetH264KeyTinyMissingCriticalFeasibilitySuppressedFrameCount();
+			stats.h264KeyTinyMissingCriticalFeasibilitySuppressedPackets =
+				sender
+					->GetH264KeyTinyMissingCriticalFeasibilitySuppressedPacketCount();
+			stats.h264KeyTinyMissingCriticalFeasibilityBypassedFrames =
+				sender
+					->GetH264KeyTinyMissingCriticalFeasibilityBypassedFrameCount();
+			stats.h264KeyTinyMissingCriticalFeasibilityBypassedPackets =
+				sender
+					->GetH264KeyTinyMissingCriticalFeasibilityBypassedPacketCount();
+			stats.h264KeyTinyMissingCriticalLastPredictedDeliveryMs =
+				sender
+					->GetH264KeyTinyMissingCriticalLastPredictedDeliveryMs();
+			stats.h264KeyTinyMissingCriticalLastRemainingSlackMs =
+				sender
+					->GetH264KeyTinyMissingCriticalLastRemainingSlackMs();
 			stats.h264KeyTinyMissingCriticalLastFrameId =
 				sender->GetH264KeyTinyMissingCriticalLastFrameId();
 			stats.h264KeyTinyMissingCriticalLastAckMissingChunks =
@@ -2546,6 +2564,33 @@ int AppMain::Run() {
 			}
 			stats.ackStaleDroppedFrames = sender->GetAckStaleDroppedFrameCount();
 			stats.ackKeyFrameRequests = sender->GetAckKeyFrameRequestCount();
+			const NetworkManager::H264AckKeyFrameRequestTelemetry
+				ackKeyFrameTelemetry =
+					sender->GetH264AckKeyFrameRequestTelemetry();
+			stats.h264KeyFrameRequestAckHistoryMissing =
+				ackKeyFrameTelemetry.historyMissing;
+			stats.h264KeyFrameRequestAckStaleFrameLag =
+				ackKeyFrameTelemetry.staleFrameLag;
+			stats.h264KeyFrameRequestAckStaleAge =
+				ackKeyFrameTelemetry.staleAge;
+			stats.h264KeyFrameRequestAckRetransmitBudgetExhausted =
+				ackKeyFrameTelemetry.retransmitBudgetExhausted;
+			stats.h264KeyFrameRequestAckHighMissingRate =
+				ackKeyFrameTelemetry.highMissingRate;
+			stats.h264KeyFrameRequestAckCooldownSuppressed =
+				ackKeyFrameTelemetry.cooldownSuppressed;
+			stats.h264KeyFrameRequestAckAlreadyPending =
+				ackKeyFrameTelemetry.alreadyPending;
+			stats.h264KeyFrameRequestAckCooldownNoise =
+				ackKeyFrameTelemetry.cooldownNoise;
+			stats.h264KeyFrameRequestAckCooldownSyncRisk =
+				ackKeyFrameTelemetry.cooldownSyncRisk;
+			stats.h264KeyFrameRequestAckStaleAgeCooldownNoise =
+				ackKeyFrameTelemetry.staleAgeCooldownNoise;
+			stats.h264KeyFrameRequestAckStaleAgeCooldownSyncRisk =
+				ackKeyFrameTelemetry.staleAgeCooldownSyncRisk;
+			stats.h264KeyFrameRequestAckLastReason =
+				ackKeyFrameTelemetry.lastReason;
 			stats.ackKeyFramePending = sender->IsKeyFrameRequestPending();
 			stats.fecEnabled = sender->IsFecEnabled();
 			stats.adaptiveFecEnabled = sender->IsAdaptiveFecEnabled();
@@ -2598,6 +2643,17 @@ int AppMain::Run() {
 				pacingStats.emergencyMaxQueueAgeMs;
 			stats.h264KeyTinyEmergencyAvgQueueAgeMs =
 				pacingStats.emergencyAvgQueueAgeMs;
+			const uint64_t classifiedEmergencyPackets =
+				stats.h264KeyTinyEmergencyArrivedBeforeRetirePackets +
+				stats.h264KeyTinyEmergencyDuplicateBeforeRetirePackets +
+				stats.h264KeyTinyEmergencyArrivedAfterCompletePackets +
+				stats.h264KeyTinyEmergencyArrivedAfterExpirePackets +
+				stats.h264KeyTinyEmergencyArrivedAfterRejectedPackets;
+			stats.h264KeyTinyEmergencyNotArrivedPackets =
+				stats.pacingEmergencySentPackets >= classifiedEmergencyPackets
+				? stats.pacingEmergencySentPackets -
+					classifiedEmergencyPackets
+				: 0;
 			stats.pacingDroppedPackets = pacingStats.droppedPackets;
 			stats.pacingDeadlineDroppedPackets =
 				pacingStats.deadlineDroppedPackets;
@@ -2998,6 +3054,27 @@ int AppMain::Run() {
 
 			stats.adaptiveDegradationCause =
 				net::ToString(adaptiveState.lastDegradationCause);
+
+			stats.adaptiveRecoveryDeadlineRawDelta =
+				adaptiveState.lastRecoveryDeadlineRawDelta;
+			stats.adaptiveRecoveryDeadlineEffectiveDelta =
+				adaptiveState.lastRecoveryDeadlineEffectiveDelta;
+			stats.adaptiveRetransmitStaleRawDelta =
+				adaptiveState.lastRetransmitStaleRawDelta;
+			stats.adaptiveRetransmitStaleEffectiveDelta =
+				adaptiveState.lastRetransmitStaleEffectiveDelta;
+			stats.adaptiveRecoveryDeadlineNoiseDelta =
+				adaptiveState.lastRecoveryDeadlineNoiseDelta;
+			stats.adaptiveRecoveryDeadlineSyncRiskDelta =
+				adaptiveState.lastRecoveryDeadlineSyncRiskDelta;
+			stats.adaptiveRecoveryDeadlineHardSyncLossDelta =
+				adaptiveState.lastRecoveryDeadlineHardSyncLossDelta;
+			stats.adaptiveRecoveryDeadlineSyncEvidenceActive =
+				adaptiveState.lastRecoveryDeadlineSyncEvidenceActive;
+			stats.adaptiveRecoveryDeadlineSyncEvidenceAgeMs =
+				adaptiveState.lastRecoveryDeadlineSyncEvidenceAgeMs;
+			stats.adaptiveRecoveryDeadlineSyncEvidenceSource =
+				adaptiveState.lastRecoveryDeadlineSyncEvidenceSource;
 
 			stats.adaptiveFecRecoveryWorking =
 				adaptiveState.lastFecRecoveryWorking;
@@ -5779,6 +5856,30 @@ int AppMain::Run() {
 					networkManager->GetAckStaleDroppedFrameCount();
 				adaptiveInput.ackKeyFrameRequests =
 					networkManager->GetAckKeyFrameRequestCount();
+				const NetworkManager::H264AckKeyFrameRequestTelemetry
+					adaptiveAckKeyFrameTelemetry =
+						networkManager->GetH264AckKeyFrameRequestTelemetry();
+				adaptiveInput.h264KeyFrameRequestAckStaleAgeCooldownNoise =
+					adaptiveAckKeyFrameTelemetry.staleAgeCooldownNoise;
+				adaptiveInput.h264KeyFrameRequestAckStaleAgeCooldownSyncRisk =
+					adaptiveAckKeyFrameTelemetry.staleAgeCooldownSyncRisk;
+				adaptiveInput
+					.h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise =
+					receiverStats
+						.h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise;
+				adaptiveInput
+					.h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk =
+					receiverStats
+						.h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk;
+				adaptiveInput.h264KeyFrameRequestReceiverTrueSyncLoss =
+					receiverStats.h264KeyFrameRequestReceiverTrueSyncLoss;
+				adaptiveInput.h264KeyFrameRequestReceiverHardSyncLoss =
+					receiverStats.h264KeyFrameRequestReceiverWaitingForIdr +
+					receiverStats.h264KeyFrameRequestReceiverDecodeFailure +
+					receiverStats.h264KeyFrameRequestReceiverInitWaitIdr +
+					receiverStats.h264KeyFrameRequestReceiverAuInvalid +
+					receiverStats
+						.h264KeyFrameRequestReceiverPayloadHeaderFailure;
 				adaptiveInput.receiveFreshnessDroppedFrames =
 					videoReceiverStats.freshnessDroppedFrames;
 				adaptiveInput.receiveDecodeQueueDroppedFrames =

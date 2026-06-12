@@ -1,0 +1,26 @@
+﻿[
+    {
+        "Seed":  8920,
+        "HadExited":  false,
+        "ExitCode":  null,
+        "NetworkLog":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260612_153051.csv",
+        "TraceLog":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\frame_recovery_trace_20260612_153051.csv",
+        "Start":  "\/Date(1781245849251)\/"
+    },
+    {
+        "Seed":  8921,
+        "HadExited":  false,
+        "ExitCode":  null,
+        "NetworkLog":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260612_153153.csv",
+        "TraceLog":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\frame_recovery_trace_20260612_153154.csv",
+        "Start":  "\/Date(1781245912695)\/"
+    },
+    {
+        "Seed":  8922,
+        "HadExited":  false,
+        "ExitCode":  null,
+        "NetworkLog":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260612_153256.csv",
+        "TraceLog":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\frame_recovery_trace_20260612_153257.csv",
+        "Start":  "\/Date(1781245975715)\/"
+    }
+]
