@@ -1,0 +1,26 @@
+﻿[
+    {
+        "Seed":  8700,
+        "ProcessExited":  false,
+        "ExitCode":  null,
+        "Log":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260612_004142.csv",
+        "LastWriteTime":  "\/Date(1781192561901)\/",
+        "Length":  162519
+    },
+    {
+        "Seed":  8701,
+        "ProcessExited":  false,
+        "ExitCode":  null,
+        "Log":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260612_004245.csv",
+        "LastWriteTime":  "\/Date(1781192625380)\/",
+        "Length":  164700
+    },
+    {
+        "Seed":  8702,
+        "ProcessExited":  false,
+        "ExitCode":  null,
+        "Log":  "C:\\Users\\youta\\OneDrive\\Desktop\\2026\\TR2\\TR2_project\\network_logs\\network_20260612_004348.csv",
+        "LastWriteTime":  "\/Date(1781192688384)\/",
+        "Length":  164824
+    }
+]

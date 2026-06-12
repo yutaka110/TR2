@@ -8,7 +8,9 @@
 #include <iomanip>
 #include <sstream>
 #include <ctime>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace net {
 namespace {
@@ -99,6 +101,492 @@ namespace {
 
     uint64_t CounterDelta(uint64_t current, uint64_t previous) {
         return current >= previous ? current - previous : current;
+    }
+
+    bool IsTruthyEnvValue(const char* value) {
+        if (value == nullptr || value[0] == '\0') {
+            return true;
+        }
+        return _stricmp(value, "0") != 0 &&
+            _stricmp(value, "false") != 0 &&
+            _stricmp(value, "off") != 0 &&
+            _stricmp(value, "no") != 0;
+    }
+
+    bool LogRotationEnabled() {
+        char* text = nullptr;
+        size_t textLength = 0;
+        if (_dupenv_s(
+                &text,
+                &textLength,
+                "RNVP_LOG_ROTATE_ENABLED") != 0 ||
+            text == nullptr ||
+            textLength == 0) {
+            if (text != nullptr) {
+                std::free(text);
+            }
+            return true;
+        }
+
+        const bool enabled = IsTruthyEnvValue(text);
+        std::free(text);
+        return enabled;
+    }
+
+    uint32_t EnvUint(
+        const char* name,
+        uint32_t defaultValue,
+        uint32_t minValue,
+        uint32_t maxValue) {
+        char* text = nullptr;
+        size_t textLength = 0;
+        if (_dupenv_s(&text, &textLength, name) != 0 ||
+            text == nullptr ||
+            textLength == 0) {
+            if (text != nullptr) {
+                std::free(text);
+            }
+            return defaultValue;
+        }
+
+        char* end = nullptr;
+        const unsigned long value = std::strtoul(text, &end, 10);
+        const bool parsed = end != text;
+        std::free(text);
+        if (!parsed) {
+            return defaultValue;
+        }
+
+        return (std::max)(
+            minValue,
+            (std::min)(static_cast<uint32_t>(value), maxValue));
+    }
+
+    uint64_t EnvBytesFromMb(
+        const char* name,
+        uint32_t defaultMb,
+        uint32_t minMb,
+        uint32_t maxMb) {
+        const uint32_t mb = EnvUint(name, defaultMb, minMb, maxMb);
+        return static_cast<uint64_t>(mb) * 1024ull * 1024ull;
+    }
+
+    std::vector<std::string> ParseCsvLine(const std::string& line) {
+        std::vector<std::string> fields;
+        std::string field;
+        bool inQuotes = false;
+
+        for (size_t i = 0; i < line.size(); ++i) {
+            const char ch = line[i];
+            if (inQuotes) {
+                if (ch == '"') {
+                    if (i + 1 < line.size() && line[i + 1] == '"') {
+                        field.push_back('"');
+                        ++i;
+                    }
+                    else {
+                        inQuotes = false;
+                    }
+                }
+                else {
+                    field.push_back(ch);
+                }
+            }
+            else if (ch == '"') {
+                inQuotes = true;
+            }
+            else if (ch == ',') {
+                fields.push_back(field);
+                field.clear();
+            }
+            else {
+                field.push_back(ch);
+            }
+        }
+
+        fields.push_back(field);
+        return fields;
+    }
+
+    std::unordered_map<std::string, size_t> BuildColumnIndex(
+        const std::vector<std::string>& header) {
+        std::unordered_map<std::string, size_t> columns;
+        for (size_t i = 0; i < header.size(); ++i) {
+            columns.emplace(header[i], i);
+        }
+        return columns;
+    }
+
+    std::string JsonEscape(std::string value) {
+        std::string escaped;
+        escaped.reserve(value.size() + 8);
+        for (char ch : value) {
+            switch (ch) {
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                escaped.push_back(ch);
+                break;
+            }
+        }
+        return escaped;
+    }
+
+    double CsvDouble(
+        const std::vector<std::string>& fields,
+        const std::unordered_map<std::string, size_t>& columns,
+        const char* name) {
+        const auto it = columns.find(name);
+        if (it == columns.end() || it->second >= fields.size()) {
+            return 0.0;
+        }
+
+        char* end = nullptr;
+        const double value = std::strtod(fields[it->second].c_str(), &end);
+        return end != fields[it->second].c_str() ? value : 0.0;
+    }
+
+    uint64_t CsvUint64(
+        const std::vector<std::string>& fields,
+        const std::unordered_map<std::string, size_t>& columns,
+        const char* name) {
+        const auto it = columns.find(name);
+        if (it == columns.end() || it->second >= fields.size()) {
+            return 0;
+        }
+
+        char* end = nullptr;
+        const unsigned long long value =
+            std::strtoull(fields[it->second].c_str(), &end, 10);
+        return end != fields[it->second].c_str()
+            ? static_cast<uint64_t>(value)
+            : 0;
+    }
+
+    bool CsvBool(
+        const std::vector<std::string>& fields,
+        const std::unordered_map<std::string, size_t>& columns,
+        const char* name) {
+        return CsvUint64(fields, columns, name) != 0;
+    }
+
+    std::filesystem::path EventCsvPathFor(
+        const std::filesystem::path& networkCsvPath) {
+        const std::string stem = networkCsvPath.stem().string();
+        const std::string suffix =
+            stem.rfind("network_", 0) == 0
+            ? stem.substr(std::string("network_").size())
+            : stem;
+        return networkCsvPath.parent_path() /
+            ("network_events_" + suffix + ".csv");
+    }
+
+    std::filesystem::path RunSummaryPathFor(
+        const std::filesystem::path& networkCsvPath) {
+        const std::string stem = networkCsvPath.stem().string();
+        const std::string suffix =
+            stem.rfind("network_", 0) == 0
+            ? stem.substr(std::string("network_").size())
+            : stem;
+        return networkCsvPath.parent_path() /
+            ("network_run_summary_" + suffix + ".json");
+    }
+
+    void ExtractNetworkEventArtifacts(
+        const std::filesystem::path& networkCsvPath) {
+        if (networkCsvPath.empty() ||
+            !std::filesystem::exists(networkCsvPath) ||
+            networkCsvPath.filename().string().rfind("network_", 0) != 0 ||
+            networkCsvPath.extension() != ".csv") {
+            return;
+        }
+
+        const std::filesystem::path eventCsvPath =
+            EventCsvPathFor(networkCsvPath);
+        const std::filesystem::path summaryPath =
+            RunSummaryPathFor(networkCsvPath);
+
+        if (std::filesystem::exists(eventCsvPath) &&
+            std::filesystem::exists(summaryPath)) {
+            return;
+        }
+
+        std::ifstream input(networkCsvPath);
+        if (!input) {
+            return;
+        }
+
+        std::string headerLine;
+        if (!std::getline(input, headerLine)) {
+            return;
+        }
+
+        const std::vector<std::string> header = ParseCsvLine(headerLine);
+        const std::unordered_map<std::string, size_t> columns =
+            BuildColumnIndex(header);
+
+        std::ofstream eventCsv(eventCsvPath, std::ios::out | std::ios::trunc);
+        if (!eventCsv) {
+            return;
+        }
+        eventCsv << headerLine << '\n';
+
+        uint64_t totalRows = 0;
+        uint64_t eventRows = 0;
+        uint64_t qoe2Rows = 0;
+        uint64_t qoe3Rows = 0;
+        uint64_t recoveryEffectiveRows = 0;
+        uint64_t retransmitEffectiveRows = 0;
+        uint64_t recoveryRawRows = 0;
+        uint64_t syncRiskRows = 0;
+        uint64_t hardSyncLossRows = 0;
+        uint64_t outputDropRows = 0;
+        uint64_t freshnessDropRows = 0;
+        uint64_t arrivalGapJitterRows = 0;
+
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.empty()) {
+                continue;
+            }
+
+            ++totalRows;
+            const std::vector<std::string> fields = ParseCsvLine(line);
+            const double qoeScore =
+                CsvDouble(fields, columns, "adaptiveQoeScore");
+            const uint64_t recoveryRaw =
+                CsvUint64(fields, columns, "adaptiveRecoveryDeadlineRawDelta");
+            const uint64_t recoveryEffective =
+                CsvUint64(
+                    fields,
+                    columns,
+                    "adaptiveRecoveryDeadlineEffectiveDelta");
+            const uint64_t staleRaw =
+                CsvUint64(fields, columns, "adaptiveRetransmitStaleRawDelta");
+            const uint64_t staleEffective =
+                CsvUint64(
+                    fields,
+                    columns,
+                    "adaptiveRetransmitStaleEffectiveDelta");
+            const uint64_t recoveryNoise =
+                CsvUint64(
+                    fields,
+                    columns,
+                    "adaptiveRecoveryDeadlineNoiseDelta");
+            const uint64_t syncRisk =
+                CsvUint64(
+                    fields,
+                    columns,
+                    "adaptiveRecoveryDeadlineSyncRiskDelta");
+            const uint64_t hardSyncLoss =
+                CsvUint64(
+                    fields,
+                    columns,
+                    "adaptiveRecoveryDeadlineHardSyncLossDelta");
+            const bool arrivalGapJitter =
+                CsvBool(
+                    fields,
+                    columns,
+                    "adaptiveArrivalGapJitterSpikeActive");
+            const uint64_t outputDrops =
+                CsvUint64(fields, columns, "outputQueueDroppedFramesDelta") +
+                CsvUint64(fields, columns, "outputQueueDropEventsDelta");
+            const uint64_t freshnessDrops =
+                CsvUint64(
+                    fields,
+                    columns,
+                    "receiveFreshnessDroppedFramesDelta");
+
+            qoe2Rows += qoeScore >= 2.0 && qoeScore < 3.0 ? 1 : 0;
+            qoe3Rows += qoeScore >= 3.0 ? 1 : 0;
+            recoveryEffectiveRows += recoveryEffective > 0 ? 1 : 0;
+            retransmitEffectiveRows += staleEffective > 0 ? 1 : 0;
+            recoveryRawRows +=
+                recoveryRaw > 0 || staleRaw > 0 || recoveryNoise > 0
+                ? 1
+                : 0;
+            syncRiskRows += syncRisk > 0 ? 1 : 0;
+            hardSyncLossRows += hardSyncLoss > 0 ? 1 : 0;
+            outputDropRows += outputDrops > 0 ? 1 : 0;
+            freshnessDropRows += freshnessDrops > 0 ? 1 : 0;
+            arrivalGapJitterRows += arrivalGapJitter ? 1 : 0;
+
+            const bool important =
+                qoeScore >= 2.0 ||
+                recoveryRaw > 0 ||
+                recoveryEffective > 0 ||
+                staleRaw > 0 ||
+                staleEffective > 0 ||
+                recoveryNoise > 0 ||
+                syncRisk > 0 ||
+                hardSyncLoss > 0 ||
+                arrivalGapJitter ||
+                outputDrops > 0 ||
+                freshnessDrops > 0;
+            if (important) {
+                eventCsv << line << '\n';
+                ++eventRows;
+            }
+        }
+
+        eventCsv.flush();
+
+        std::ofstream summary(summaryPath, std::ios::out | std::ios::trunc);
+        if (summary) {
+            summary
+                << "{\n"
+                << "  \"sourceCsv\": \""
+                << JsonEscape(networkCsvPath.string()) << "\",\n"
+                << "  \"eventCsv\": \""
+                << JsonEscape(eventCsvPath.string()) << "\",\n"
+                << "  \"totalRows\": " << totalRows << ",\n"
+                << "  \"eventRows\": " << eventRows << ",\n"
+                << "  \"qoe2Rows\": " << qoe2Rows << ",\n"
+                << "  \"qoe3Rows\": " << qoe3Rows << ",\n"
+                << "  \"recoveryDeadlineRawRows\": "
+                << recoveryRawRows << ",\n"
+                << "  \"recoveryDeadlineEffectiveRows\": "
+                << recoveryEffectiveRows << ",\n"
+                << "  \"retransmitStaleEffectiveRows\": "
+                << retransmitEffectiveRows << ",\n"
+                << "  \"syncRiskRows\": " << syncRiskRows << ",\n"
+                << "  \"hardSyncLossRows\": " << hardSyncLossRows << ",\n"
+                << "  \"outputDropRows\": " << outputDropRows << ",\n"
+                << "  \"freshnessDropRows\": " << freshnessDropRows << ",\n"
+                << "  \"arrivalGapJitterRows\": "
+                << arrivalGapJitterRows << "\n"
+                << "}\n";
+        }
+    }
+
+    struct LogFileInfo {
+        std::filesystem::path path;
+        std::filesystem::file_time_type writeTime{};
+        uint64_t sizeBytes = 0;
+    };
+
+    void RotatePattern(
+        const std::filesystem::path& directory,
+        const char* patternPrefix,
+        const char* extension,
+        uint32_t keepCount,
+        uint64_t budgetBytes,
+        bool preserveNetworkEvents) {
+        std::error_code ec;
+        if (!std::filesystem::exists(directory, ec)) {
+            return;
+        }
+
+        std::vector<LogFileInfo> files;
+        uint64_t totalBytes = 0;
+        for (const auto& entry :
+            std::filesystem::directory_iterator(directory, ec)) {
+            if (ec || !entry.is_regular_file(ec)) {
+                continue;
+            }
+
+            const std::filesystem::path path = entry.path();
+            const std::string filename = path.filename().string();
+            if (filename.rfind(patternPrefix, 0) != 0 ||
+                path.extension() != extension) {
+                continue;
+            }
+            if (preserveNetworkEvents &&
+                filename.rfind("network_events_", 0) == 0) {
+                continue;
+            }
+
+            const uint64_t size =
+                static_cast<uint64_t>(entry.file_size(ec));
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+
+            files.push_back({ path, entry.last_write_time(ec), size });
+            if (ec) {
+                files.back().writeTime =
+                    std::filesystem::file_time_type::min();
+                ec.clear();
+            }
+            totalBytes += size;
+        }
+
+        std::sort(
+            files.begin(),
+            files.end(),
+            [](const LogFileInfo& lhs, const LogFileInfo& rhs) {
+                return lhs.writeTime > rhs.writeTime;
+            });
+
+        for (size_t i = files.size(); i > 0; --i) {
+            const size_t index = i - 1;
+            const bool overCount = files.size() > keepCount &&
+                index >= keepCount;
+            const bool overBudget = budgetBytes > 0 &&
+                totalBytes > budgetBytes &&
+                index > 0;
+            if (!overCount && !overBudget) {
+                continue;
+            }
+
+            std::filesystem::remove(files[index].path, ec);
+            if (!ec && totalBytes >= files[index].sizeBytes) {
+                totalBytes -= files[index].sizeBytes;
+            }
+            ec.clear();
+            files.erase(files.begin() + static_cast<std::ptrdiff_t>(index));
+        }
+    }
+
+    void MaintainNetworkLogDirectory(const std::filesystem::path& directory) {
+        if (!LogRotationEnabled()) {
+            return;
+        }
+
+        const uint32_t keepNetworkCsv =
+            EnvUint("RNVP_LOG_KEEP_NETWORK_CSV", 20, 1, 1000);
+        const uint32_t keepFrameTrace =
+            EnvUint("RNVP_LOG_KEEP_FRAME_TRACE", 10, 1, 1000);
+        const uint32_t keepRetransmitTrace =
+            EnvUint("RNVP_LOG_KEEP_RETRANSMIT_TRACE", 10, 1, 1000);
+        const uint64_t rawBudgetBytes =
+            EnvBytesFromMb("RNVP_LOG_RAW_BUDGET_MB", 1024, 16, 102400);
+
+        RotatePattern(
+            directory,
+            "network_",
+            ".csv",
+            keepNetworkCsv,
+            rawBudgetBytes,
+            true);
+        RotatePattern(
+            directory,
+            "frame_recovery_trace_",
+            ".csv",
+            keepFrameTrace,
+            rawBudgetBytes,
+            false);
+        RotatePattern(
+            directory,
+            "retransmit_trace_",
+            ".csv",
+            keepRetransmitTrace,
+            rawBudgetBytes,
+            false);
     }
 
     bool StartsWith(const std::string& value, const char* prefix) {
@@ -195,6 +683,7 @@ namespace {
         if (ec) {
             return false;
         }
+        MaintainNetworkLogDirectory(directory);
 
         const std::filesystem::path path =
             std::filesystem::path(directory) /
@@ -207,8 +696,30 @@ namespace {
         }
 
         filePath_ = path.string();
+        const std::filesystem::path eventPath = EventCsvPathFor(path);
+        eventFile_.open(eventPath, std::ios::out | std::ios::trunc);
+        if (eventFile_) {
+            eventFilePath_ = eventPath.string();
+        }
+        else {
+            eventFilePath_.clear();
+            eventFile_.clear();
+        }
         headerWritten_ = false;
+        eventHeaderWritten_ = false;
         startupWarmupSec_ = StartupWarmupSecFromEnv();
+        summaryTotalRows_ = 0;
+        summaryEventRows_ = 0;
+        summaryQoe2Rows_ = 0;
+        summaryQoe3Rows_ = 0;
+        summaryRecoveryDeadlineRawRows_ = 0;
+        summaryRecoveryDeadlineEffectiveRows_ = 0;
+        summaryRetransmitStaleEffectiveRows_ = 0;
+        summarySyncRiskRows_ = 0;
+        summaryHardSyncLossRows_ = 0;
+        summaryOutputDropRows_ = 0;
+        summaryFreshnessDropRows_ = 0;
+        summaryArrivalGapJitterRows_ = 0;
         previousOutputQueueDroppedFrames_ = 0;
         previousOutputQueueDropEvents_ = 0;
         previousOutputQueueDropBurstEvents_ = 0;
@@ -220,16 +731,33 @@ namespace {
         steadyOutputQueueDropEvents_ = 0;
         steadyOutputQueueDropBurstEvents_ = 0;
         WriteHeader();
+        WriteEventHeader();
         return true;
     }
 
     void NetworkCsvLogger::Stop() {
+        const std::string completedFilePath = filePath_;
         if (file_.is_open()) {
             file_.flush();
             file_.close();
         }
+        if (eventFile_.is_open()) {
+            eventFile_.flush();
+            eventFile_.close();
+        }
+
+        WriteRunSummary();
+
+        if (!completedFilePath.empty()) {
+            const std::filesystem::path completedPath(completedFilePath);
+            if (eventFilePath_.empty()) {
+                ExtractNetworkEventArtifacts(completedPath);
+            }
+            MaintainNetworkLogDirectory(completedPath.parent_path());
+        }
 
         headerWritten_ = false;
+        eventHeaderWritten_ = false;
     }
 
     void NetworkCsvLogger::SetScenarioName(std::string name) {
@@ -482,10 +1010,18 @@ namespace {
             << stats.h264KeyTinyMissingCriticalPackets << ','
             << stats.h264KeyTinyMissingCriticalSentPackets << ','
             << stats.h264KeyTinyMissingCriticalSkippedPackets << ','
+            << stats.h264KeyTinyMissingCriticalFeasibilitySuppressedFrames << ','
+            << stats.h264KeyTinyMissingCriticalFeasibilitySuppressedPackets << ','
+            << stats.h264KeyTinyMissingCriticalFeasibilityBypassedFrames << ','
+            << stats.h264KeyTinyMissingCriticalFeasibilityBypassedPackets << ','
+            << stats.h264KeyTinyMissingCriticalLastPredictedDeliveryMs << ','
+            << stats.h264KeyTinyMissingCriticalLastRemainingSlackMs << ','
             << stats.h264KeyTinyMissingCriticalLastFrameId << ','
             << stats.h264KeyTinyMissingCriticalLastAckMissingChunks << ','
             << stats.h264KeyTinyMissingCriticalLastRequestedChunks << ','
             << EscapeCsv(stats.h264KeyTinyMissingCriticalLastEvent) << ','
+            << stats.h264KeyTinyEarlyNackFrames << ','
+            << stats.h264KeyTinyEarlyNackMissingChunks << ','
             << stats.h264KeySmallMissingAckFrames << ','
             << stats.h264KeySmallMissingAckMissingChunks << ','
             << stats.h264KeySmallMissingAckHistoryMissingFrames << ','
@@ -510,6 +1046,27 @@ namespace {
             << stats.h264KeyRepair1To2LateCompletedPackets << ','
             << stats.h264KeyRepair1To2LateExpiredPackets << ','
             << stats.h264KeyRepair1To2LateRejectedPackets << ','
+            << stats.h264KeyTinyEmergencyCompletedFrames << ','
+            << stats.h264KeyTinyEmergencyArrivedBeforeRetirePackets << ','
+            << stats.h264KeyTinyEmergencyDuplicateBeforeRetirePackets << ','
+            << stats.h264KeyTinyEmergencyArrivedAfterCompletePackets << ','
+            << stats.h264KeyTinyEmergencyArrivedAfterExpirePackets << ','
+            << stats.h264KeyTinyEmergencyArrivedAfterRejectedPackets << ','
+            << stats.h264KeyTinyEmergencyNotArrivedPackets << ','
+            << stats.h264KeyTinyEmergencySendToArrivalAvgMs << ','
+            << stats.h264KeyTinyEmergencySendToArrivalMaxMs << ','
+            << stats.h264KeyTinyLastChanceNackFrames << ','
+            << stats.h264KeyTinyLastChanceMissing1Frames << ','
+            << stats.h264KeyTinyLastChanceCompletedFrames << ','
+            << stats.h264KeyTinyLastChanceExpiredFrames << ','
+            << stats.h264KeyTinyLastChanceArrivedBeforeRetirePackets << ','
+            << stats.h264KeyTinyLastChanceDuplicateBeforeRetirePackets << ','
+            << stats.h264KeyTinyLastChanceLateCompletedPackets << ','
+            << stats.h264KeyTinyLastChanceLateExpiredPackets << ','
+            << stats.h264KeyTinyLastChanceLateRejectedPackets << ','
+            << stats.h264KeyTinyLastChanceSlackAvgMs << ','
+            << stats.h264KeyTinyLastChanceSlackMinMs << ','
+            << stats.h264KeyTinyLastChanceSlackMaxMs << ','
             << stats.h264KeyRepair3To4CompletedFrames << ','
             << stats.h264KeyRepair3To4ExpiredFrames << ','
             << stats.h264KeyRepair3To4ArrivedPackets << ','
@@ -520,6 +1077,35 @@ namespace {
             << stats.lateRepairSavedPackets << ','
             << stats.ackStaleDroppedFrames << ','
             << stats.ackKeyFrameRequests << ','
+            << stats.h264KeyFrameRequestAckHistoryMissing << ','
+            << stats.h264KeyFrameRequestAckStaleFrameLag << ','
+            << stats.h264KeyFrameRequestAckStaleAge << ','
+            << stats.h264KeyFrameRequestAckRetransmitBudgetExhausted << ','
+            << stats.h264KeyFrameRequestAckHighMissingRate << ','
+            << stats.h264KeyFrameRequestAckCooldownSuppressed << ','
+            << stats.h264KeyFrameRequestAckAlreadyPending << ','
+            << stats.h264KeyFrameRequestAckCooldownNoise << ','
+            << stats.h264KeyFrameRequestAckCooldownSyncRisk << ','
+            << stats.h264KeyFrameRequestAckStaleAgeCooldownNoise << ','
+            << stats.h264KeyFrameRequestAckStaleAgeCooldownSyncRisk << ','
+            << EscapeCsv(stats.h264KeyFrameRequestAckLastReason) << ','
+            << stats.h264KeyFrameRequestReceiverRequests << ','
+            << stats.h264KeyFrameRequestReceiverCooldownSuppressed << ','
+            << stats.h264KeyFrameRequestReceiverCooldownNoise << ','
+            << stats.h264KeyFrameRequestReceiverCooldownSyncRisk << ','
+            << stats.h264KeyFrameRequestReceiverTrueSyncLoss << ','
+            << stats.h264KeyFrameRequestReceiverMissingAck << ','
+            << stats.h264KeyFrameRequestReceiverDeadlineExpired << ','
+            << stats.h264KeyFrameRequestReceiverDeadlineNackMissing << ','
+            << stats.h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise << ','
+            << stats.h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk << ','
+            << stats.h264KeyFrameRequestReceiverPayloadHeaderFailure << ','
+            << stats.h264KeyFrameRequestReceiverAuInvalid << ','
+            << stats.h264KeyFrameRequestReceiverInitWaitIdr << ','
+            << stats.h264KeyFrameRequestReceiverWaitingForIdr << ','
+            << stats.h264KeyFrameRequestReceiverDecodeFailure << ','
+            << stats.h264KeyFrameRequestReceiverStaleAfterDecode << ','
+            << EscapeCsv(stats.h264KeyFrameRequestReceiverLastReason) << ','
             << (stats.ackKeyFramePending ? 1 : 0) << ','
             << (stats.pacingEnabled ? 1 : 0) << ','
             << stats.pacingTargetBitrateBps << ','
@@ -840,6 +1426,16 @@ namespace {
             << stats.adaptiveLastDisplayFps << ','
             << stats.adaptiveLastQoeScore << ','
             << EscapeCsv(stats.adaptiveDegradationCause) << ','
+            << stats.adaptiveRecoveryDeadlineRawDelta << ','
+            << stats.adaptiveRecoveryDeadlineEffectiveDelta << ','
+            << stats.adaptiveRetransmitStaleRawDelta << ','
+            << stats.adaptiveRetransmitStaleEffectiveDelta << ','
+            << stats.adaptiveRecoveryDeadlineNoiseDelta << ','
+            << stats.adaptiveRecoveryDeadlineSyncRiskDelta << ','
+            << stats.adaptiveRecoveryDeadlineHardSyncLossDelta << ','
+            << (stats.adaptiveRecoveryDeadlineSyncEvidenceActive ? 1 : 0) << ','
+            << stats.adaptiveRecoveryDeadlineSyncEvidenceAgeMs << ','
+            << EscapeCsv(stats.adaptiveRecoveryDeadlineSyncEvidenceSource) << ','
             << (stats.adaptiveArrivalGapJitterSpikeActive ? 1 : 0) << ','
             << (stats.adaptiveFecRecoveryWorking ? 1 : 0) << ','
             << (stats.adaptiveFecGuardActive ? 1 : 0) << ','
@@ -861,7 +1457,252 @@ namespace {
             << stats.networkSimulation.reorderedPackets
             << '\n';
 
+        WriteEventSample(
+            stats,
+            appTimeSec,
+            startupWarmupActive,
+            outputQueueDroppedFramesDelta,
+            outputQueueDropEventsDelta,
+            outputQueueDropBurstEventsDelta,
+            receiveFreshnessDroppedFramesDelta,
+            freshnessDropClassification.first,
+            freshnessDropClassification.second);
+
         file_.flush();
+    }
+
+    void NetworkCsvLogger::WriteEventHeader() {
+        if (!eventFile_.is_open() || eventHeaderWritten_) {
+            return;
+        }
+
+        eventFile_
+            << "timeSec,"
+            << "scenarioName,"
+            << "networkRuntimeMode,"
+            << "networkExperimentActive,"
+            << "networkExperimentScenarioName,"
+            << "networkExperimentAdaptiveMode,"
+            << "frameId,"
+            << "receiveFps,"
+            << "decodeFps,"
+            << "displayFps,"
+            << "currentLatencyMs,"
+            << "currentRttMs,"
+            << "currentJitterMs,"
+            << "adaptiveQoeScore,"
+            << "adaptiveDegradationCause,"
+            << "adaptiveRecoveryDeadlineRawDelta,"
+            << "adaptiveRecoveryDeadlineEffectiveDelta,"
+            << "adaptiveRetransmitStaleRawDelta,"
+            << "adaptiveRetransmitStaleEffectiveDelta,"
+            << "adaptiveRecoveryDeadlineNoiseDelta,"
+            << "adaptiveRecoveryDeadlineSyncRiskDelta,"
+            << "adaptiveRecoveryDeadlineHardSyncLossDelta,"
+            << "adaptiveRecoveryDeadlineSyncEvidenceActive,"
+            << "adaptiveRecoveryDeadlineSyncEvidenceAgeMs,"
+            << "adaptiveRecoveryDeadlineSyncEvidenceSource,"
+            << "adaptiveArrivalGapJitterSpikeActive,"
+            << "outputQueueDroppedFramesDelta,"
+            << "outputQueueDropEventsDelta,"
+            << "outputQueueDropBurstEventsDelta,"
+            << "receiveFreshnessDroppedFramesDelta,"
+            << "receiveFreshnessDropClass,"
+            << "receiveFreshnessDropEvidence,"
+            << "lastOutputQueueDropReason,"
+            << "receiveDecodeLastDropReason,"
+            << "deadlineDroppedFrames,"
+            << "outputQueueDroppedFrames,"
+            << "receiveFreshnessDroppedFrames,"
+            << "deadlineNackExpiredDroppedFrames,"
+            << "deadlineNackExpiredH264KeyFrames,"
+            << "ackStaleDroppedFrames,"
+            << "displayedFrames,"
+            << "droppedFrames,"
+            << "packetLossRate,"
+            << "lastAckMissingRate,"
+            << "networkConditionEnabled,"
+            << "networkConditionLossRate,"
+            << "networkConditionDuplicateRate,"
+            << "networkConditionReorderRate,"
+            << "networkConditionMinDelayMs,"
+            << "networkConditionMaxDelayMs,"
+            << "networkConditionBurstLossLength\n";
+
+        eventHeaderWritten_ = true;
+    }
+
+    void NetworkCsvLogger::WriteEventSample(
+        const NetworkStatsSnapshot& stats,
+        double appTimeSec,
+        bool startupWarmupActive,
+        uint64_t outputQueueDroppedFramesDelta,
+        uint64_t outputQueueDropEventsDelta,
+        uint64_t outputQueueDropBurstEventsDelta,
+        uint64_t receiveFreshnessDroppedFramesDelta,
+        const std::string& freshnessDropClass,
+        const std::string& freshnessDropEvidence
+    ) {
+        (void)startupWarmupActive;
+
+        ++summaryTotalRows_;
+
+        const bool qoe2 = stats.adaptiveLastQoeScore >= 2.0 &&
+            stats.adaptiveLastQoeScore < 3.0;
+        const bool qoe3 = stats.adaptiveLastQoeScore >= 3.0;
+        const bool recoveryRaw =
+            stats.adaptiveRecoveryDeadlineRawDelta > 0 ||
+            stats.adaptiveRetransmitStaleRawDelta > 0 ||
+            stats.adaptiveRecoveryDeadlineNoiseDelta > 0;
+        const bool recoveryEffective =
+            stats.adaptiveRecoveryDeadlineEffectiveDelta > 0;
+        const bool retransmitEffective =
+            stats.adaptiveRetransmitStaleEffectiveDelta > 0;
+        const bool syncRisk =
+            stats.adaptiveRecoveryDeadlineSyncRiskDelta > 0;
+        const bool hardSyncLoss =
+            stats.adaptiveRecoveryDeadlineHardSyncLossDelta > 0;
+        const bool outputDrop =
+            outputQueueDroppedFramesDelta > 0 ||
+            outputQueueDropEventsDelta > 0 ||
+            outputQueueDropBurstEventsDelta > 0;
+        const bool freshnessDrop =
+            receiveFreshnessDroppedFramesDelta > 0;
+        const bool arrivalGapJitter =
+            stats.adaptiveArrivalGapJitterSpikeActive;
+
+        summaryQoe2Rows_ += qoe2 ? 1 : 0;
+        summaryQoe3Rows_ += qoe3 ? 1 : 0;
+        summaryRecoveryDeadlineRawRows_ += recoveryRaw ? 1 : 0;
+        summaryRecoveryDeadlineEffectiveRows_ +=
+            recoveryEffective ? 1 : 0;
+        summaryRetransmitStaleEffectiveRows_ +=
+            retransmitEffective ? 1 : 0;
+        summarySyncRiskRows_ += syncRisk ? 1 : 0;
+        summaryHardSyncLossRows_ += hardSyncLoss ? 1 : 0;
+        summaryOutputDropRows_ += outputDrop ? 1 : 0;
+        summaryFreshnessDropRows_ += freshnessDrop ? 1 : 0;
+        summaryArrivalGapJitterRows_ += arrivalGapJitter ? 1 : 0;
+
+        const bool important =
+            qoe2 ||
+            qoe3 ||
+            recoveryRaw ||
+            recoveryEffective ||
+            retransmitEffective ||
+            syncRisk ||
+            hardSyncLoss ||
+            outputDrop ||
+            freshnessDrop ||
+            arrivalGapJitter;
+        if (!important) {
+            return;
+        }
+
+        ++summaryEventRows_;
+        if (!eventFile_.is_open()) {
+            return;
+        }
+
+        if (!eventHeaderWritten_) {
+            WriteEventHeader();
+        }
+
+        eventFile_ << std::fixed << std::setprecision(3)
+            << appTimeSec << ','
+            << EscapeCsv(ResolveScenarioName(stats)) << ','
+            << EscapeCsv(stats.networkRuntimeModeName) << ','
+            << (stats.networkExperimentActive ? 1 : 0) << ','
+            << EscapeCsv(stats.networkExperimentScenarioName) << ','
+            << EscapeCsv(stats.networkExperimentAdaptiveMode) << ','
+            << stats.latestFrameId << ','
+            << stats.receiveFps << ','
+            << stats.decodeFps << ','
+            << stats.displayFps << ','
+            << stats.currentLatencyMs << ','
+            << stats.currentRttMs << ','
+            << stats.currentJitterMs << ','
+            << stats.adaptiveLastQoeScore << ','
+            << EscapeCsv(stats.adaptiveDegradationCause) << ','
+            << stats.adaptiveRecoveryDeadlineRawDelta << ','
+            << stats.adaptiveRecoveryDeadlineEffectiveDelta << ','
+            << stats.adaptiveRetransmitStaleRawDelta << ','
+            << stats.adaptiveRetransmitStaleEffectiveDelta << ','
+            << stats.adaptiveRecoveryDeadlineNoiseDelta << ','
+            << stats.adaptiveRecoveryDeadlineSyncRiskDelta << ','
+            << stats.adaptiveRecoveryDeadlineHardSyncLossDelta << ','
+            << (stats.adaptiveRecoveryDeadlineSyncEvidenceActive ? 1 : 0)
+            << ','
+            << stats.adaptiveRecoveryDeadlineSyncEvidenceAgeMs << ','
+            << EscapeCsv(stats.adaptiveRecoveryDeadlineSyncEvidenceSource)
+            << ','
+            << (stats.adaptiveArrivalGapJitterSpikeActive ? 1 : 0)
+            << ','
+            << outputQueueDroppedFramesDelta << ','
+            << outputQueueDropEventsDelta << ','
+            << outputQueueDropBurstEventsDelta << ','
+            << receiveFreshnessDroppedFramesDelta << ','
+            << EscapeCsv(freshnessDropClass) << ','
+            << EscapeCsv(freshnessDropEvidence) << ','
+            << EscapeCsv(stats.lastOutputQueueDropReason) << ','
+            << EscapeCsv(stats.receiveDecodeLastDropReason) << ','
+            << stats.deadlineDroppedFrames << ','
+            << stats.outputQueueDroppedFrames << ','
+            << stats.receiveFreshnessDroppedFrames << ','
+            << stats.deadlineNackExpiredDroppedFrames << ','
+            << stats.deadlineNackExpiredH264KeyFrames << ','
+            << stats.ackStaleDroppedFrames << ','
+            << stats.displayedFrames << ','
+            << stats.droppedFrames << ','
+            << stats.packetLossRate << ','
+            << stats.lastAckMissingRate << ','
+            << (stats.networkCondition.enabled ? 1 : 0) << ','
+            << stats.networkCondition.lossRate << ','
+            << stats.networkCondition.duplicateRate << ','
+            << stats.networkCondition.reorderRate << ','
+            << stats.networkCondition.minDelayMs << ','
+            << stats.networkCondition.maxDelayMs << ','
+            << stats.networkCondition.burstLossLength
+            << '\n';
+
+        eventFile_.flush();
+    }
+
+    void NetworkCsvLogger::WriteRunSummary() {
+        if (filePath_.empty()) {
+            return;
+        }
+
+        const std::filesystem::path summaryPath =
+            RunSummaryPathFor(std::filesystem::path(filePath_));
+        std::ofstream summary(summaryPath, std::ios::out | std::ios::trunc);
+        if (!summary) {
+            return;
+        }
+
+        summary
+            << "{\n"
+            << "  \"sourceCsv\": \"" << JsonEscape(filePath_) << "\",\n"
+            << "  \"eventCsv\": \"" << JsonEscape(eventFilePath_) << "\",\n"
+            << "  \"eventMode\": \"streaming\",\n"
+            << "  \"totalRows\": " << summaryTotalRows_ << ",\n"
+            << "  \"eventRows\": " << summaryEventRows_ << ",\n"
+            << "  \"qoe2Rows\": " << summaryQoe2Rows_ << ",\n"
+            << "  \"qoe3Rows\": " << summaryQoe3Rows_ << ",\n"
+            << "  \"recoveryDeadlineRawRows\": "
+            << summaryRecoveryDeadlineRawRows_ << ",\n"
+            << "  \"recoveryDeadlineEffectiveRows\": "
+            << summaryRecoveryDeadlineEffectiveRows_ << ",\n"
+            << "  \"retransmitStaleEffectiveRows\": "
+            << summaryRetransmitStaleEffectiveRows_ << ",\n"
+            << "  \"syncRiskRows\": " << summarySyncRiskRows_ << ",\n"
+            << "  \"hardSyncLossRows\": " << summaryHardSyncLossRows_ << ",\n"
+            << "  \"outputDropRows\": " << summaryOutputDropRows_ << ",\n"
+            << "  \"freshnessDropRows\": " << summaryFreshnessDropRows_
+            << ",\n"
+            << "  \"arrivalGapJitterRows\": "
+            << summaryArrivalGapJitterRows_ << "\n"
+            << "}\n";
     }
 
     bool NetworkCsvLogger::IsRunning() const {
@@ -1062,10 +1903,18 @@ namespace {
             << "h264KeyTinyMissingCriticalPackets,"
             << "h264KeyTinyMissingCriticalSentPackets,"
             << "h264KeyTinyMissingCriticalSkippedPackets,"
+            << "h264KeyTinyMissingCriticalFeasibilitySuppressedFrames,"
+            << "h264KeyTinyMissingCriticalFeasibilitySuppressedPackets,"
+            << "h264KeyTinyMissingCriticalFeasibilityBypassedFrames,"
+            << "h264KeyTinyMissingCriticalFeasibilityBypassedPackets,"
+            << "h264KeyTinyMissingCriticalLastPredictedDeliveryMs,"
+            << "h264KeyTinyMissingCriticalLastRemainingSlackMs,"
             << "h264KeyTinyMissingCriticalLastFrameId,"
             << "h264KeyTinyMissingCriticalLastAckMissingChunks,"
             << "h264KeyTinyMissingCriticalLastRequestedChunks,"
             << "h264KeyTinyMissingCriticalLastEvent,"
+            << "h264KeyTinyEarlyNackFrames,"
+            << "h264KeyTinyEarlyNackMissingChunks,"
             << "h264KeySmallMissingAckFrames,"
             << "h264KeySmallMissingAckMissingChunks,"
             << "h264KeySmallMissingAckHistoryMissingFrames,"
@@ -1090,6 +1939,27 @@ namespace {
             << "h264KeyRepair1To2LateCompletedPackets,"
             << "h264KeyRepair1To2LateExpiredPackets,"
             << "h264KeyRepair1To2LateRejectedPackets,"
+            << "h264KeyTinyEmergencyCompletedFrames,"
+            << "h264KeyTinyEmergencyArrivedBeforeRetirePackets,"
+            << "h264KeyTinyEmergencyDuplicateBeforeRetirePackets,"
+            << "h264KeyTinyEmergencyArrivedAfterCompletePackets,"
+            << "h264KeyTinyEmergencyArrivedAfterExpirePackets,"
+            << "h264KeyTinyEmergencyArrivedAfterRejectedPackets,"
+            << "h264KeyTinyEmergencyNotArrivedPackets,"
+            << "h264KeyTinyEmergencySendToArrivalAvgMs,"
+            << "h264KeyTinyEmergencySendToArrivalMaxMs,"
+            << "h264KeyTinyLastChanceNackFrames,"
+            << "h264KeyTinyLastChanceMissing1Frames,"
+            << "h264KeyTinyLastChanceCompletedFrames,"
+            << "h264KeyTinyLastChanceExpiredFrames,"
+            << "h264KeyTinyLastChanceArrivedBeforeRetirePackets,"
+            << "h264KeyTinyLastChanceDuplicateBeforeRetirePackets,"
+            << "h264KeyTinyLastChanceLateCompletedPackets,"
+            << "h264KeyTinyLastChanceLateExpiredPackets,"
+            << "h264KeyTinyLastChanceLateRejectedPackets,"
+            << "h264KeyTinyLastChanceSlackAvgMs,"
+            << "h264KeyTinyLastChanceSlackMinMs,"
+            << "h264KeyTinyLastChanceSlackMaxMs,"
             << "h264KeyRepair3To4CompletedFrames,"
             << "h264KeyRepair3To4ExpiredFrames,"
             << "h264KeyRepair3To4ArrivedPackets,"
@@ -1100,6 +1970,35 @@ namespace {
             << "lateRepairSavedPackets,"
             << "ackStaleDroppedFrames,"
             << "ackKeyFrameRequests,"
+            << "h264KeyFrameRequestAckHistoryMissing,"
+            << "h264KeyFrameRequestAckStaleFrameLag,"
+            << "h264KeyFrameRequestAckStaleAge,"
+            << "h264KeyFrameRequestAckRetransmitBudgetExhausted,"
+            << "h264KeyFrameRequestAckHighMissingRate,"
+            << "h264KeyFrameRequestAckCooldownSuppressed,"
+            << "h264KeyFrameRequestAckAlreadyPending,"
+            << "h264KeyFrameRequestAckCooldownNoise,"
+            << "h264KeyFrameRequestAckCooldownSyncRisk,"
+            << "h264KeyFrameRequestAckStaleAgeCooldownNoise,"
+            << "h264KeyFrameRequestAckStaleAgeCooldownSyncRisk,"
+            << "h264KeyFrameRequestAckLastReason,"
+            << "h264KeyFrameRequestReceiverRequests,"
+            << "h264KeyFrameRequestReceiverCooldownSuppressed,"
+            << "h264KeyFrameRequestReceiverCooldownNoise,"
+            << "h264KeyFrameRequestReceiverCooldownSyncRisk,"
+            << "h264KeyFrameRequestReceiverTrueSyncLoss,"
+            << "h264KeyFrameRequestReceiverMissingAck,"
+            << "h264KeyFrameRequestReceiverDeadlineExpired,"
+            << "h264KeyFrameRequestReceiverDeadlineNackMissing,"
+            << "h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise,"
+            << "h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk,"
+            << "h264KeyFrameRequestReceiverPayloadHeaderFailure,"
+            << "h264KeyFrameRequestReceiverAuInvalid,"
+            << "h264KeyFrameRequestReceiverInitWaitIdr,"
+            << "h264KeyFrameRequestReceiverWaitingForIdr,"
+            << "h264KeyFrameRequestReceiverDecodeFailure,"
+            << "h264KeyFrameRequestReceiverStaleAfterDecode,"
+            << "h264KeyFrameRequestReceiverLastReason,"
             << "ackKeyFramePending,"
             << "pacingEnabled,"
             << "pacingTargetBitrateBps,"
@@ -1420,6 +2319,16 @@ namespace {
             << "adaptiveInputDisplayFps,"
             << "adaptiveQoeScore,"
             << "adaptiveDegradationCause,"
+            << "adaptiveRecoveryDeadlineRawDelta,"
+            << "adaptiveRecoveryDeadlineEffectiveDelta,"
+            << "adaptiveRetransmitStaleRawDelta,"
+            << "adaptiveRetransmitStaleEffectiveDelta,"
+            << "adaptiveRecoveryDeadlineNoiseDelta,"
+            << "adaptiveRecoveryDeadlineSyncRiskDelta,"
+            << "adaptiveRecoveryDeadlineHardSyncLossDelta,"
+            << "adaptiveRecoveryDeadlineSyncEvidenceActive,"
+            << "adaptiveRecoveryDeadlineSyncEvidenceAgeMs,"
+            << "adaptiveRecoveryDeadlineSyncEvidenceSource,"
             << "adaptiveArrivalGapJitterSpikeActive,"
             << "adaptiveFecRecoveryWorking,"
             << "adaptiveFecGuardActive,"

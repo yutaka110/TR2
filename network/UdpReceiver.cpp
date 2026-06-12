@@ -335,11 +335,15 @@ namespace {
         stats_.OnDisplayFrame();
     }
 
-    void UdpReceiver::RequestKeyFrame(uint32_t frameId) {
+    void UdpReceiver::RequestKeyFrame(
+        uint32_t frameId,
+        const char* reason
+    ) {
         const uint64_t nowUs = NowMicroseconds();
         if (!hasLastRnvpDataAddr_ ||
             (lastKeyFrameRequestUs_ != 0 &&
                 nowUs <= lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs)) {
+            stats_.OnH264ReceiverKeyFrameRequest(reason, false);
             return;
         }
 
@@ -352,6 +356,7 @@ namespace {
             frameId,
             lastRnvpDataAddr_);
         lastKeyFrameRequestUs_ = nowUs;
+        stats_.OnH264ReceiverKeyFrameRequest(reason, true);
     }
 
     void UdpReceiver::PushCompletedFrameToJitterBuffer(
@@ -751,10 +756,11 @@ namespace {
                         lastKeyFrameRequestUs_ == 0 ||
                         receiveTimeUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
 
+                    const bool missingAckRequestsKeyFrame =
+                        ackInfo.missingChunkCount >= 2 ||
+                        consecutiveIncompleteFrames_ >= 2;
                     const bool shouldRequestKeyFrame =
-                        cooldownElapsed &&
-                        (ackInfo.missingChunkCount >= 2 ||
-                            consecutiveIncompleteFrames_ >= 2);
+                        cooldownElapsed && missingAckRequestsKeyFrame;
 
                     if (shouldRequestKeyFrame) {
                         SendRnvpControl(
@@ -765,6 +771,22 @@ namespace {
                         );
 
                         lastKeyFrameRequestUs_ = receiveTimeUs;
+                        const bool syncRisk =
+                            ackInfo.codecType == CodecType::H264 &&
+                            ackInfo.keyFrame;
+                        stats_.OnH264ReceiverKeyFrameRequest(
+                            "missing-ack",
+                            true,
+                            syncRisk);
+                    }
+                    else if (missingAckRequestsKeyFrame) {
+                        const bool syncRisk =
+                            ackInfo.codecType == CodecType::H264 &&
+                            ackInfo.keyFrame;
+                        stats_.OnH264ReceiverKeyFrameRequest(
+                            "missing-ack",
+                            false,
+                            syncRisk);
                     }
                 }
             }
@@ -1224,11 +1246,12 @@ namespace {
                 lastKeyFrameRequestUs_ == 0 ||
                 nowUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
 
+            const bool expiredRequestsKeyFrame =
+                recoveryActions.expiredAfterNackCount > 0 ||
+                recoveryActions.expiredFrameCount >= 2 ||
+                consecutiveIncompleteFrames_ >= 3;
             const bool shouldRequestKeyFrame =
-                cooldownElapsed &&
-                (recoveryActions.expiredAfterNackCount > 0 ||
-                    recoveryActions.expiredFrameCount >= 2 ||
-                    consecutiveIncompleteFrames_ >= 3);
+                cooldownElapsed && expiredRequestsKeyFrame;
 
             if (shouldRequestKeyFrame) {
                 RnvpHeaderV1 syntheticHeader{};
@@ -1245,6 +1268,22 @@ namespace {
                 );
 
                 lastKeyFrameRequestUs_ = nowUs;
+                const bool syncRisk =
+                    recoveryActions.lastExpiredCodecType == CodecType::H264 &&
+                    recoveryActions.lastExpiredKeyFrame;
+                stats_.OnH264ReceiverKeyFrameRequest(
+                    "deadline-expired",
+                    true,
+                    syncRisk);
+            }
+            else if (expiredRequestsKeyFrame) {
+                const bool syncRisk =
+                    recoveryActions.lastExpiredCodecType == CodecType::H264 &&
+                    recoveryActions.lastExpiredKeyFrame;
+                stats_.OnH264ReceiverKeyFrameRequest(
+                    "deadline-expired",
+                    false,
+                    syncRisk);
             }
         }
 
@@ -1280,10 +1319,11 @@ namespace {
                 lastKeyFrameRequestUs_ == 0 ||
                 nowUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
 
+            const bool nackRequestsKeyFrame =
+                ackInfo.missingChunkCount >= 2 ||
+                consecutiveIncompleteFrames_ >= 3;
             const bool shouldRequestKeyFrame =
-                cooldownElapsed &&
-                (ackInfo.missingChunkCount >= 2 ||
-                    consecutiveIncompleteFrames_ >= 3);
+                cooldownElapsed && nackRequestsKeyFrame;
 
             if (shouldRequestKeyFrame) {
                 SendRnvpControl(
@@ -1294,6 +1334,22 @@ namespace {
                 );
 
                 lastKeyFrameRequestUs_ = nowUs;
+                const bool syncRisk =
+                    ackInfo.codecType == CodecType::H264 &&
+                    ackInfo.keyFrame;
+                stats_.OnH264ReceiverKeyFrameRequest(
+                    "deadline-nack-missing",
+                    true,
+                    syncRisk);
+            }
+            else if (nackRequestsKeyFrame) {
+                const bool syncRisk =
+                    ackInfo.codecType == CodecType::H264 &&
+                    ackInfo.keyFrame;
+                stats_.OnH264ReceiverKeyFrameRequest(
+                    "deadline-nack-missing",
+                    false,
+                    syncRisk);
             }
         }
     }

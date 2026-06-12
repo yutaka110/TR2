@@ -1,0 +1,11 @@
+﻿{
+    "Expired":  186,
+    "Missing1To2":  178,
+    "RetransmitReceived0":  83,
+    "RetransmitReceivedPositive":  103,
+    "EmergencyReceivedPositive":  0,
+    "NackCount0":  0,
+    "NackCount1":  0,
+    "NackCount2":  0,
+    "NackCount3Plus":  186
+}

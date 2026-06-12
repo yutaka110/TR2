@@ -1,0 +1,243 @@
+﻿{
+    "PerRun":  [
+                   {
+                       "Label":  "baseline-exists",
+                       "Seed":  8920,
+                       "NackCount":  1251,
+                       "NackSlackP10":  108.297,
+                       "NackSlackP50":  132.085,
+                       "NackSlackP90":  155.153,
+                       "ExpiredCount":  72,
+                       "Expired1":  19,
+                       "Expired2":  46,
+                       "Expired3To4":  7
+                   },
+                   {
+                       "Label":  "baseline-exists",
+                       "Seed":  8921,
+                       "NackCount":  1084,
+                       "NackSlackP10":  108.276,
+                       "NackSlackP50":  131.902,
+                       "NackSlackP90":  155.238,
+                       "ExpiredCount":  59,
+                       "Expired1":  21,
+                       "Expired2":  31,
+                       "Expired3To4":  7
+                   },
+                   {
+                       "Label":  "baseline-exists",
+                       "Seed":  8922,
+                       "NackCount":  1321,
+                       "NackSlackP10":  108.613,
+                       "NackSlackP50":  132.636,
+                       "NackSlackP90":  156.819,
+                       "ExpiredCount":  52,
+                       "Expired1":  19,
+                       "Expired2":  31,
+                       "Expired3To4":  2
+                   },
+                   {
+                       "Label":  "post-recoverable",
+                       "Seed":  8920,
+                       "NackCount":  919,
+                       "NackSlackP10":  108.238,
+                       "NackSlackP50":  131.862,
+                       "NackSlackP90":  155.033,
+                       "ExpiredCount":  53,
+                       "Expired1":  22,
+                       "Expired2":  29,
+                       "Expired3To4":  2
+                   },
+                   {
+                       "Label":  "post-recoverable",
+                       "Seed":  8921,
+                       "NackCount":  1027,
+                       "NackSlackP10":  108.298,
+                       "NackSlackP50":  131.964,
+                       "NackSlackP90":  155.234,
+                       "ExpiredCount":  55,
+                       "Expired1":  23,
+                       "Expired2":  27,
+                       "Expired3To4":  5
+                   },
+                   {
+                       "Label":  "post-recoverable",
+                       "Seed":  8922,
+                       "NackCount":  1430,
+                       "NackSlackP10":  107.217,
+                       "NackSlackP50":  131.79,
+                       "NackSlackP90":  155.291,
+                       "ExpiredCount":  78,
+                       "Expired1":  30,
+                       "Expired2":  47,
+                       "Expired3To4":  0
+                   }
+               ],
+    "Totals":  [
+                   {
+                       "Label":  "baseline-exists",
+                       "Seed":  "TOTAL",
+                       "NackCount":  3656,
+                       "NackSlackP10":  108.465,
+                       "NackSlackP50":  132.021,
+                       "NackSlackP90":  156.227,
+                       "ExpiredCount":  183,
+                       "ExpiredSlackP50":  10.083,
+                       "Expired1":  59,
+                       "Expired2":  108,
+                       "Expired3To4":  16,
+                       "Expired5Plus":  0
+                   },
+                   {
+                       "Label":  "post-recoverable",
+                       "Seed":  "TOTAL",
+                       "NackCount":  3376,
+                       "NackSlackP10":  108.089,
+                       "NackSlackP50":  131.886,
+                       "NackSlackP90":  155.156,
+                       "ExpiredCount":  186,
+                       "ExpiredSlackP50":  9.458,
+                       "Expired1":  75,
+                       "Expired2":  103,
+                       "Expired3To4":  7,
+                       "Expired5Plus":  1
+                   }
+               ],
+    "Buckets":  [
+                    {
+                        "Label":  "baseline-exists",
+                        "Kind":  "nack",
+                        "Bucket":  "3-4",
+                        "Count":  157,
+                        "Pct":  4.29,
+                        "SlackP50":  108.785,
+                        "SlackP90":  115.542
+                    },
+                    {
+                        "Label":  "baseline-exists",
+                        "Kind":  "nack",
+                        "Bucket":  "1-2",
+                        "Count":  75,
+                        "Pct":  2.05,
+                        "SlackP50":  106.574,
+                        "SlackP90":  119.124
+                    },
+                    {
+                        "Label":  "baseline-exists",
+                        "Kind":  "nack",
+                        "Bucket":  "17+",
+                        "Count":  971,
+                        "Pct":  26.56,
+                        "SlackP50":  152.853,
+                        "SlackP90":  158.412
+                    },
+                    {
+                        "Label":  "baseline-exists",
+                        "Kind":  "nack",
+                        "Bucket":  "9-16",
+                        "Count":  1809,
+                        "Pct":  49.48,
+                        "SlackP50":  131.595,
+                        "SlackP90":  150.656
+                    },
+                    {
+                        "Label":  "baseline-exists",
+                        "Kind":  "nack",
+                        "Bucket":  "5-8",
+                        "Count":  644,
+                        "Pct":  17.61,
+                        "SlackP50":  112.404,
+                        "SlackP90":  125.004
+                    },
+                    {
+                        "Label":  "baseline-exists",
+                        "Kind":  "expired",
+                        "Bucket":  "1-2",
+                        "Count":  167,
+                        "Pct":  91.26,
+                        "SlackP50":  10.139,
+                        "SlackP90":  11.719
+                    },
+                    {
+                        "Label":  "baseline-exists",
+                        "Kind":  "expired",
+                        "Bucket":  "3-4",
+                        "Count":  16,
+                        "Pct":  8.74,
+                        "SlackP50":  9.583,
+                        "SlackP90":  11.086
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "nack",
+                        "Bucket":  "3-4",
+                        "Count":  137,
+                        "Pct":  4.06,
+                        "SlackP50":  108.288,
+                        "SlackP90":  115.478
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "nack",
+                        "Bucket":  "1-2",
+                        "Count":  71,
+                        "Pct":  2.1,
+                        "SlackP50":  109.384,
+                        "SlackP90":  122.26
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "nack",
+                        "Bucket":  "9-16",
+                        "Count":  1648,
+                        "Pct":  48.82,
+                        "SlackP50":  131.252,
+                        "SlackP90":  149.828
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "nack",
+                        "Bucket":  "17+",
+                        "Count":  922,
+                        "Pct":  27.31,
+                        "SlackP50":  152.656,
+                        "SlackP90":  159.221
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "nack",
+                        "Bucket":  "5-8",
+                        "Count":  598,
+                        "Pct":  17.71,
+                        "SlackP50":  111.439,
+                        "SlackP90":  123.295
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "expired",
+                        "Bucket":  "1-2",
+                        "Count":  178,
+                        "Pct":  95.7,
+                        "SlackP50":  9.472,
+                        "SlackP90":  11.791
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "expired",
+                        "Bucket":  "3-4",
+                        "Count":  7,
+                        "Pct":  3.76,
+                        "SlackP50":  7.929,
+                        "SlackP90":  8.163
+                    },
+                    {
+                        "Label":  "post-recoverable",
+                        "Kind":  "expired",
+                        "Bucket":  "5-8",
+                        "Count":  1,
+                        "Pct":  0.54,
+                        "SlackP50":  7.594,
+                        "SlackP90":  7.594
+                    }
+                ]
+}

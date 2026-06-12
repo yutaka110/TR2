@@ -31,6 +31,7 @@ namespace net {
         PacketFlag_KeyFrame = 1 << 0,
         PacketFlag_LastChunk = 1 << 1,
         PacketFlag_Retransmit = 1 << 4,
+        PacketFlag_EmergencyRepair = 1 << 5,
 
         // 将来拡張用
         PacketFlag_DroppedAllowed = 1 << 2, // 欠損時に破棄してもよいフレーム

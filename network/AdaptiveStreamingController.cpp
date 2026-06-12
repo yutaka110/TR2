@@ -153,6 +153,15 @@ namespace net {
         lastDeadlineNackExpiredAfterNackFrames_ = 0;
         lastAckStaleDroppedFrames_ = 0;
         lastAckKeyFrameRequests_ = 0;
+        lastAckStaleAgeCooldownNoise_ = 0;
+        lastAckStaleAgeCooldownSyncRisk_ = 0;
+        lastReceiverDeadlineNackMissingCooldownNoise_ = 0;
+        lastReceiverDeadlineNackMissingCooldownSyncRisk_ = 0;
+        lastReceiverTrueSyncLoss_ = 0;
+        lastReceiverHardSyncLoss_ = 0;
+        recoveryDeadlineSyncEvidenceSec_ = 0.0;
+        recoveryDeadlineSyncEvidenceAgeSec_ = 0.0;
+        recoveryDeadlineSyncEvidenceSource_ = "none";
         hasFreshnessCounters_ = false;
         lastReceiveFreshnessDroppedFrames_ = 0;
         hasReceiveDecodeDropCounters_ = false;
@@ -333,6 +342,11 @@ namespace net {
         uint64_t deadlineNackMissingChunkDelta = 0;
         uint64_t recoveryDeadlineDropDelta = 0;
         uint64_t retransmitStaleDropDelta = 0;
+        uint64_t recoveryDeadlineRawDelta = 0;
+        uint64_t retransmitStaleRawDelta = 0;
+        uint64_t recoveryDeadlineNoiseDelta = 0;
+        uint64_t recoveryDeadlineSyncRiskDelta = 0;
+        uint64_t recoveryDeadlineHardSyncLossDelta = 0;
         uint64_t freshnessDropDelta = 0;
         uint64_t receiveDecodeQueueDropDelta = 0;
         uint64_t receiveDecodeRenderOverwriteDelta = 0;
@@ -365,13 +379,137 @@ namespace net {
             }
             if (input.deadlineNackExpiredDroppedFrames >=
                 lastDeadlineNackExpiredDroppedFrames_) {
-                recoveryDeadlineDropDelta +=
+                recoveryDeadlineRawDelta =
                     input.deadlineNackExpiredDroppedFrames -
                     lastDeadlineNackExpiredDroppedFrames_;
             }
             if (input.ackStaleDroppedFrames >= lastAckStaleDroppedFrames_) {
-                retransmitStaleDropDelta =
+                retransmitStaleRawDelta =
                     input.ackStaleDroppedFrames - lastAckStaleDroppedFrames_;
+            }
+            uint64_t ackStaleAgeNoiseDelta = 0;
+            uint64_t ackStaleAgeSyncRiskDelta = 0;
+            uint64_t receiverDeadlineNoiseDelta = 0;
+            uint64_t receiverDeadlineSyncRiskDelta = 0;
+            uint64_t receiverTrueSyncLossDelta = 0;
+            uint64_t receiverHardSyncLossDelta = 0;
+            if (input.h264KeyFrameRequestAckStaleAgeCooldownNoise >=
+                lastAckStaleAgeCooldownNoise_) {
+                ackStaleAgeNoiseDelta =
+                    input.h264KeyFrameRequestAckStaleAgeCooldownNoise -
+                    lastAckStaleAgeCooldownNoise_;
+            }
+            if (input.h264KeyFrameRequestAckStaleAgeCooldownSyncRisk >=
+                lastAckStaleAgeCooldownSyncRisk_) {
+                ackStaleAgeSyncRiskDelta =
+                    input.h264KeyFrameRequestAckStaleAgeCooldownSyncRisk -
+                    lastAckStaleAgeCooldownSyncRisk_;
+            }
+            if (input
+                    .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise >=
+                lastReceiverDeadlineNackMissingCooldownNoise_) {
+                receiverDeadlineNoiseDelta =
+                    input
+                        .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise -
+                    lastReceiverDeadlineNackMissingCooldownNoise_;
+            }
+            if (input
+                    .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk >=
+                lastReceiverDeadlineNackMissingCooldownSyncRisk_) {
+                receiverDeadlineSyncRiskDelta =
+                    input
+                        .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk -
+                    lastReceiverDeadlineNackMissingCooldownSyncRisk_;
+            }
+            if (input.h264KeyFrameRequestReceiverTrueSyncLoss >=
+                lastReceiverTrueSyncLoss_) {
+                receiverTrueSyncLossDelta =
+                    input.h264KeyFrameRequestReceiverTrueSyncLoss -
+                    lastReceiverTrueSyncLoss_;
+            }
+            if (input.h264KeyFrameRequestReceiverHardSyncLoss >=
+                lastReceiverHardSyncLoss_) {
+                receiverHardSyncLossDelta =
+                    input.h264KeyFrameRequestReceiverHardSyncLoss -
+                    lastReceiverHardSyncLoss_;
+            }
+
+            recoveryDeadlineNoiseDelta =
+                receiverDeadlineNoiseDelta + ackStaleAgeNoiseDelta;
+            recoveryDeadlineSyncRiskDelta =
+                receiverDeadlineSyncRiskDelta +
+                ackStaleAgeSyncRiskDelta +
+                receiverTrueSyncLossDelta;
+            recoveryDeadlineHardSyncLossDelta = receiverHardSyncLossDelta;
+
+            const bool hasNewRecoverySyncEvidence =
+                recoveryDeadlineSyncRiskDelta > 0 ||
+                recoveryDeadlineHardSyncLossDelta > 0;
+            if (hasNewRecoverySyncEvidence) {
+                std::string evidenceSource;
+                const auto appendEvidenceSource =
+                    [&evidenceSource](const char* source) {
+                        if (!evidenceSource.empty()) {
+                            evidenceSource += "+";
+                        }
+                        evidenceSource += source;
+                    };
+                if (receiverHardSyncLossDelta > 0) {
+                    appendEvidenceSource("hard-decoder-sync-loss");
+                }
+                if (receiverDeadlineSyncRiskDelta > 0) {
+                    appendEvidenceSource("receiver-deadline-nack-sync-risk");
+                }
+                if (ackStaleAgeSyncRiskDelta > 0) {
+                    appendEvidenceSource("ack-stale-age-sync-risk");
+                }
+                if (receiverTrueSyncLossDelta > 0 &&
+                    receiverDeadlineSyncRiskDelta == 0 &&
+                    receiverHardSyncLossDelta == 0) {
+                    appendEvidenceSource("receiver-sync-risk");
+                }
+                if (evidenceSource.empty()) {
+                    evidenceSource = "sync-risk";
+                }
+                recoveryDeadlineSyncEvidenceSec_ =
+                    (std::max)(recoveryDeadlineSyncEvidenceSec_, 1.5);
+                recoveryDeadlineSyncEvidenceAgeSec_ = 0.0;
+                recoveryDeadlineSyncEvidenceSource_ = evidenceSource;
+            }
+            else if (recoveryDeadlineSyncEvidenceSec_ > 0.0) {
+                recoveryDeadlineSyncEvidenceSec_ =
+                    (std::max)(
+                        0.0,
+                        recoveryDeadlineSyncEvidenceSec_ - deltaTimeSec);
+                if (recoveryDeadlineSyncEvidenceSec_ > 0.0) {
+                    recoveryDeadlineSyncEvidenceAgeSec_ +=
+                        (std::max)(0.0, deltaTimeSec);
+                }
+                else {
+                    recoveryDeadlineSyncEvidenceAgeSec_ = 0.0;
+                    recoveryDeadlineSyncEvidenceSource_ = "none";
+                }
+            }
+
+            const bool hasRecentRecoverySyncEvidence =
+                recoveryDeadlineSyncEvidenceSec_ > 0.0;
+            const bool hasCurrentDeadlineSyncEvidence =
+                receiverDeadlineSyncRiskDelta > 0 ||
+                receiverTrueSyncLossDelta > 0 ||
+                receiverHardSyncLossDelta > 0;
+            const bool hasCurrentRetransmitSyncEvidence =
+                ackStaleAgeSyncRiskDelta > 0 ||
+                receiverTrueSyncLossDelta > 0 ||
+                receiverHardSyncLossDelta > 0;
+            if (hasCurrentDeadlineSyncEvidence ||
+                (hasRecentRecoverySyncEvidence &&
+                    receiverDeadlineNoiseDelta == 0)) {
+                recoveryDeadlineDropDelta = recoveryDeadlineRawDelta;
+            }
+            if (hasCurrentRetransmitSyncEvidence ||
+                (hasRecentRecoverySyncEvidence &&
+                    ackStaleAgeNoiseDelta == 0)) {
+                retransmitStaleDropDelta = retransmitStaleRawDelta;
             }
         }
 
@@ -384,6 +522,40 @@ namespace net {
             input.deadlineNackExpiredAfterNackFrames;
         lastAckStaleDroppedFrames_ = input.ackStaleDroppedFrames;
         lastAckKeyFrameRequests_ = input.ackKeyFrameRequests;
+        lastAckStaleAgeCooldownNoise_ =
+            input.h264KeyFrameRequestAckStaleAgeCooldownNoise;
+        lastAckStaleAgeCooldownSyncRisk_ =
+            input.h264KeyFrameRequestAckStaleAgeCooldownSyncRisk;
+        lastReceiverDeadlineNackMissingCooldownNoise_ =
+            input
+                .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownNoise;
+        lastReceiverDeadlineNackMissingCooldownSyncRisk_ =
+            input
+                .h264KeyFrameRequestReceiverDeadlineNackMissingCooldownSyncRisk;
+        lastReceiverTrueSyncLoss_ =
+            input.h264KeyFrameRequestReceiverTrueSyncLoss;
+        lastReceiverHardSyncLoss_ =
+            input.h264KeyFrameRequestReceiverHardSyncLoss;
+
+        state_.lastRecoveryDeadlineRawDelta = recoveryDeadlineRawDelta;
+        state_.lastRecoveryDeadlineEffectiveDelta = recoveryDeadlineDropDelta;
+        state_.lastRetransmitStaleRawDelta = retransmitStaleRawDelta;
+        state_.lastRetransmitStaleEffectiveDelta = retransmitStaleDropDelta;
+        state_.lastRecoveryDeadlineNoiseDelta = recoveryDeadlineNoiseDelta;
+        state_.lastRecoveryDeadlineSyncRiskDelta =
+            recoveryDeadlineSyncRiskDelta;
+        state_.lastRecoveryDeadlineHardSyncLossDelta =
+            recoveryDeadlineHardSyncLossDelta;
+        state_.lastRecoveryDeadlineSyncEvidenceActive =
+            recoveryDeadlineSyncEvidenceSec_ > 0.0;
+        state_.lastRecoveryDeadlineSyncEvidenceAgeMs =
+            state_.lastRecoveryDeadlineSyncEvidenceActive
+            ? recoveryDeadlineSyncEvidenceAgeSec_ * 1000.0
+            : 0.0;
+        state_.lastRecoveryDeadlineSyncEvidenceSource =
+            state_.lastRecoveryDeadlineSyncEvidenceActive
+            ? recoveryDeadlineSyncEvidenceSource_
+            : "none";
 
         if (hasFreshnessCounters_ &&
             input.receiveFreshnessDroppedFrames >=

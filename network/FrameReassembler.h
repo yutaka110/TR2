@@ -63,6 +63,8 @@ namespace net {
         uint32_t expiredMissingChunkCount = 0;
         uint32_t lastExpiredFrameId = 0;
         uint32_t lastExpiredStreamId = 0;
+        CodecType lastExpiredCodecType = CodecType::Unknown;
+        bool lastExpiredKeyFrame = false;
         uint32_t suppressedFrameCount = 0;
         uint32_t suppressedMissingChunkCount = 0;
         uint32_t predictedUsefulNackCount = 0;
@@ -120,6 +122,7 @@ namespace net {
             bool isRnvp = false;
             bool isFec = false;
             bool isRetransmit = false;
+            bool isEmergencyRepair = false;
 
             uint32_t sequence = 0;
             uint32_t streamId = 0;
@@ -178,6 +181,11 @@ namespace net {
             uint32_t postNackReceivedChunks = 0;
             uint32_t retransmitReceivedChunks = 0;
             uint32_t retransmitDuplicatePackets = 0;
+            uint32_t emergencyRepairReceivedChunks = 0;
+            uint32_t emergencyRepairDuplicatePackets = 0;
+            bool keyTinyLastChanceNackSent = false;
+            uint32_t keyTinyLastChanceMissingChunks = 0;
+            uint64_t keyTinyLastChanceSlackUs = 0;
             uint32_t lastPacketSequence = 0;
             uint16_t lastPacketChunkIndex = 0;
             uint32_t lastRetransmitSequence = 0;
@@ -207,8 +215,22 @@ namespace net {
             uint32_t lastNackMissingChunks = 0;
             uint32_t retransmitReceivedChunks = 0;
             uint32_t retransmitDuplicatePackets = 0;
+            uint32_t emergencyRepairReceivedChunks = 0;
+            uint32_t emergencyRepairDuplicatePackets = 0;
+            bool keyTinyLastChanceNackSent = false;
+            uint32_t keyTinyLastChanceMissingChunks = 0;
+            uint64_t keyTinyLastChanceSlackUs = 0;
             uint64_t sendTimeUs = 0;
             uint64_t firstReceiveTimeUs = 0;
+            uint64_t recoveryExpireTimeUs = 0;
+            uint64_t lastUpdateTimeUs = 0;
+            uint64_t recentArrivalIntervalUs = 0;
+            uint32_t likelyArrivalSuppressionCount = 0;
+            bool likelyArrivalWindowHit = false;
+            bool likelyArrivalRecentHit = false;
+            bool likelyArrivalTightCadenceHit = false;
+            bool likelyArrivalFecParityHit = false;
+            bool likelyArrivalFecRecoverableHit = false;
             uint64_t eventTimeUs = 0;
             RetiredFrameOutcome outcome = RetiredFrameOutcome::Completed;
         };
@@ -247,7 +269,8 @@ namespace net {
             uint64_t eventTimeUs,
             uint32_t packetSequence = 0,
             uint16_t packetChunkIndex = 0,
-            bool packetWasRetransmit = false
+            bool packetWasRetransmit = false,
+            bool packetWasEmergencyRepair = false
         ) const;
 
         void CleanupOldFrames(uint64_t nowUs);
@@ -284,6 +307,9 @@ namespace net {
             const FrameAckInfo& ackInfo,
             uint64_t nowUs,
             uint64_t minRecoverySlackUs
+        ) const;
+        bool HasRecoverableFecParity(
+            const PendingFrame& frame
         ) const;
         uint32_t CalculateNackRequestedChunkBudget(
             const PendingFrame& frame,

@@ -1,0 +1,75 @@
+﻿{
+    "RateSummary":  [
+                        {
+                            "Group":  "low-display",
+                            "Rows":  38,
+                            "AvgDisplayDelta":  14.342,
+                            "AvgFrameIdDelta":  24.368,
+                            "EncoderReqPerFrame":  0.3073,
+                            "AwaitingSyncPerFrame":  0.1487,
+                            "ReceiverReqPerFrame":  0.0707,
+                            "AckReqPerFrame":  0.1413,
+                            "DeadlineExpiredPerFrame":  0.2997,
+                            "ReceiverDeadlineExpiredPerFrame":  0.2948,
+                            "ReceiverDeadlineNackMissingPerFrame":  2.3958,
+                            "AckStaleDroppedPerFrame":  2.8983,
+                            "DropPerFrame":  0.3205,
+                            "AvgJitter":  28.272,
+                            "AvgLatency":  96.041
+                        },
+                        {
+                            "Group":  "normal-display",
+                            "Rows":  148,
+                            "AvgDisplayDelta":  20.709,
+                            "AvgFrameIdDelta":  27.838,
+                            "EncoderReqPerFrame":  0.2947,
+                            "AwaitingSyncPerFrame":  0.1321,
+                            "ReceiverReqPerFrame":  0.0711,
+                            "AckReqPerFrame":  0.1416,
+                            "DeadlineExpiredPerFrame":  0.2122,
+                            "ReceiverDeadlineExpiredPerFrame":  0.2118,
+                            "ReceiverDeadlineNackMissingPerFrame":  2.6258,
+                            "AckStaleDroppedPerFrame":  3.1824,
+                            "DropPerFrame":  0.2253,
+                            "AvgJitter":  18.633,
+                            "AvgLatency":  100.398
+                        }
+                    ],
+    "WorstRunSeed":  8931,
+    "WorstRunLowVsNormal":  [
+                                {
+                                    "Group":  "seed8931-low",
+                                    "Rows":  19,
+                                    "AvgDisplayDelta":  14.684,
+                                    "AvgFrameIdDelta":  25.526,
+                                    "EncoderReqPerFrame":  0.3148,
+                                    "AwaitingSyncPerFrame":  0.1444,
+                                    "ReceiverReqPerFrame":  0.0711,
+                                    "AckReqPerFrame":  0.1422,
+                                    "DeadlineExpiredPerFrame":  0.3305,
+                                    "ReceiverDeadlineExpiredPerFrame":  0.3284,
+                                    "ReceiverDeadlineNackMissingPerFrame":  2.5296,
+                                    "AckStaleDroppedPerFrame":  3.0708,
+                                    "DropPerFrame":  0.3466,
+                                    "AvgJitter":  30.083,
+                                    "AvgLatency":  96.569
+                                },
+                                {
+                                    "Group":  "seed8931-normal",
+                                    "Rows":  43,
+                                    "AvgDisplayDelta":  20.721,
+                                    "AvgFrameIdDelta":  28.047,
+                                    "EncoderReqPerFrame":  0.2889,
+                                    "AwaitingSyncPerFrame":  0.1356,
+                                    "ReceiverReqPerFrame":  0.0707,
+                                    "AckReqPerFrame":  0.1405,
+                                    "DeadlineExpiredPerFrame":  0.2199,
+                                    "ReceiverDeadlineExpiredPerFrame":  0.2191,
+                                    "ReceiverDeadlineNackMissingPerFrame":  2.6825,
+                                    "AckStaleDroppedPerFrame":  3.225,
+                                    "DropPerFrame":  0.2333,
+                                    "AvgJitter":  18.238,
+                                    "AvgLatency":  101.299
+                                }
+                            ]
+}

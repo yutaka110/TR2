@@ -1,0 +1,101 @@
+﻿{
+    "OverallCorrelation":  [
+                               {
+                                   "Metric":  "CompletedDelta",
+                                   "CorrWithDisplayDelta":  0.957
+                               },
+                               {
+                                   "Metric":  "FrameIdDelta",
+                                   "CorrWithDisplayDelta":  0.747
+                               },
+                               {
+                                   "Metric":  "AckCooldownDelta",
+                                   "CorrWithDisplayDelta":  0.667
+                               },
+                               {
+                                   "Metric":  "AckStaleDroppedDelta",
+                                   "CorrWithDisplayDelta":  0.661
+                               },
+                               {
+                                   "Metric":  "ReceiverDeadlineNackMissingDelta",
+                                   "CorrWithDisplayDelta":  0.649
+                               },
+                               {
+                                   "Metric":  "ReceiverCooldownDelta",
+                                   "CorrWithDisplayDelta":  0.591
+                               },
+                               {
+                                   "Metric":  "AckReqDelta",
+                                   "CorrWithDisplayDelta":  0.544
+                               },
+                               {
+                                   "Metric":  "ReceiverReqDelta",
+                                   "CorrWithDisplayDelta":  0.51
+                               },
+                               {
+                                   "Metric":  "Latency",
+                                   "CorrWithDisplayDelta":  0.487
+                               },
+                               {
+                                   "Metric":  "IdrDelta",
+                                   "CorrWithDisplayDelta":  0.321
+                               },
+                               {
+                                   "Metric":  "LateCompletedDelta",
+                                   "CorrWithDisplayDelta":  0.299
+                               },
+                               {
+                                   "Metric":  "DropDelta",
+                                   "CorrWithDisplayDelta":  -0.24
+                               },
+                               {
+                                   "Metric":  "DeadlineExpiredDelta",
+                                   "CorrWithDisplayDelta":  -0.217
+                               },
+                               {
+                                   "Metric":  "EncoderReqDelta",
+                                   "CorrWithDisplayDelta":  0.216
+                               },
+                               {
+                                   "Metric":  "ReceiverDeadlineExpiredDelta",
+                                   "CorrWithDisplayDelta":  -0.213
+                               },
+                               {
+                                   "Metric":  "Jitter",
+                                   "CorrWithDisplayDelta":  -0.189
+                               },
+                               {
+                                   "Metric":  "AwaitingSyncReqDelta",
+                                   "CorrWithDisplayDelta":  0.088
+                               }
+                           ],
+    "PerRunCorrelation":  [
+                              {
+                                  "Seed":  8930,
+                                  "CorrFrameId":  0.768,
+                                  "CorrEncoderReq":  0.215,
+                                  "CorrAwaitingSync":  0.053,
+                                  "CorrDeadlineExpired":  -0.171,
+                                  "CorrJitter":  -0.178,
+                                  "CorrAckStale":  0.682
+                              },
+                              {
+                                  "Seed":  8931,
+                                  "CorrFrameId":  0.733,
+                                  "CorrEncoderReq":  0.167,
+                                  "CorrAwaitingSync":  0.117,
+                                  "CorrDeadlineExpired":  -0.257,
+                                  "CorrJitter":  -0.33,
+                                  "CorrAckStale":  0.613
+                              },
+                              {
+                                  "Seed":  8932,
+                                  "CorrFrameId":  0.766,
+                                  "CorrEncoderReq":  0.284,
+                                  "CorrAwaitingSync":  0.107,
+                                  "CorrDeadlineExpired":  -0.165,
+                                  "CorrJitter":  -0.006,
+                                  "CorrAckStale":  0.755
+                              }
+                          ]
+}
