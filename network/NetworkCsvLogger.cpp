@@ -1280,6 +1280,13 @@ namespace {
             << stats.h264InputGateSkippedInputFrames << ','
             << (stats.h264InputGateForcedOpen ? 1 : 0) << ','
             << EscapeCsv(stats.h264InputGateReleaseReason) << ','
+            << stats.h264KeySyncProtectedFrames << ','
+            << stats.h264KeySyncUepDuplicatePackets << ','
+            << stats.h264AdaptiveUepEnabledFrames << ','
+            << stats.h264AdaptiveUepSuppressedFrames << ','
+            << stats.h264AdaptiveUepPostEnableLatePressureFrames << ','
+            << EscapeCsv(stats.h264AdaptiveUepState) << ','
+            << EscapeCsv(stats.h264AdaptiveUepReason) << ','
             << stats.fecProtectedH264KeyFrames << ','
             << stats.fecProtectedH264LargeFrames << ','
             << stats.h264EncoderDelayFrames << ','
@@ -2173,6 +2180,13 @@ namespace {
             << "h264InputGateSkippedInputFrames,"
             << "h264InputGateForcedOpen,"
             << "h264InputGateReleaseReason,"
+            << "h264KeySyncProtectedFrames,"
+            << "h264KeySyncUepDuplicatePackets,"
+            << "h264AdaptiveUepEnabledFrames,"
+            << "h264AdaptiveUepSuppressedFrames,"
+            << "h264AdaptiveUepPostEnableLatePressureFrames,"
+            << "h264AdaptiveUepState,"
+            << "h264AdaptiveUepReason,"
             << "fecProtectedH264KeyFrames,"
             << "fecProtectedH264LargeFrames,"
             << "h264EncoderDelayFrames,"

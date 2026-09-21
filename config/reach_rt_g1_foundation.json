@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "stage": "foundation",
+  "task": "T1",
+  "seed": 101,
+  "duration_s": 60,
+  "tick_rates_hz": {
+    "physics": 100,
+    "camera": 30,
+    "control": 20
+  },
+  "max_catchup_steps": 5
+}

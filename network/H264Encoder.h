@@ -6,6 +6,7 @@
 #include <d3d11.h>
 #include <wrl.h>
 #include <vector>
+#include <deque>
 
 class H264Encoder {
 public:
@@ -49,6 +50,18 @@ public:
     bool FlushDelayedFrames(std::vector<std::vector<BYTE>>& flushedFrames);
     FrameTiming GetLastFrameTiming() const;
 
+    struct TrackedAccessUnit {
+        std::vector<BYTE> bytes;
+        int64_t pts100ns=0;
+        bool ptsValid=false;
+    };
+    // Research path: explicitly supplied capture PTS survives asynchronous output.
+    // Do not mix tracked and legacy submission APIs on the same encoder instance.
+    bool SubmitTrackedFrame(const BYTE* nv12, UINT size, int64_t capturePts100ns);
+    bool PollTrackedOutput(TrackedAccessUnit& output);
+    bool BeginTrackedDrain();
+    bool TrackedDrainComplete() const { return trackedDrainComplete_; }
+
 private:
     bool InitializeInternal(
         UINT32 width,
@@ -83,5 +96,10 @@ private:
     bool hardwareNeedsInput_ = false;
     LONGLONG frameCount_ = 0;
     FrameTiming lastFrameTiming_{};
+    bool trackedMode_=false, trackedDraining_=false, trackedDrainComplete_=false;
+    bool trackedError_=false;
+    int64_t lastOutputPts100ns_=0;
+    bool lastOutputPtsValid_=false;
+    std::deque<TrackedAccessUnit> trackedOutputs_;
     std::vector<uint8_t> spsPpsBuffer_;  // SPS / PPS を保存するバッファ
 };

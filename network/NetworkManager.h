@@ -50,6 +50,8 @@ public:
         bool highPriorityData = false;
         bool highPriorityFec = false;
         uint64_t extraPacingDeadlineUs = 0;
+        uint16_t uepDuplicateFirstChunkCount = 0;
+        uint8_t uepDuplicatePacketCopies = 0;
     };
 
     NetworkManager(const std::string& ip, uint16_t port);
@@ -313,6 +315,18 @@ private:
     );
 
     bool SendRNVPFecParity(
+        const std::vector<uint8_t>& data,
+        uint32_t frameId,
+        net::CodecType codecType,
+        uint32_t streamId,
+        bool keyFrame,
+        uint16_t chunkCount,
+        uint64_t sendTimeUs,
+        const char* context,
+        const RnvpFrameProtectionOptions& protection
+    );
+
+    uint32_t SendRNVPKeySyncUepDuplicates(
         const std::vector<uint8_t>& data,
         uint32_t frameId,
         net::CodecType codecType,

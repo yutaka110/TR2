@@ -890,6 +890,18 @@ bool NetworkManager::SendRNVPFramePackets(
         protection
     );
 
+    SendRNVPKeySyncUepDuplicates(
+        data,
+        frameId,
+        codecType,
+        streamId,
+        keyFrame,
+        chunkCount,
+        sendTimeUs,
+        context,
+        protection
+    );
+
     return true;
 }
 
@@ -1040,6 +1052,105 @@ bool NetworkManager::SendRNVPFecParity(
     }
 
     return sentAnyParity;
+}
+
+uint32_t NetworkManager::SendRNVPKeySyncUepDuplicates(
+    const std::vector<uint8_t>& data,
+    uint32_t frameId,
+    net::CodecType codecType,
+    uint32_t streamId,
+    bool keyFrame,
+    uint16_t chunkCount,
+    uint64_t sendTimeUs,
+    const char* context,
+    const RnvpFrameProtectionOptions& protection
+) {
+    if (udpSocket_ == INVALID_SOCKET ||
+        data.empty() ||
+        chunkCount == 0 ||
+        protection.uepDuplicateFirstChunkCount == 0 ||
+        protection.uepDuplicatePacketCopies == 0) {
+        return 0;
+    }
+
+    const size_t maxPayload = net::kMaxUdpPayloadSize;
+    const size_t totalSize = data.size();
+    const uint16_t duplicateChunkCount =
+        (std::min)(
+            chunkCount,
+            protection.uepDuplicateFirstChunkCount);
+    const uint8_t duplicateCopies =
+        (std::min<uint8_t>)(
+            protection.uepDuplicatePacketCopies,
+            uint8_t{ 3 });
+    const uint64_t duplicateDeadlineUs =
+        FramePacingDeadlineUs(sendTimeUs) +
+        protection.extraPacingDeadlineUs;
+    const net::PacketPacingPriority duplicatePriority =
+        net::PacketPacingPriority::Critical;
+
+    uint32_t sentPackets = 0;
+    for (uint8_t copy = 0; copy < duplicateCopies; ++copy) {
+        for (uint16_t chunkIndex = 0;
+            chunkIndex < duplicateChunkCount;
+            ++chunkIndex) {
+            const size_t offset =
+                static_cast<size_t>(chunkIndex) * maxPayload;
+            if (offset >= totalSize) {
+                continue;
+            }
+
+            const size_t payloadSize =
+                (std::min)(maxPayload, totalSize - offset);
+            std::vector<uint8_t> packet(
+                net::kRnvpHeaderV1Size + payloadSize);
+
+            net::RnvpHeaderV1 header{};
+            header.magic = net::kRnvpMagic;
+            header.version = net::kRnvpVersion;
+            header.packetType = static_cast<uint8_t>(net::PacketType::Data);
+            header.headerSize =
+                static_cast<uint16_t>(net::kRnvpHeaderV1Size);
+            header.sequence = NextRNVPSequence();
+            header.streamId = streamId;
+            header.frameId = frameId;
+            header.chunkIndex = chunkIndex;
+            header.chunkCount = chunkCount;
+            header.sendTimeUs = sendTimeUs;
+            header.payloadSize = static_cast<uint32_t>(payloadSize);
+            header.flags =
+                chunkIndex == chunkCount - 1
+                ? net::PacketFlag_LastChunk
+                : net::PacketFlag_None;
+            header.flags = net::AddPacketFlag(
+                header.flags,
+                net::PacketFlag_Retransmit);
+            header.flags = net::AddPacketFlag(
+                header.flags,
+                net::PacketFlag_EmergencyRepair);
+            if (keyFrame) {
+                header.flags = net::AddPacketFlag(
+                    header.flags,
+                    net::PacketFlag_KeyFrame);
+            }
+            header.codecType = static_cast<uint8_t>(codecType);
+
+            net::EncodeRnvpHeaderV1(packet.data(), header);
+            std::memcpy(
+                packet.data() + net::kRnvpHeaderV1Size,
+                data.data() + offset,
+                payloadSize);
+
+            SendPacedPacketWithSimulation(
+                std::move(packet),
+                "RNVP H264 Key Sync UEP Duplicate",
+                duplicatePriority,
+                duplicateDeadlineUs);
+            sentPackets++;
+        }
+    }
+
+    return sentPackets;
 }
 
 uint32_t NetworkManager::SendRNVPSelectedChunks(
@@ -5271,6 +5382,12 @@ bool NetworkManager::SendPacketRaw(
             << WSAGetLastError()
             << "\n";
         return false;
+    }
+
+    if(GetEnvironmentVariableA("TR2_REACH_PACKET_TRACE",nullptr,0)) {
+        net::RnvpHeaderV1 h{};
+        if(net::DecodeRnvpHeaderV1(packetData,packetSize,h))
+            fprintf(stderr,"packet_tx,%u,%u,%u,%zu\n",h.sequence,h.frameId,h.chunkIndex,packetSize);
     }
 
     return true;

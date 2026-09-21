@@ -24,7 +24,7 @@ namespace net {
         constexpr uint32_t kH264KeyTinyMissingChunkThreshold = 2;
         constexpr uint64_t kH264KeyTinyLastChanceMinSlackUs = 8000;
         constexpr uint64_t kH264KeyTinyLastChanceMaxSlackUs = 12000;
-        constexpr uint32_t kH264KeySmallMissingMaxDeadlineRescues = 0;
+        constexpr uint32_t kH264KeySmallMissingMaxDeadlineRescues = 1;
         constexpr uint64_t kH264KeySmallMissingDeadlineRescueUs = 22000;
         constexpr uint64_t kH264KeyTinyMissingDeadlineRescueUs = 30000;
         constexpr uint64_t kH264KeySmallMissingLateRescueWindowUs = 15000;

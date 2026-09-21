@@ -85,6 +85,7 @@
 #include "../network/PacketProtocol.h"
 #include "../network/H264Encoder.h"
 #include "../network/NalUtils.h"
+#include "../research/ReachFoundation.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -1689,6 +1690,10 @@ void AppMain::Finalize() {
 }
 
 int AppMain::Run() {
+	int researchExitCode = 0;
+	if (reach::RunResearchModeFromEnvironment(researchExitCode)) {
+		return researchExitCode;
+	}
 	TraceStartup("run-enter");
 	D3DResourceLeakChecker leakCheck;
 
@@ -2276,6 +2281,13 @@ int AppMain::Run() {
 		uint64_t h264InputGateSkippedInputFrames = 0;
 		bool h264InputGateForcedOpen = false;
 		std::string h264InputGateReleaseReason;
+		uint64_t h264KeySyncProtectedFrames = 0;
+		uint64_t h264KeySyncUepDuplicatePackets = 0;
+		uint64_t h264AdaptiveUepEnabledFrames = 0;
+		uint64_t h264AdaptiveUepSuppressedFrames = 0;
+		uint64_t h264AdaptiveUepPostEnableLatePressureFrames = 0;
+		std::string h264AdaptiveUepState;
+		std::string h264AdaptiveUepReason;
 		uint64_t fecProtectedH264KeyFrames = 0;
 		uint64_t fecProtectedH264LargeFrames = 0;
 		uint32_t h264EncoderDelayFrames = 0;
@@ -2897,6 +2909,21 @@ int AppMain::Run() {
 					sendTelemetry->h264InputGateForcedOpen;
 				stats.h264InputGateReleaseReason =
 					sendTelemetry->h264InputGateReleaseReason;
+				stats.h264KeySyncProtectedFrames =
+					sendTelemetry->h264KeySyncProtectedFrames;
+				stats.h264KeySyncUepDuplicatePackets =
+					sendTelemetry->h264KeySyncUepDuplicatePackets;
+				stats.h264AdaptiveUepEnabledFrames =
+					sendTelemetry->h264AdaptiveUepEnabledFrames;
+				stats.h264AdaptiveUepSuppressedFrames =
+					sendTelemetry->h264AdaptiveUepSuppressedFrames;
+				stats.h264AdaptiveUepPostEnableLatePressureFrames =
+					sendTelemetry
+						->h264AdaptiveUepPostEnableLatePressureFrames;
+				stats.h264AdaptiveUepState =
+					sendTelemetry->h264AdaptiveUepState;
+				stats.h264AdaptiveUepReason =
+					sendTelemetry->h264AdaptiveUepReason;
 				stats.fecProtectedH264KeyFrames =
 					sendTelemetry->fecProtectedH264KeyFrames;
 				stats.fecProtectedH264LargeFrames =
@@ -3476,6 +3503,7 @@ int AppMain::Run() {
 			networkManager = networkManager.get(),
 			adaptiveController = adaptiveController.get(),
 			adaptiveMutex = &adaptiveControllerMutex,
+			udpReceiver = udpReceiver.get(),
 			cameraCapture = cameraCapture.get(),
 			cameraCaptureEnabled,
 			&sendTelemetry,
@@ -3501,6 +3529,13 @@ int AppMain::Run() {
 		uint64_t h264DynamicBitrateUpdateSuccesses = 0;
 		uint64_t h264DynamicBitrateUpdateFailures = 0;
 		uint64_t h264EncoderReinitializations = 0;
+		uint64_t h264KeySyncProtectedFrames = 0;
+		uint64_t h264KeySyncUepDuplicatePackets = 0;
+		uint64_t h264AdaptiveUepEnabledFrames = 0;
+		uint64_t h264AdaptiveUepSuppressedFrames = 0;
+		uint64_t h264AdaptiveUepPostEnableLatePressureFrames = 0;
+		std::string h264AdaptiveUepState = "idle";
+		std::string h264AdaptiveUepReason = "startup";
 		uint64_t fecProtectedH264KeyFrames = 0;
 		uint64_t fecProtectedH264LargeFrames = 0;
 		uint64_t h264RequestedKeyFrameConsumedFrames = 0;
@@ -3515,6 +3550,13 @@ int AppMain::Run() {
 		bool h264DecoderSyncSent = false;
 		bool h264AwaitingDecoderSync = true;
 		std::chrono::steady_clock::time_point h264LastKeyProtectionTime{};
+		uint32_t h264AdaptiveUepBoostFramesRemaining = 0;
+		uint32_t h264AdaptiveUepCooldownFramesRemaining = 0;
+		uint32_t h264AdaptiveUepPostEnableGuardFramesRemaining = 0;
+		uint64_t h264AdaptiveUepLastLateAfterCompletedPackets = 0;
+		uint64_t h264AdaptiveUepLastExpiredKeyFrames = 0;
+		uint64_t h264AdaptiveUepLastTrueSyncLoss = 0;
+		bool h264AdaptiveUepCountersPrimed = false;
 		std::vector<uint8_t> h264Nv12Frame;
 		struct H264PendingInputFrame {
 			uint64_t sequence = 0;
@@ -4944,6 +4986,21 @@ int AppMain::Run() {
 						h264InputGateForcedOpen;
 					sendTelemetry.h264InputGateReleaseReason =
 						h264InputGateReleaseReason;
+					sendTelemetry.h264KeySyncProtectedFrames =
+						h264KeySyncProtectedFrames;
+					sendTelemetry.h264KeySyncUepDuplicatePackets =
+						h264KeySyncUepDuplicatePackets;
+					sendTelemetry.h264AdaptiveUepEnabledFrames =
+						h264AdaptiveUepEnabledFrames;
+					sendTelemetry.h264AdaptiveUepSuppressedFrames =
+						h264AdaptiveUepSuppressedFrames;
+					sendTelemetry
+						.h264AdaptiveUepPostEnableLatePressureFrames =
+						h264AdaptiveUepPostEnableLatePressureFrames;
+					sendTelemetry.h264AdaptiveUepState =
+						h264AdaptiveUepState;
+					sendTelemetry.h264AdaptiveUepReason =
+						h264AdaptiveUepReason;
 					sendTelemetry.fecProtectedH264KeyFrames =
 						fecProtectedH264KeyFrames;
 					sendTelemetry.fecProtectedH264LargeFrames =
@@ -5138,6 +5195,10 @@ int AppMain::Run() {
 				h264AuHeaderValid &&
 				((h264AuHeader.flags &
 					net::H264AccessUnitFlag_DecoderSync) != 0);
+			const bool h264AuContainsSpsPps =
+				h264AuHeaderValid &&
+				((h264AuHeader.flags &
+					net::H264AccessUnitFlag_ContainsSpsPps) != 0);
 			if (sendCodec == net::CodecType::H264 &&
 				!encodedPayload.empty()) {
 				if (h264AuIsIdr) {
@@ -5178,6 +5239,178 @@ int AppMain::Run() {
 					(h264FrameBudgetBytes > 0.0 &&
 						static_cast<double>(encodedPayload.size()) >
 						h264FrameBudgetBytes * 1.35));
+			const bool h264AdaptiveUepConfigEnabled =
+				ReadEnvBool("RNVP_H264_ADAPTIVE_UEP_ENABLED", true);
+			const uint32_t h264AdaptiveUepBoostFrameBudget =
+				static_cast<uint32_t>(
+					ReadEnvDoubleClamped(
+						"RNVP_H264_ADAPTIVE_UEP_BOOST_FRAMES",
+						1.0,
+						1.0,
+						10.0));
+			const uint32_t h264AdaptiveUepCooldownFrames =
+				static_cast<uint32_t>(
+					ReadEnvDoubleClamped(
+						"RNVP_H264_ADAPTIVE_UEP_COOLDOWN_FRAMES",
+						8.0,
+						1.0,
+						90.0));
+			const uint64_t h264AdaptiveUepLateDeltaLimit =
+				static_cast<uint64_t>(
+					ReadEnvDoubleClamped(
+						"RNVP_H264_ADAPTIVE_UEP_LATE_DELTA_LIMIT",
+						1.0,
+						0.0,
+						32.0));
+			const uint32_t h264AdaptiveUepLateGuardFrames =
+				static_cast<uint32_t>(
+					ReadEnvDoubleClamped(
+						"RNVP_H264_ADAPTIVE_UEP_LATE_GUARD_FRAMES",
+						12.0,
+						1.0,
+						120.0));
+			const uint32_t h264AdaptiveUepLateCooldownFrames =
+				static_cast<uint32_t>(
+					ReadEnvDoubleClamped(
+						"RNVP_H264_ADAPTIVE_UEP_LATE_COOLDOWN_FRAMES",
+						24.0,
+						1.0,
+						180.0));
+			const double h264AdaptiveUepMaxQueueDelayMs =
+				ReadEnvDoubleClamped(
+					"RNVP_H264_ADAPTIVE_UEP_MAX_QUEUE_DELAY_MS",
+					15.0,
+					1.0,
+					120.0);
+			const double h264AdaptiveUepMaxBudgetRatio =
+				ReadEnvDoubleClamped(
+					"RNVP_H264_ADAPTIVE_UEP_MAX_BUDGET_RATIO",
+					1.30,
+					0.50,
+					4.00);
+			uint64_t h264AdaptiveUepLateDelta = 0;
+			uint64_t h264AdaptiveUepExpiredKeyDelta = 0;
+			uint64_t h264AdaptiveUepTrueSyncLossDelta = 0;
+			if (h264AdaptiveUepConfigEnabled &&
+				udpReceiver != nullptr) {
+				const net::NetworkStatsSnapshot uepReceiverStats =
+					udpReceiver->GetStats();
+				if (!h264AdaptiveUepCountersPrimed) {
+					h264AdaptiveUepCountersPrimed = true;
+				}
+				else {
+					if (uepReceiverStats.retransmitLateAfterCompletedPackets >=
+						h264AdaptiveUepLastLateAfterCompletedPackets) {
+						h264AdaptiveUepLateDelta =
+							uepReceiverStats
+								.retransmitLateAfterCompletedPackets -
+							h264AdaptiveUepLastLateAfterCompletedPackets;
+					}
+					if (uepReceiverStats.deadlineNackExpiredH264KeyFrames >=
+						h264AdaptiveUepLastExpiredKeyFrames) {
+						h264AdaptiveUepExpiredKeyDelta =
+							uepReceiverStats
+								.deadlineNackExpiredH264KeyFrames -
+							h264AdaptiveUepLastExpiredKeyFrames;
+					}
+					if (uepReceiverStats
+							.h264KeyFrameRequestReceiverTrueSyncLoss >=
+						h264AdaptiveUepLastTrueSyncLoss) {
+						h264AdaptiveUepTrueSyncLossDelta =
+							uepReceiverStats
+								.h264KeyFrameRequestReceiverTrueSyncLoss -
+							h264AdaptiveUepLastTrueSyncLoss;
+					}
+				}
+				h264AdaptiveUepLastLateAfterCompletedPackets =
+					uepReceiverStats.retransmitLateAfterCompletedPackets;
+				h264AdaptiveUepLastExpiredKeyFrames =
+					uepReceiverStats.deadlineNackExpiredH264KeyFrames;
+				h264AdaptiveUepLastTrueSyncLoss =
+					uepReceiverStats
+						.h264KeyFrameRequestReceiverTrueSyncLoss;
+			}
+			if (h264AdaptiveUepConfigEnabled &&
+				(requestedKeyFrame ||
+					h264AdaptiveUepExpiredKeyDelta > 0 ||
+					h264AdaptiveUepTrueSyncLossDelta > 0)) {
+				h264AdaptiveUepBoostFramesRemaining =
+					(std::max)(
+						h264AdaptiveUepBoostFramesRemaining,
+						h264AdaptiveUepBoostFrameBudget);
+			}
+			if (h264AdaptiveUepPostEnableGuardFramesRemaining > 0) {
+				h264AdaptiveUepPostEnableGuardFramesRemaining--;
+			}
+			const net::PacketPacerStats h264AdaptiveUepPacingStats =
+				networkManager != nullptr
+				? networkManager->GetPacingStats()
+				: net::PacketPacerStats{};
+			const bool h264AdaptiveUepPostEnableLatePressure =
+				h264AdaptiveUepConfigEnabled &&
+				h264AdaptiveUepLateDelta > 0 &&
+				h264AdaptiveUepPostEnableGuardFramesRemaining > 0;
+			if (h264AdaptiveUepPostEnableLatePressure) {
+				h264AdaptiveUepPostEnableLatePressureFrames++;
+			}
+			const bool h264AdaptiveUepRepairPressure =
+				h264AdaptiveUepConfigEnabled &&
+				((h264AdaptiveUepLateDeltaLimit > 0 &&
+						h264AdaptiveUepLateDelta >=
+							h264AdaptiveUepLateDeltaLimit) ||
+					h264AdaptiveUepPostEnableLatePressure);
+			const bool h264AdaptiveUepQueuePressure =
+				h264AdaptiveUepConfigEnabled &&
+				h264AdaptiveUepPacingStats.currentQueueDelayMs >
+					h264AdaptiveUepMaxQueueDelayMs;
+			const bool h264AdaptiveUepAuPressure =
+				h264AdaptiveUepConfigEnabled &&
+				h264AuBudgetRatio > h264AdaptiveUepMaxBudgetRatio;
+			if (h264AdaptiveUepRepairPressure ||
+				h264AdaptiveUepQueuePressure ||
+				h264AdaptiveUepAuPressure) {
+				const uint32_t cooldownFrameBudget =
+					h264AdaptiveUepPostEnableLatePressure
+					? h264AdaptiveUepLateCooldownFrames
+					: h264AdaptiveUepCooldownFrames;
+				h264AdaptiveUepCooldownFramesRemaining =
+					(std::max)(
+						h264AdaptiveUepCooldownFramesRemaining,
+						cooldownFrameBudget);
+				if (h264AdaptiveUepRepairPressure) {
+					h264AdaptiveUepBoostFramesRemaining = 0;
+				}
+				h264AdaptiveUepState = "pressure-cooldown";
+				if (h264AdaptiveUepPostEnableLatePressure) {
+					h264AdaptiveUepReason = "post-uep-repair-late";
+				}
+				else if (h264AdaptiveUepRepairPressure) {
+					h264AdaptiveUepReason = "repair-late";
+				}
+				else if (h264AdaptiveUepQueuePressure) {
+					h264AdaptiveUepReason = "pacing-queue";
+				}
+				else {
+					h264AdaptiveUepReason = "au-budget";
+				}
+			}
+			else if (h264AdaptiveUepCooldownFramesRemaining > 0) {
+				h264AdaptiveUepCooldownFramesRemaining--;
+				h264AdaptiveUepState = "pressure-cooldown";
+				h264AdaptiveUepReason = "cooldown";
+			}
+			else if (!h264AdaptiveUepConfigEnabled) {
+				h264AdaptiveUepState = "disabled";
+				h264AdaptiveUepReason = "env-disabled";
+			}
+			else if (h264AdaptiveUepBoostFramesRemaining > 0) {
+				h264AdaptiveUepState = "recovery-boost";
+				h264AdaptiveUepReason = "sync-recovery";
+			}
+			else {
+				h264AdaptiveUepState = "idle";
+				h264AdaptiveUepReason = "steady";
+			}
 			bool h264AuDroppedBeforeSend = false;
 			std::string h264AuDropReason;
 			uint64_t h264AuDroppedBytes = 0;
@@ -5198,7 +5431,9 @@ int AppMain::Run() {
 					250.0,
 					5000.0);
 			if (sendCodec == net::CodecType::H264 &&
-				(h264AuIsIdr || h264AuIsDecoderSync)) {
+				(h264AuIsIdr ||
+					h264AuIsDecoderSync ||
+					h264AuContainsSpsPps)) {
 				const auto keyProtectionNow =
 					std::chrono::steady_clock::now();
 				const bool keyProtectionNeverSent =
@@ -5211,21 +5446,81 @@ int AppMain::Run() {
 						h264LastKeyProtectionTime).count();
 				const bool h264StrongKeyProtectionDue =
 					h264KeyProtectionEnabled &&
-					h264AuIsIdr &&
+					(h264AuIsIdr ||
+						h264AuIsDecoderSync ||
+						h264AuContainsSpsPps) &&
 					(keyProtectionNeverSent ||
 						keyProtectionElapsedMs >=
 							h264KeyProtectionIntervalMs);
-				if (h264AuProtectionEnabled ||
-					h264StrongKeyProtectionDue) {
-					protection.fecGroupChunkCountOverride = 4;
+				if (h264KeyProtectionEnabled ||
+					h264AuProtectionEnabled) {
+					protection.fecGroupChunkCountOverride = 2;
 					protection.forceFec = true;
 					protection.highPriorityData = true;
 					protection.highPriorityFec = true;
-					protection.extraPacingDeadlineUs = 30000;
+					protection.extraPacingDeadlineUs = 45000;
+					const bool h264AdaptiveUepCandidate =
+						h264AdaptiveUepConfigEnabled &&
+						h264KeyProtectionEnabled &&
+						(keyProtectionNeverSent ||
+							h264StrongKeyProtectionDue ||
+							h264AdaptiveUepBoostFramesRemaining > 0);
+					const bool h264AdaptiveUepAllowed =
+						h264AdaptiveUepCandidate &&
+						h264AdaptiveUepCooldownFramesRemaining == 0 &&
+						!h264AdaptiveUepRepairPressure &&
+						!h264AdaptiveUepQueuePressure &&
+						!h264AdaptiveUepAuPressure;
+					if (h264AdaptiveUepAllowed) {
+						protection.uepDuplicateFirstChunkCount =
+							static_cast<uint16_t>(
+								ReadEnvDoubleClamped(
+									"RNVP_H264_KEY_SYNC_UEP_DUP_CHUNKS",
+									1.0,
+									0.0,
+									8.0));
+						protection.uepDuplicatePacketCopies =
+							static_cast<uint8_t>(
+								ReadEnvDoubleClamped(
+									"RNVP_H264_KEY_SYNC_UEP_DUP_COPIES",
+									1.0,
+									0.0,
+									3.0));
+						h264AdaptiveUepEnabledFrames++;
+						h264AdaptiveUepPostEnableGuardFramesRemaining =
+							(std::max)(
+								h264AdaptiveUepPostEnableGuardFramesRemaining,
+								h264AdaptiveUepLateGuardFrames);
+						if (h264AdaptiveUepBoostFramesRemaining > 0) {
+							h264AdaptiveUepBoostFramesRemaining--;
+						}
+						h264AdaptiveUepState = "recovery-boost";
+						h264AdaptiveUepReason =
+							keyProtectionNeverSent
+							? "startup-sync"
+							: "key-sync";
+					}
+					else if (h264AdaptiveUepCandidate) {
+						h264AdaptiveUepSuppressedFrames++;
+						protection.uepDuplicateFirstChunkCount = 0;
+						protection.uepDuplicatePacketCopies = 0;
+					}
 					h264AuProtectionLevel =
-						h264StrongKeyProtectionDue
-						? "keyframe-g4-priority"
-						: "decoder-sync-g4";
+						h264AdaptiveUepAllowed
+						? "key-sync-g2-adaptive-uep"
+						: (h264AdaptiveUepCandidate
+							? "key-sync-g2-adaptive-suppressed"
+							: (h264StrongKeyProtectionDue
+								? "key-sync-g2-priority"
+								: "key-sync-g2-hold"));
+					h264KeySyncProtectedFrames++;
+					h264KeySyncUepDuplicatePackets +=
+						static_cast<uint64_t>(
+							(std::min<uint32_t>)(
+								h264AuChunkCount,
+								protection.uepDuplicateFirstChunkCount)) *
+						static_cast<uint64_t>(
+							protection.uepDuplicatePacketCopies);
 					fecProtectedH264KeyFrames++;
 					if (h264StrongKeyProtectionDue) {
 						h264LastKeyProtectionTime = keyProtectionNow;
@@ -5405,6 +5700,20 @@ int AppMain::Run() {
 					h264InputGateForcedOpen;
 				sendTelemetry.h264InputGateReleaseReason =
 					h264InputGateReleaseReason;
+				sendTelemetry.h264KeySyncProtectedFrames =
+					h264KeySyncProtectedFrames;
+				sendTelemetry.h264KeySyncUepDuplicatePackets =
+					h264KeySyncUepDuplicatePackets;
+				sendTelemetry.h264AdaptiveUepEnabledFrames =
+					h264AdaptiveUepEnabledFrames;
+				sendTelemetry.h264AdaptiveUepSuppressedFrames =
+					h264AdaptiveUepSuppressedFrames;
+				sendTelemetry.h264AdaptiveUepPostEnableLatePressureFrames =
+					h264AdaptiveUepPostEnableLatePressureFrames;
+				sendTelemetry.h264AdaptiveUepState =
+					h264AdaptiveUepState;
+				sendTelemetry.h264AdaptiveUepReason =
+					h264AdaptiveUepReason;
 				sendTelemetry.fecProtectedH264KeyFrames =
 					fecProtectedH264KeyFrames;
 				sendTelemetry.fecProtectedH264LargeFrames =

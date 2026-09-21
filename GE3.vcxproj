@@ -175,6 +175,11 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="application\AppRunLoop.cpp" />
     <ClCompile Include="application\AppImGuiLayer.cpp" />
     <ClCompile Include="application\AppMain.cpp" />
+    <ClCompile Include="research\ReachJson.cpp" />
+    <ClCompile Include="research\ReachFoundation.cpp" />
+    <ClCompile Include="research\ReachResearchMode.cpp" />
+    <ClCompile Include="research\ReachRobotWorld.cpp" />
+    <ClCompile Include="research\ReachRobotVideo.cpp" />
     <ClCompile Include="application\AppParticleSystem.cpp" />
     <ClCompile Include="application\AppPipelines.cpp" />
     <ClCompile Include="application\AppRuntimeUtils.cpp" />
@@ -368,6 +373,11 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="application\AppRenderResources.h" />
     <ClInclude Include="application\AppImGuiLayer.h" />
     <ClInclude Include="application\AppMain.h" />
+    <ClInclude Include="research\ReachJson.h" />
+    <ClInclude Include="research\ReachFoundation.h" />
+    <ClInclude Include="research\ReachRobotWorld.h" />
+    <ClInclude Include="research\ReachRobotVideo.h" />
+    <ClInclude Include="network\FrameIdentityLedger.h" />
     <ClInclude Include="application\AppParticleSystem.h" />
     <ClInclude Include="application\AppPipelines.h" />
     <ClInclude Include="application\AppRuntimeState.h" />

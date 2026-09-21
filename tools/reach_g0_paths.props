@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Imported only by the G0 build script; normal project outputs stay unchanged. -->
+  <PropertyGroup Condition="'$(ReachG0Root)' != ''">
+    <OutDir>$(ReachG0Root)\bin\$(Configuration)\</OutDir>
+    <IntDir>$(ReachG0Root)\obj\$(MSBuildProjectName)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+</Project>

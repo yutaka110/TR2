@@ -104,11 +104,12 @@ namespace {
         Stop();
     }
 
-    bool UdpReceiver::Start(uint16_t listenPort) {
+    bool UdpReceiver::Start(uint16_t listenPort, bool loopbackOnly, bool orderedDecodeQueue) {
         if (running_) {
             return true;
         }
 
+        orderedDecodeQueue_=orderedDecodeQueue;
         WSADATA wsaData{};
         int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
         if (wsaResult != 0) {
@@ -126,7 +127,7 @@ namespace {
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(listenPort);
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_addr.s_addr = htonl(loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
 
         if (bind(socket_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
             std::cerr << "[UdpReceiver] bind failed: " << WSAGetLastError() << "\n";
@@ -136,7 +137,20 @@ namespace {
             return false;
         }
 
-        const DWORD receiveTimeoutMs = 10;
+        int addressBytes=sizeof(addr);
+        if(getsockname(socket_,reinterpret_cast<sockaddr*>(&addr),&addressBytes)==SOCKET_ERROR) {
+            closesocket(socket_); socket_=INVALID_SOCKET; WSACleanup(); return false;
+        }
+        boundPort_=ntohs(addr.sin_port);
+        if(orderedDecodeQueue_) {
+            const int bytes=4*1024*1024;
+            if(setsockopt(socket_,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&bytes),sizeof(bytes))==SOCKET_ERROR) {
+                closesocket(socket_);socket_=INVALID_SOCKET;WSACleanup();return false;
+            }
+        }
+        int bufferOptionBytes=sizeof(receiveBufferBytes_);
+        getsockopt(socket_,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<char*>(&receiveBufferBytes_),&bufferOptionBytes);
+        const DWORD receiveTimeoutMs = orderedDecodeQueue_ ? 0 : 10;
         setsockopt(
             socket_,
             SOL_SOCKET,
@@ -273,6 +287,10 @@ namespace {
         lastRnvpDataAddr_ = sockaddr_in{};
         consecutiveIncompleteFrames_ = 0;
         lastKeyFrameRequestUs_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(keyFrameRequestMutex_);
+            pendingKeyFrameRequest_ = {};
+        }
         pendingTransportFeedback_.clear();
         hasLastTransportFeedbackSequence_ = false;
         lastTransportFeedbackSequence_ = 0;
@@ -337,16 +355,182 @@ namespace {
 
     void UdpReceiver::RequestKeyFrame(
         uint32_t frameId,
-        const char* reason
+        const char* reason,
+        bool syncRisk
     ) {
         const uint64_t nowUs = NowMicroseconds();
-        if (!hasLastRnvpDataAddr_ ||
-            (lastKeyFrameRequestUs_ != 0 &&
-                nowUs <= lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs)) {
-            stats_.OnH264ReceiverKeyFrameRequest(reason, false);
+        if (!hasLastRnvpDataAddr_) {
+            stats_.OnH264ReceiverKeyFrameRequest(
+                reason,
+                false,
+                syncRisk);
             return;
         }
 
+        RequestKeyFrameInternal(
+            frameId,
+            reason,
+            syncRisk,
+            nowUs,
+            lastRnvpDataAddr_);
+    }
+
+    UdpReceiver::KeyFrameRequestPriority
+    UdpReceiver::ClassifyKeyFrameRequest(
+        const char* reason,
+        bool syncRisk
+    ) const {
+        const std::string reasonText =
+            reason != nullptr ? reason : "unknown";
+        if (reasonText == "payload-header-failure" ||
+            reasonText == "au-invalid" ||
+            reasonText == "init-wait-idr" ||
+            reasonText == "waiting-for-idr" ||
+            reasonText == "decode-failure") {
+            return KeyFrameRequestPriority::HardSyncLoss;
+        }
+
+        if (syncRisk ||
+            reasonText == "stale-after-decode") {
+            return KeyFrameRequestPriority::SyncRisk;
+        }
+
+        if (reasonText == "deadline-expired" ||
+            reasonText == "deadline-nack-missing" ||
+            reasonText == "missing-ack") {
+            return KeyFrameRequestPriority::Recovery;
+        }
+
+        return KeyFrameRequestPriority::Noise;
+    }
+
+    bool UdpReceiver::IsHigherPriorityKeyFrameRequest(
+        KeyFrameRequestPriority lhs,
+        KeyFrameRequestPriority rhs
+    ) const {
+        return static_cast<int>(lhs) > static_cast<int>(rhs);
+    }
+
+    void UdpReceiver::RequestKeyFrameInternal(
+        uint32_t frameId,
+        const char* reason,
+        bool syncRisk,
+        uint64_t nowUs,
+        const sockaddr_in& toAddr
+    ) {
+        const std::string reasonText =
+            reason != nullptr ? reason : "unknown";
+        const KeyFrameRequestPriority priority =
+            ClassifyKeyFrameRequest(reason, syncRisk);
+        bool sendNow = false;
+        uint32_t sendFrameId = frameId;
+        std::string sendReason = reasonText;
+        bool sendSyncRisk = syncRisk;
+        sockaddr_in sendAddr = toAddr;
+
+        {
+            std::lock_guard<std::mutex> lock(keyFrameRequestMutex_);
+            const bool cooldownElapsed =
+                lastKeyFrameRequestUs_ == 0 ||
+                nowUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
+
+            if (cooldownElapsed) {
+                if (pendingKeyFrameRequest_.active &&
+                    (IsHigherPriorityKeyFrameRequest(
+                            pendingKeyFrameRequest_.priority,
+                            priority) ||
+                        (pendingKeyFrameRequest_.priority == priority &&
+                            pendingKeyFrameRequest_.lastRequestUs <= nowUs))) {
+                    sendFrameId = pendingKeyFrameRequest_.frameId;
+                    sendReason = pendingKeyFrameRequest_.reason;
+                    sendSyncRisk = pendingKeyFrameRequest_.syncRisk;
+                    sendAddr = pendingKeyFrameRequest_.toAddr;
+                }
+                pendingKeyFrameRequest_ = {};
+                lastKeyFrameRequestUs_ = nowUs;
+                sendNow = true;
+            }
+            else if (!pendingKeyFrameRequest_.active ||
+                IsHigherPriorityKeyFrameRequest(
+                    priority,
+                    pendingKeyFrameRequest_.priority)) {
+                pendingKeyFrameRequest_.active = true;
+                pendingKeyFrameRequest_.frameId = frameId;
+                pendingKeyFrameRequest_.reason = reasonText;
+                pendingKeyFrameRequest_.syncRisk = syncRisk;
+                pendingKeyFrameRequest_.priority = priority;
+                pendingKeyFrameRequest_.firstRequestUs =
+                    pendingKeyFrameRequest_.firstRequestUs == 0
+                    ? nowUs
+                    : pendingKeyFrameRequest_.firstRequestUs;
+                pendingKeyFrameRequest_.lastRequestUs = nowUs;
+                pendingKeyFrameRequest_.coalescedCount++;
+                pendingKeyFrameRequest_.toAddr = toAddr;
+                stats_.OnH264ReceiverKeyFrameRequest(
+                    reasonText.c_str(),
+                    false,
+                    syncRisk);
+            }
+            else {
+                pendingKeyFrameRequest_.lastRequestUs = nowUs;
+                pendingKeyFrameRequest_.coalescedCount++;
+            }
+        }
+
+        if (sendNow) {
+            SendKeyFrameRequestNow(
+                sendFrameId,
+                sendReason.c_str(),
+                sendSyncRisk,
+                nowUs,
+                sendAddr);
+        }
+    }
+
+    void UdpReceiver::FlushPendingKeyFrameRequest(uint64_t nowUs) {
+        bool sendNow = false;
+        uint32_t sendFrameId = 0;
+        std::string sendReason;
+        bool sendSyncRisk = false;
+        sockaddr_in sendAddr{};
+
+        {
+            std::lock_guard<std::mutex> lock(keyFrameRequestMutex_);
+            const bool cooldownElapsed =
+                pendingKeyFrameRequest_.active &&
+                (lastKeyFrameRequestUs_ == 0 ||
+                    nowUs > lastKeyFrameRequestUs_ +
+                        kKeyFrameRequestCooldownUs);
+            if (!cooldownElapsed) {
+                return;
+            }
+
+            sendFrameId = pendingKeyFrameRequest_.frameId;
+            sendReason = pendingKeyFrameRequest_.reason;
+            sendSyncRisk = pendingKeyFrameRequest_.syncRisk;
+            sendAddr = pendingKeyFrameRequest_.toAddr;
+            pendingKeyFrameRequest_ = {};
+            lastKeyFrameRequestUs_ = nowUs;
+            sendNow = true;
+        }
+
+        if (sendNow) {
+            SendKeyFrameRequestNow(
+                sendFrameId,
+                sendReason.c_str(),
+                sendSyncRisk,
+                nowUs,
+                sendAddr);
+        }
+    }
+
+    void UdpReceiver::SendKeyFrameRequestNow(
+        uint32_t frameId,
+        const char* reason,
+        bool syncRisk,
+        uint64_t nowUs,
+        const sockaddr_in& toAddr
+    ) {
         RnvpHeaderV1 header{};
         header.streamId = 1;
         header.frameId = frameId;
@@ -354,9 +538,9 @@ namespace {
             header,
             ControlCommand::RequestKeyFrame,
             frameId,
-            lastRnvpDataAddr_);
+            toAddr);
         lastKeyFrameRequestUs_ = nowUs;
-        stats_.OnH264ReceiverKeyFrameRequest(reason, true);
+        stats_.OnH264ReceiverKeyFrameRequest(reason, true, syncRisk);
     }
 
     void UdpReceiver::PushCompletedFrameToJitterBuffer(
@@ -392,6 +576,8 @@ namespace {
     }
 
     void UdpReceiver::DrainReadyJitterBuffer(uint64_t nowUs) {
+        // Receive and decode workers can both drain. Preserve pop-to-push order.
+        std::lock_guard<std::mutex> drainLock(readyDrainMutex_);
         CompletedFrame readyFrame;
         uint32_t releasedFramesThisDrain = 0;
 
@@ -443,7 +629,7 @@ namespace {
                         nowUs - completedQueueLastPushUs_) / 1000.0
                     : 0.0;
 
-                while (!completedFrames_.empty()) {
+                while (!orderedDecodeQueue_ && !completedFrames_.empty()) {
                     oldestDroppedAgeMs =
                         (std::max)(
                             oldestDroppedAgeMs,
@@ -453,7 +639,7 @@ namespace {
                     droppedByOutputQueue++;
                 }
 
-                while (completedFrames_.size() >= kMaxQueuedFrames) {
+                while (completedFrames_.size() >= (orderedDecodeQueue_ ? 32u : kMaxQueuedFrames)) {
                     oldestDroppedAgeMs =
                         (std::max)(
                             oldestDroppedAgeMs,
@@ -628,14 +814,24 @@ namespace {
             sockaddr_in fromAddr{};
             int fromLen = sizeof(fromAddr);
 
-            int received = recvfrom(
+            bool ready=true;
+            if(orderedDecodeQueue_) {
+                fd_set readable;FD_ZERO(&readable);FD_SET(socket_,&readable);
+                timeval timeout{0,10000};
+                const int selected=select(0,&readable,nullptr,nullptr,&timeout);
+                ready=selected>0;
+                if(selected==0)WSASetLastError(WSAETIMEDOUT);
+            }
+            // Research uses readiness polling followed by a blocking receive,
+            // avoiding cancellation of an in-flight datagram receive on timeout.
+            int received = ready ? recvfrom(
                 socket_,
                 reinterpret_cast<char*>(buffer.data()),
                 static_cast<int>(buffer.size()),
                 0,
                 reinterpret_cast<sockaddr*>(&fromAddr),
                 &fromLen
-            );
+            ) : -1;
 
             if (!running_) {
                 break;
@@ -644,10 +840,12 @@ namespace {
             if (received <= 0) {
                 const int error = WSAGetLastError();
                 if (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK) {
-                    SendDeadlineNacks(NowMicroseconds());
+                    const uint64_t nowUs = NowMicroseconds();
+                    SendDeadlineNacks(nowUs);
                     if (hasLastRnvpDataAddr_) {
                         SendTransportFeedback(lastRnvpDataAddr_, false);
                     }
+                    FlushPendingKeyFrameRequest(nowUs);
                 }
                 continue;
             }
@@ -664,6 +862,10 @@ namespace {
             // RNVP v1 packet
             // ========================================================
             if (magic == kRnvpMagic) {
+                if(GetEnvironmentVariableA("TR2_REACH_PACKET_TRACE",nullptr,0)) {
+                    RnvpHeaderV1 h{};
+                    if(DecodeRnvpHeaderV1(buffer.data(),received,h))fprintf(stderr,"packet_rx,%u,%u,%u,%d\n",h.sequence,h.frameId,h.chunkIndex,received);
+                }
                 HandleRnvpPacket(
                     buffer.data(),
                     static_cast<size_t>(received),
@@ -672,6 +874,7 @@ namespace {
                 );
 
                 SendDeadlineNacks(receiveTimeUs);
+                FlushPendingKeyFrameRequest(receiveTimeUs);
                 continue;
             }
 
@@ -752,41 +955,20 @@ namespace {
                 if (ackInfo.missingChunkCount > 0) {
                     consecutiveIncompleteFrames_++;
 
-                    const bool cooldownElapsed =
-                        lastKeyFrameRequestUs_ == 0 ||
-                        receiveTimeUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
-
                     const bool missingAckRequestsKeyFrame =
                         ackInfo.missingChunkCount >= 2 ||
                         consecutiveIncompleteFrames_ >= 2;
-                    const bool shouldRequestKeyFrame =
-                        cooldownElapsed && missingAckRequestsKeyFrame;
 
-                    if (shouldRequestKeyFrame) {
-                        SendRnvpControl(
-                            header,
-                            ControlCommand::RequestKeyFrame,
+                    if (missingAckRequestsKeyFrame) {
+                        const bool syncRisk =
+                            ackInfo.codecType == CodecType::H264 &&
+                            ackInfo.keyFrame;
+                        RequestKeyFrameInternal(
                             ackInfo.frameId,
-                            fromAddr
-                        );
-
-                        lastKeyFrameRequestUs_ = receiveTimeUs;
-                        const bool syncRisk =
-                            ackInfo.codecType == CodecType::H264 &&
-                            ackInfo.keyFrame;
-                        stats_.OnH264ReceiverKeyFrameRequest(
                             "missing-ack",
-                            true,
-                            syncRisk);
-                    }
-                    else if (missingAckRequestsKeyFrame) {
-                        const bool syncRisk =
-                            ackInfo.codecType == CodecType::H264 &&
-                            ackInfo.keyFrame;
-                        stats_.OnH264ReceiverKeyFrameRequest(
-                            "missing-ack",
-                            false,
-                            syncRisk);
+                            syncRisk,
+                            receiveTimeUs,
+                            fromAddr);
                     }
                 }
             }
@@ -1242,48 +1424,21 @@ namespace {
             consecutiveIncompleteFrames_ +=
                 recoveryActions.expiredFrameCount;
 
-            const bool cooldownElapsed =
-                lastKeyFrameRequestUs_ == 0 ||
-                nowUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
-
             const bool expiredRequestsKeyFrame =
                 recoveryActions.expiredAfterNackCount > 0 ||
                 recoveryActions.expiredFrameCount >= 2 ||
                 consecutiveIncompleteFrames_ >= 3;
-            const bool shouldRequestKeyFrame =
-                cooldownElapsed && expiredRequestsKeyFrame;
 
-            if (shouldRequestKeyFrame) {
-                RnvpHeaderV1 syntheticHeader{};
-                syntheticHeader.streamId =
-                    recoveryActions.lastExpiredStreamId;
-                syntheticHeader.frameId =
-                    recoveryActions.lastExpiredFrameId;
-
-                SendRnvpControl(
-                    syntheticHeader,
-                    ControlCommand::RequestKeyFrame,
+            if (expiredRequestsKeyFrame) {
+                const bool syncRisk =
+                    recoveryActions.lastExpiredCodecType == CodecType::H264 &&
+                    recoveryActions.lastExpiredKeyFrame;
+                RequestKeyFrameInternal(
                     recoveryActions.lastExpiredFrameId,
-                    lastRnvpDataAddr_
-                );
-
-                lastKeyFrameRequestUs_ = nowUs;
-                const bool syncRisk =
-                    recoveryActions.lastExpiredCodecType == CodecType::H264 &&
-                    recoveryActions.lastExpiredKeyFrame;
-                stats_.OnH264ReceiverKeyFrameRequest(
                     "deadline-expired",
-                    true,
-                    syncRisk);
-            }
-            else if (expiredRequestsKeyFrame) {
-                const bool syncRisk =
-                    recoveryActions.lastExpiredCodecType == CodecType::H264 &&
-                    recoveryActions.lastExpiredKeyFrame;
-                stats_.OnH264ReceiverKeyFrameRequest(
-                    "deadline-expired",
-                    false,
-                    syncRisk);
+                    syncRisk,
+                    nowUs,
+                    lastRnvpDataAddr_);
             }
         }
 
@@ -1315,41 +1470,20 @@ namespace {
 
             consecutiveIncompleteFrames_++;
 
-            const bool cooldownElapsed =
-                lastKeyFrameRequestUs_ == 0 ||
-                nowUs > lastKeyFrameRequestUs_ + kKeyFrameRequestCooldownUs;
-
             const bool nackRequestsKeyFrame =
                 ackInfo.missingChunkCount >= 2 ||
                 consecutiveIncompleteFrames_ >= 3;
-            const bool shouldRequestKeyFrame =
-                cooldownElapsed && nackRequestsKeyFrame;
 
-            if (shouldRequestKeyFrame) {
-                SendRnvpControl(
-                    syntheticHeader,
-                    ControlCommand::RequestKeyFrame,
+            if (nackRequestsKeyFrame) {
+                const bool syncRisk =
+                    ackInfo.codecType == CodecType::H264 &&
+                    ackInfo.keyFrame;
+                RequestKeyFrameInternal(
                     ackInfo.frameId,
-                    lastRnvpDataAddr_
-                );
-
-                lastKeyFrameRequestUs_ = nowUs;
-                const bool syncRisk =
-                    ackInfo.codecType == CodecType::H264 &&
-                    ackInfo.keyFrame;
-                stats_.OnH264ReceiverKeyFrameRequest(
                     "deadline-nack-missing",
-                    true,
-                    syncRisk);
-            }
-            else if (nackRequestsKeyFrame) {
-                const bool syncRisk =
-                    ackInfo.codecType == CodecType::H264 &&
-                    ackInfo.keyFrame;
-                stats_.OnH264ReceiverKeyFrameRequest(
-                    "deadline-nack-missing",
-                    false,
-                    syncRisk);
+                    syncRisk,
+                    nowUs,
+                    lastRnvpDataAddr_);
             }
         }
     }

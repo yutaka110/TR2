@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "status": "INITIAL_DESIGN_ONLY_NOT_LOADED_BY_CURRENT_APPLICATION",
+  "decided_on": "2026-09-21",
+  "reference": "Reach_RT_G0_Assessment.md",
+  "units": {"length": "m", "angle": "rad", "clock": "monotonic_us"},
+  "trial": {"duration_s": 60, "accounting_window_s": 60},
+  "world": {
+    "physics_hz": 100,
+    "max_catchup_steps": 5,
+    "catchup_overflow": "invalidate_run_and_record",
+    "robot_radius_m": 0.20,
+    "max_speed_mps": 0.30,
+    "max_yaw_rate_radps": 0.8,
+    "acceleration_mps2": 0.30,
+    "braking_mps2": 0.60,
+    "yaw_acceleration_radps2": 1.6,
+    "motion_model": "planar_kinematic_no_slip"
+  },
+  "camera": {
+    "width": 640, "height": 360, "fps": 30,
+    "horizontal_fov_deg": 70,
+    "offset_robot_xyz_m": [0.10, 0.0, 0.35],
+    "pitch_deg": 0,
+    "lens_distortion": "none"
+  },
+  "codec": {
+    "name": "h264", "encoder_preference": "auto",
+    "record_actual_mft": true,
+    "target_bitrate_bps": 1500000,
+    "requested_gop_frames": 30,
+    "requested_b_frames": 0,
+    "requested_max_reference_frames": 1,
+    "reference_model": "conservative_observed_idr_generation",
+    "strict_previous_frame_reference_verified": false,
+    "require_capture_encoder_decoder_pts_mapping": true,
+    "display_deadline_ms": 200
+  },
+  "marker": {
+    "side_m": 0.24, "pattern": "black_border_asymmetric_4x4_binary",
+    "minimum_edge_pixels": 20, "max_reprojection_rms_pixels": 2.0,
+    "require_all_corners_in_image": true,
+    "ambiguous_pose": "reject",
+    "pose_estimator": "calibrated_planar_homography"
+  },
+  "tasks": {
+    "T1": {
+      "corridor_x_m": [0, 3], "corridor_width_m": 0.75,
+      "pilot_corridor_widths_m": [0.65, 0.75, 0.90],
+      "initial_x_m": 0, "initial_y_m": [-0.05, 0, 0.05],
+      "initial_yaw_deg": [-5, 0, 5],
+      "initial_pose_combination": "cartesian_product",
+      "goal_xy_m": [3.25, 0], "exit_center_x_m": [3.20, 3.35],
+      "marker_center_xyz_m": [4.0, 0, 0.35],
+      "marker_normal_xyz": [-1, 0, 0],
+      "require_robot_fully_beyond_corridor": true
+    },
+    "T2": {
+      "initial_x_m": 0, "initial_y_m": [-0.15, 0, 0.15],
+      "initial_yaw_deg": [-10, 0, 10],
+      "initial_pose_combination": "cartesian_product",
+      "goal_xy_m": [2.0, 0], "goal_yaw_deg": 0,
+      "success_position_error_m": 0.10, "success_yaw_error_deg": 5,
+      "marker_center_xyz_m": [2.8, 0, 0.35],
+      "marker_normal_xyz": [-1, 0, 0]
+    }
+  },
+  "success": {"max_speed_mps": 0.02, "hold_s": 1.0, "require_no_collision": true},
+  "control": {
+    "id": "fixed_visual_controller_initial_v1",
+    "rate_hz": 20,
+    "distance_gain_per_s": 0.5,
+    "heading_gain_per_s": 1.5,
+    "rotate_only_above_heading_error_deg": 30,
+    "align_enter_distance_m": 0.08,
+    "approach_reenter_distance_m": 0.10,
+    "hold_yaw_error_deg": 3,
+    "estimated_wall_clearance_min_m": 0.05,
+    "observation_max_age_ms": 200,
+    "command_validity_ms": 100,
+    "watchdog_ms": 250,
+    "missing_or_invalid_observation": "brake",
+    "initial_pose_error_bound": "CALIBRATE_IN_G1_NOT_A_SAFETY_GUARANTEE"
+  },
+  "g1_ideal_link": {
+    "transport": "local_udp",
+    "added_loss": 0,
+    "added_propagation_delay_ms": 0,
+    "added_capacity_constraint": "none",
+    "include_real_codec_and_os_time": true
+  },
+  "g2_pilot_link": {
+    "uplink_capacity_bps": 3000000,
+    "downlink_capacity_bps": 500000,
+    "queue_limit_bytes_per_direction": 16384,
+    "propagation_delay_ms_per_direction": 40,
+    "uplink_ip_budget_bytes": 22500000,
+    "downlink_ip_budget_bytes": 3750000,
+    "pacer_burst_bytes": 2400,
+    "accounting": "ipv4_udp_attempted_bytes"
+  },
+  "feedback": {"period_ms": 50, "min_event_interval_ms": 20},
+  "scheduler": {
+    "period_ms": 20, "horizon_ms": 200, "max_candidates": 64,
+    "idr_cooldown_ms": 500, "xor_group_candidates": [2, 4, 8],
+    "allow_no_protection": true, "b1_lambda_pilot_grid": [0, 0.1, 0.3, 1, 3]
+  },
+  "information_boundary": {
+    "controller_input": "decoded_pixels_verified_capture_metadata_calibration_task_map_past_commands",
+    "scheduler_feedback": "arrived_reverse_udp_messages_only",
+    "ground_truth_consumers": ["world", "renderer", "read_only_evaluator", "labelled_evaluation_ui"]
+  }
+}

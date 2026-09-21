@@ -1,6 +1,7 @@
 #include "NetworkVideoReceiver.h"
 
 #include "PacketProtocol.h"
+#include "FrameIdentityLedger.h"
 #include "UdpReceiver.h"
 #include "../externals/DirectXTex/DirectXTex.h"
 
@@ -130,7 +131,14 @@ void TraceH264Receive(
     uint32_t width,
     uint32_t height,
     size_t payloadBytes,
-    const char* reason) {
+    const char* reason,
+    uint64_t inputPtsUs = 0,
+    bool outputPtsValid = false,
+    int64_t outputPts100ns = 0,
+    uint32_t resolvedFrameId = 0,
+    uint64_t resolvedCaptureUs = 0,
+    uint64_t resolvedPtsUs = 0,
+    bool identityMatched = false) {
     const bool shouldLog =
         frameId <= 180 ||
         decoderSync ||
@@ -185,7 +193,7 @@ void TraceH264Receive(
             traceFile
                 << "frameId,headerFrameId,flags,decoderSync,"
                 << "decoderWasSynced,decoderHasSync,decodeStatus,"
-                << "width,height,payloadBytes,reason\n";
+                << "width,height,payloadBytes,reason,inputPtsUs,outputPtsValid,outputPts100ns,resolvedFrameId,resolvedCaptureUs,resolvedPtsUs,identityMatched\n";
         }
     }
 
@@ -204,7 +212,9 @@ void TraceH264Receive(
         << width << ','
         << height << ','
         << payloadBytes << ','
-        << '"' << (reason ? reason : "") << '"'
+        << '"' << (reason ? reason : "") << '"' << ','
+        << inputPtsUs << ',' << (outputPtsValid ? 1 : 0) << ',' << outputPts100ns
+        << ',' << resolvedFrameId << ',' << resolvedCaptureUs << ',' << resolvedPtsUs << ',' << (identityMatched ? 1 : 0)
         << '\n';
     traceFile.flush();
 }
@@ -435,6 +445,10 @@ public:
     }
 
     void Shutdown() {
+        identities_.Clear();
+        pendingOutputs_.clear();
+        streamId_ = 0;
+        lastInputFrameId_ = 0;
         if (decoder_) {
             decoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
             decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
@@ -458,6 +472,8 @@ public:
     }
 
     void MarkReferenceBroken() {
+        identities_.Clear();
+        pendingOutputs_.clear();
         synced_ = false;
         discontinuity_ = true;
         if (decoder_) {
@@ -470,13 +486,19 @@ public:
         size_t size,
         uint64_t ptsUs,
         bool decoderSync,
-        DecodedVideoFrame& outFrame) {
+        DecodedVideoFrame& outFrame,
+        bool requireContiguous = false) {
+        if (streamId_ != 0 && streamId_ != outFrame.streamId) { MarkReferenceBroken(); lastInputFrameId_=0; }
+        if(requireContiguous&&lastInputFrameId_!=0&&outFrame.frameId!=lastInputFrameId_+1) MarkReferenceBroken();
+        lastInputFrameId_=outFrame.frameId;
+        streamId_ = outFrame.streamId;
+        outFrame.h264IdentityMatched = false;
         outFrame.rgba.clear();
         outFrame.nv12Y.clear();
         outFrame.nv12UV.clear();
         outFrame.nv12YPitch = 0;
         outFrame.nv12UVPitch = 0;
-        if (!decoder_ || !data || size == 0) {
+        if (!decoder_ || !data || size == 0 || ptsUs > static_cast<uint64_t>(INT64_MAX / 10)) {
             return H264DecodeStatus::Failed;
         }
 
@@ -524,7 +546,7 @@ public:
         hr = decoder_->ProcessInput(0, sample.Get(), 0);
         if (hr == MF_E_NOTACCEPTING) {
             DecodedVideoFrame discarded;
-            DrainOne(discarded);
+            if (DrainOne(discarded) == H264DecodeStatus::Decoded) pendingOutputs_.push_back(std::move(discarded));
             hr = decoder_->ProcessInput(0, sample.Get(), 0);
         }
         if (FAILED(hr)) {
@@ -532,19 +554,46 @@ public:
             return H264DecodeStatus::Failed;
         }
 
+        FrameIdentity identity{outFrame.frameId,outFrame.streamId,outFrame.width,outFrame.height,
+            ptsUs,outFrame.cameraCaptureCompletedTimeUs,outFrame.encoderOutputTimeUs,
+            outFrame.sendTimeUs,outFrame.receiveTimeUs};
+        if (ptsUs > static_cast<uint64_t>(INT64_MAX / 10) || !identities_.Insert(static_cast<int64_t>(ptsUs * 10),identity)) {
+            MarkReferenceBroken();
+            return H264DecodeStatus::Failed;
+        }
         discontinuity_ = false;
         if (decoderSync) {
             synced_ = true;
         }
 
         H264DecodeStatus status = DrainOne(outFrame);
+        if (!pendingOutputs_.empty()) {
+            if (status == H264DecodeStatus::Decoded) pendingOutputs_.push_back(std::move(outFrame));
+            outFrame=std::move(pendingOutputs_.front()); pendingOutputs_.pop_front();
+            status=H264DecodeStatus::Decoded;
+        }
         if (status == H264DecodeStatus::Failed) {
+            MarkReferenceBroken();
             if (decoderSync && !wasSyncedBeforeInput) {
                 return H264DecodeStatus::NeedMoreInput;
             }
-            MarkReferenceBroken();
         }
         return status;
+    }
+
+    std::vector<DecodedVideoFrame> Drain() {
+        std::vector<DecodedVideoFrame> result;
+        while (!pendingOutputs_.empty()) { result.push_back(std::move(pendingOutputs_.front())); pendingOutputs_.pop_front(); }
+        if (!decoder_) return result;
+        decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM,0);
+        decoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN,0);
+        for (unsigned i=0;i<256;++i) {
+            DecodedVideoFrame output;
+            if (DrainOne(output)!=H264DecodeStatus::Decoded) break;
+            result.push_back(std::move(output));
+        }
+        MarkReferenceBroken();
+        return result;
     }
 
 private:
@@ -558,18 +607,22 @@ private:
         return "unknown";
     }
 
-    bool TrySetOutputSubtype(const GUID& subtype) {
+    bool TrySetOutputSubtype(const GUID& subtype, IMFMediaType* available = nullptr) {
         ComPtr<IMFMediaType> outputType;
-        HRESULT hr = MFCreateMediaType(&outputType);
+        HRESULT hr = S_OK;
+        if(available) outputType=available;
+        else hr = MFCreateMediaType(&outputType);
         if (FAILED(hr)) {
             return false;
         }
 
+        if(!available) {
         outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         outputType->SetGUID(MF_MT_SUBTYPE, subtype);
         MFSetAttributeSize(outputType.Get(), MF_MT_FRAME_SIZE, width_, height_);
         MFSetAttributeRatio(outputType.Get(), MF_MT_FRAME_RATE, 30, 1);
         outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        }
 
         hr = decoder_->SetOutputType(0, outputType.Get(), 0);
         if (FAILED(hr)) {
@@ -579,6 +632,11 @@ private:
         ComPtr<IMFMediaType> currentType;
         if (SUCCEEDED(decoder_->GetOutputCurrentType(0, &currentType)) &&
             currentType) {
+            UINT32 storageWidth=width_,storageHeight=height_;
+            if(SUCCEEDED(MFGetAttributeSize(currentType.Get(),MF_MT_FRAME_SIZE,&storageWidth,&storageHeight))) {
+                if(storageWidth<width_||storageHeight<height_)return false;
+                outputStorageHeight_=storageHeight;
+            } else outputStorageHeight_=height_;
             GUID currentSubtype{};
             if (SUCCEEDED(currentType->GetGUID(MF_MT_SUBTYPE, &currentSubtype))) {
                 outputSubtype_ = currentSubtype;
@@ -606,6 +664,7 @@ private:
             }
         }
         else {
+            outputStorageHeight_=height_;
             outputSubtype_ = subtype;
             outputStride_ = 0;
             outputSampleBytes_ = 0;
@@ -641,7 +700,7 @@ private:
             outputSampleBytes_ =
                 (std::max)(
                     outputSampleBytes_,
-                    strideBytes * static_cast<size_t>(height_) * 3u / 2u);
+                    strideBytes * static_cast<size_t>(outputStorageHeight_) * 3u / 2u);
         }
         else {
             outputStride_ = 0;
@@ -677,7 +736,7 @@ private:
                     break;
                 }
                 if (FAILED(hr) || !availableType) {
-                    continue;
+                    break;
                 }
 
                 GUID subtype{};
@@ -685,7 +744,7 @@ private:
                     continue;
                 }
                 if (subtype == preferredSubtype &&
-                    TrySetOutputSubtype(preferredSubtype)) {
+                    TrySetOutputSubtype(preferredSubtype,availableType.Get())) {
                     return true;
                 }
             }
@@ -745,7 +804,7 @@ private:
         }
 
         const size_t stride = static_cast<size_t>(outputStride_);
-        const size_t yPlaneBytes = stride * static_cast<size_t>(height_);
+        const size_t yPlaneBytes = stride * static_cast<size_t>(outputStorageHeight_);
         const size_t uvPlaneBytes = stride * static_cast<size_t>(height_ / 2u);
         if (bytes < yPlaneBytes + uvPlaneBytes || stride < width_) {
             return false;
@@ -778,6 +837,9 @@ private:
     }
 
     H264DecodeStatus DrainOne(DecodedVideoFrame& outFrame) {
+        outFrame.h264IdentityMatched = false;
+        outFrame.h264OutputSampleTimeValid = false;
+        outFrame.h264OutputSampleTime100ns = 0;
         outFrame.rgba.clear();
         outFrame.nv12Y.clear();
         outFrame.nv12UV.clear();
@@ -787,6 +849,7 @@ private:
         MFT_OUTPUT_STREAM_INFO info{};
         HRESULT hr = decoder_->GetOutputStreamInfo(0, &info);
         if (FAILED(hr)) {
+            fprintf(stderr,"[H264Decoder] output info failed hr=0x%08lx\n",static_cast<unsigned long>(hr));
             return H264DecodeStatus::Failed;
         }
 
@@ -812,6 +875,8 @@ private:
         output.pSample = sample.Get();
         DWORD status = 0;
         hr = decoder_->ProcessOutput(0, 1, &output, &status);
+        ComPtr<IMFCollection> outputEvents;
+        if(output.pEvents){outputEvents.Attach(output.pEvents);output.pEvents=nullptr;}
         if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
             if (output.pSample && output.pSample != sample.Get()) {
                 output.pSample->Release();
@@ -822,17 +887,44 @@ private:
             if (output.pSample && output.pSample != sample.Get()) {
                 output.pSample->Release();
             }
-            return SetOutputType()
-                ? H264DecodeStatus::NeedMoreInput
-                : H264DecodeStatus::Failed;
+            const bool typeReady=SetOutputType();
+            if(!typeReady)fprintf(stderr,"[H264Decoder] output type renegotiation failed\n");
+            return typeReady?H264DecodeStatus::NeedMoreInput:H264DecodeStatus::Failed;
         }
         if (FAILED(hr) || !output.pSample) {
+            fprintf(stderr,"[H264Decoder] ProcessOutput failed hr=0x%08lx status=0x%lx\n",static_cast<unsigned long>(hr),output.dwStatus);
             if (output.pSample && output.pSample != sample.Get()) {
                 output.pSample->Release();
             }
             return H264DecodeStatus::Failed;
         }
 
+        DWORD outputLength=0;
+        if((output.dwStatus&MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE)==MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE ||
+           (SUCCEEDED(output.pSample->GetTotalLength(&outputLength))&&outputLength==0)) {
+            // A successful transform call can carry a format event without an image.
+            if(output.pSample!=sample.Get())output.pSample->Release();
+            return H264DecodeStatus::NeedMoreInput;
+        }
+        LONGLONG outputSampleTime = 0;
+        if (SUCCEEDED(output.pSample->GetSampleTime(&outputSampleTime))) {
+            outFrame.h264OutputSampleTime100ns = outputSampleTime;
+            outFrame.h264OutputSampleTimeValid = true;
+        }
+
+        const auto identity = outFrame.h264OutputSampleTimeValid ? identities_.Take(outputSampleTime) : std::nullopt;
+        if (!identity) {
+            fprintf(stderr,"[H264Decoder] unmatched output PTS valid=%d pts=%lld bytes=%lu\n",outFrame.h264OutputSampleTimeValid,outputSampleTime,outputLength);
+            if (output.pSample != sample.Get()) output.pSample->Release();
+            return H264DecodeStatus::Failed;
+        }
+        outFrame.frameId=identity->frameId; outFrame.streamId=identity->streamId;
+        outFrame.width=identity->width; outFrame.height=identity->height;
+        outFrame.sendTimeUs=identity->sendUs; outFrame.receiveTimeUs=identity->receiveUs;
+        outFrame.cameraCaptureCompletedTimeUs=identity->captureUs;
+        outFrame.encoderOutputTimeUs=identity->encoderOutputUs;
+        outFrame.h264MatchedSourcePtsUs=identity->ptsUs;
+        outFrame.h264IdentityMatched=true;
         ComPtr<IMFMediaBuffer> contiguous;
         hr = output.pSample->ConvertToContiguousBuffer(&contiguous);
         if (FAILED(hr)) {
@@ -853,6 +945,7 @@ private:
         }
 
         if (currentLength < outputSampleBytes_) {
+            fprintf(stderr,"[H264Decoder] short output bytes=%lu expected=%zu\n",currentLength,outputSampleBytes_);
             contiguous->Unlock();
             if (output.pSample != sample.Get()) {
                 output.pSample->Release();
@@ -878,9 +971,14 @@ private:
     }
 
 private:
+    FrameIdentityLedger identities_;
+    uint32_t streamId_=0;
+    uint32_t lastInputFrameId_=0;
+    std::deque<DecodedVideoFrame> pendingOutputs_;
     ComPtr<IMFTransform> decoder_;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
+    uint32_t outputStorageHeight_ = 0;
     GUID outputSubtype_ = GUID_NULL;
     LONG outputStride_ = 0;
     size_t outputSampleBytes_ = 0;
@@ -1093,7 +1191,9 @@ NetworkVideoReceiver::~NetworkVideoReceiver() {
 
 bool NetworkVideoReceiver::Start(
     UdpReceiver* receiver,
-    std::function<bool()> enabledProvider) {
+    std::function<bool()> enabledProvider,
+    std::function<void(const DecodedVideoFrame&)> observer,
+    bool requireContiguousH264Frames) {
     Stop();
 
     if (receiver == nullptr) {
@@ -1104,6 +1204,9 @@ bool NetworkVideoReceiver::Start(
         std::lock_guard<std::mutex> lock(mutex_);
         receiver_ = receiver;
         enabledProvider_ = std::move(enabledProvider);
+        observer_ = std::move(observer);
+        requireContiguousH264Frames_ = requireContiguousH264Frames;
+        drainRequested_=false; drainComplete_=false;
         decodedFrameQueue_.clear();
         stats_ = {};
         stats_.startupActive = true;
@@ -1132,6 +1235,8 @@ void NetworkVideoReceiver::Stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     receiver_ = nullptr;
     enabledProvider_ = {};
+    observer_ = {};
+    drainRequested_=false; drainComplete_=false;
     decodedFrameQueue_.clear();
 }
 
@@ -1211,6 +1316,12 @@ NetworkVideoReceiverStats NetworkVideoReceiver::GetStats() const {
 }
 
 void NetworkVideoReceiver::DecodeLoop() {
+    struct MediaRuntime {
+        HRESULT com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+        HRESULT mf=SUCCEEDED(com)?MFStartup(MF_VERSION):E_FAIL;
+        ~MediaRuntime(){if(SUCCEEDED(mf))MFShutdown();if(SUCCEEDED(com))CoUninitialize();}
+    } runtime;
+    if(FAILED(runtime.mf)) { std::lock_guard lock(mutex_);++stats_.decodeFailures;stats_.lastDropReason="decoder-media-runtime-init-failed";return; }
     H264CpuDecoder h264Decoder;
 
     while (running_.load()) {
@@ -1238,6 +1349,14 @@ void NetworkVideoReceiver::DecodeLoop() {
 
         CompletedFrame frame{};
         if (!receiver->WaitPopFrame(frame, kCompletedFrameWaitTimeoutMs)) {
+            if (drainRequested_.exchange(false)) {
+                for (auto& output : h264Decoder.Drain()) {
+                    output.decodedTimeUs=NowMicroseconds();
+                    StoreDecodedFrame(std::move(output),0.0);
+                    receiver->NotifyDecodeFrame();
+                }
+                drainComplete_=true;
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.decodePopEmptyPolls++;
@@ -1506,7 +1625,8 @@ void NetworkVideoReceiver::DecodeLoop() {
                 accessUnitBytes,
                 auHeader.ptsUs,
                 decoderSync,
-                decodedFrame);
+                decodedFrame,
+                requireContiguousH264Frames_);
             const bool decoderHasSyncAfterDecode = h264Decoder.HasSync();
             if (decoderHasSyncAfterDecode) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1590,12 +1710,18 @@ void NetworkVideoReceiver::DecodeLoop() {
                 auHeader.width,
                 auHeader.height,
                 accessUnitBytes,
-                "decoded");
+                "decoded",
+                auHeader.ptsUs,
+                decodedFrame.h264OutputSampleTimeValid,
+                decodedFrame.h264OutputSampleTime100ns,
+                decodedFrame.frameId,
+                decodedFrame.cameraCaptureCompletedTimeUs,
+                decodedFrame.h264MatchedSourcePtsUs,
+                decodedFrame.h264IdentityMatched);
 
             decodedFrame.decodedTimeUs = NowMicroseconds();
-            decodedFrame.cameraCaptureCompletedTimeUs =
-                auHeader.cameraCaptureCompletedTimeUs;
-            decodedFrame.encoderOutputTimeUs = auHeader.encoderOutputTimeUs;
+            // Identity and capture timestamps have been resolved from output PTS.
+            // Never replace them with the metadata of the current input AU.
 
             const double decodedFreshnessAgeMs =
                 FrameFreshnessAgeMs(
@@ -1722,6 +1848,7 @@ void NetworkVideoReceiver::StoreDecodedFrame(
     DecodedVideoFrame frame,
     double jpegDecodeMs,
     bool decoderSyncReady) {
+    if(observer_) observer_(frame);
     std::lock_guard<std::mutex> lock(mutex_);
     UpdateDecodeMs(jpegDecodeMs);
     const uint64_t nowUs = NowMicroseconds();

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -24,7 +25,9 @@ namespace net {
         UdpReceiver();
         ~UdpReceiver();
 
-        bool Start(uint16_t listenPort);
+        bool Start(uint16_t listenPort, bool loopbackOnly = false, bool orderedDecodeQueue = false);
+        uint16_t BoundPort() const { return boundPort_; }
+        int ReceiveBufferBytes() const { return receiveBufferBytes_; }
         void Stop();
 
         bool IsRunning() const;
@@ -45,7 +48,8 @@ namespace net {
         void NotifyDisplayFrame();
         void RequestKeyFrame(
             uint32_t frameId,
-            const char* reason = "unspecified"
+            const char* reason = "unspecified",
+            bool syncRisk = false
         );
     private:
         void ReceiveLoop();
@@ -141,11 +145,58 @@ namespace net {
             const sockaddr_in& toAddr
         );
 
+        enum class KeyFrameRequestPriority {
+            Noise = 0,
+            Recovery = 1,
+            SyncRisk = 2,
+            HardSyncLoss = 3
+        };
+
+        struct PendingKeyFrameRequest {
+            bool active = false;
+            uint32_t frameId = 0;
+            std::string reason;
+            bool syncRisk = false;
+            KeyFrameRequestPriority priority = KeyFrameRequestPriority::Noise;
+            uint64_t firstRequestUs = 0;
+            uint64_t lastRequestUs = 0;
+            uint32_t coalescedCount = 0;
+            sockaddr_in toAddr{};
+        };
+
+        KeyFrameRequestPriority ClassifyKeyFrameRequest(
+            const char* reason,
+            bool syncRisk
+        ) const;
+        bool IsHigherPriorityKeyFrameRequest(
+            KeyFrameRequestPriority lhs,
+            KeyFrameRequestPriority rhs
+        ) const;
+        void RequestKeyFrameInternal(
+            uint32_t frameId,
+            const char* reason,
+            bool syncRisk,
+            uint64_t nowUs,
+            const sockaddr_in& toAddr
+        );
+        void FlushPendingKeyFrameRequest(uint64_t nowUs);
+        void SendKeyFrameRequestNow(
+            uint32_t frameId,
+            const char* reason,
+            bool syncRisk,
+            uint64_t nowUs,
+            const sockaddr_in& toAddr
+        );
+
         uint64_t NowMicroseconds() const;
         uint32_t NextRNVPSequence();
 
     private:
         SOCKET socket_ = INVALID_SOCKET;
+        uint16_t boundPort_ = 0;
+        bool orderedDecodeQueue_ = false;
+        int receiveBufferBytes_ = 0;
+        std::mutex readyDrainMutex_;
         std::atomic<bool> running_ = false;
         std::thread receiveThread_;
 
@@ -169,6 +220,8 @@ namespace net {
         std::atomic<uint32_t> rnvpSequence_{ 1 };
         uint32_t consecutiveIncompleteFrames_ = 0;
         uint64_t lastKeyFrameRequestUs_ = 0;
+        mutable std::mutex keyFrameRequestMutex_;
+        PendingKeyFrameRequest pendingKeyFrameRequest_{};
         uint64_t dynamicNackDeadlineUs_ = 25000;
         uint64_t lastDynamicNackUpdateUs_ = 0;
         uint64_t lastRetransmitUsefulChunks_ = 0;

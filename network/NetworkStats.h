@@ -486,6 +486,13 @@ namespace net {
 		uint64_t h264InputGateSkippedInputFrames = 0;
 		bool h264InputGateForcedOpen = false;
 		std::string h264InputGateReleaseReason;
+		uint64_t h264KeySyncProtectedFrames = 0;
+		uint64_t h264KeySyncUepDuplicatePackets = 0;
+		uint64_t h264AdaptiveUepEnabledFrames = 0;
+		uint64_t h264AdaptiveUepSuppressedFrames = 0;
+		uint64_t h264AdaptiveUepPostEnableLatePressureFrames = 0;
+		std::string h264AdaptiveUepState;
+		std::string h264AdaptiveUepReason;
 		uint64_t fecProtectedH264KeyFrames = 0;
 		uint64_t fecProtectedH264LargeFrames = 0;
 		uint32_t h264EncoderDelayFrames = 0;

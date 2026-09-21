@@ -95,6 +95,12 @@ struct DecodedVideoFrame {
     uint64_t decodedTimeUs = 0;
     uint64_t cameraCaptureCompletedTimeUs = 0;
     uint64_t encoderOutputTimeUs = 0;
+    // Diagnostic output identity from the decoder, separate from the current input AU.
+    // G0 observes this value before changing frame-to-output association rules.
+    int64_t h264OutputSampleTime100ns = 0;
+    bool h264OutputSampleTimeValid = false;
+    bool h264IdentityMatched = false;
+    uint64_t h264MatchedSourcePtsUs = 0;
     DecodedVideoFrameFormat format = DecodedVideoFrameFormat::Rgba8;
     std::vector<uint8_t> rgba;
     std::vector<uint8_t> nv12Y;
@@ -111,14 +117,22 @@ public:
     NetworkVideoReceiver(const NetworkVideoReceiver&) = delete;
     NetworkVideoReceiver& operator=(const NetworkVideoReceiver&) = delete;
 
-    bool Start(UdpReceiver* receiver, std::function<bool()> enabledProvider);
+    bool Start(UdpReceiver* receiver, std::function<bool()> enabledProvider,
+               std::function<void(const DecodedVideoFrame&)> observer = {},
+               bool requireContiguousH264Frames = false);
     void Stop();
 
     bool IsRunning() const;
     bool TryGetLatestFrame(DecodedVideoFrame& outFrame);
     NetworkVideoReceiverStats GetStats() const;
+    // Request only after the sender has drained and all expected AUs arrived.
+    void RequestDecoderDrain() { drainComplete_=false; drainRequested_=true; }
+    bool DecoderDrainComplete() const { return drainComplete_.load(); }
 
 private:
+    // Called on the decode worker before display-queue eviction; must not throw.
+    std::function<void(const DecodedVideoFrame&)> observer_;
+    bool requireContiguousH264Frames_ = false;
     struct PendingDecodedFrame {
         DecodedVideoFrame frame;
         uint64_t storedTimeUs = 0;
@@ -159,6 +173,7 @@ private:
     UdpReceiver* receiver_ = nullptr;
     std::function<bool()> enabledProvider_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> drainRequested_{false}, drainComplete_{false};
     std::thread workerThread_;
 
     mutable std::mutex mutex_;
