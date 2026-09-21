@@ -1,6 +1,6 @@
 # RNVP Realtime Video Communication Engine
 
-Reach-RTの研究拡張は[実装進捗](docs/Reach_RT_Implementation_Progress.md)と[G1-02/03の実装説明](docs/Reach_RT_G1_Robot_Video.md)を参照してください。[研究画面を起動](tools/open_reach_g1.cmd)すると、仮想ロボットの映像を実H.264・RNVP・UDPで送受信し、画像IDと撮影時刻を照合します。現在は時間指定の前進・制動による接続検証までで、画像による自動制御は次のG1-04です。
+Reach-RTはG1通過、**G2-01「双方向の容量・直列化・有限キュー」完了**です。[実装進捗](docs/Reach_RT_Implementation_Progress.md)、[G2の実装意図・構造](docs/Reach_RT_G2_Link.md)、[実通信5ケースの結果](artifacts/reach_g2_link_20260922/verification/acceptance_final_02/index.html)を参照してください。[G2画面を起動](tools/open_reach_g2.cmd)すると、実H.264映像と逆方向UDP指令に独立した容量・キューを適用します。[G1の18条件の証拠](artifacts/reach_g1_stable_20260921/verification/matrix_final_01/index.html)と[旧合格版の画面](tools/open_reach_g1.cmd)も保持しています。次はG2-02の時刻基準障害トレース・乱数分離。研究方式の優位性はまだ評価していません。
 
 C++ / DirectX 12 / Media Foundationで構築した、低遅延映像通信エンジンです。
 独自UDPプロトコル`RNVP`により、カメラ映像または生成映像をH.264/MJPEG/Rawで送受信し、パケット欠損、ジッタ、再送期限、表示期限、エンコード負荷、デコード負荷を観測しながらQoEを守ることを目的にしています。

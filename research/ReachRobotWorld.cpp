@@ -7,6 +7,25 @@
 namespace reach {
 namespace {
 constexpr double Pi=3.14159265358979323846;
+struct CoveragePoint { double x,y; };
+double PixelCoverage(const std::vector<CoveragePoint>& quad,int x,int y){
+    std::array<CoveragePoint,16> polygon{},clipped{};
+    size_t count=quad.size();std::copy(quad.begin(),quad.end(),polygon.begin());
+    for(int edge=0;edge<4;++edge){
+        size_t nextCount=0;
+        auto value=[&](CoveragePoint p){return edge==0?p.x-x:edge==1?x+1-p.x:edge==2?p.y-y:y+1-p.y;};
+        if(count==0)return 0;
+        auto a=polygon[count-1];double da=value(a);
+        for(size_t i=0;i<count;++i){const auto b=polygon[i];const double db=value(b);
+            if((da>=0)!=(db>=0)){const double t=da/(da-db);clipped[nextCount++]={a.x+t*(b.x-a.x),a.y+t*(b.y-a.y)};}
+            if(db>=0)clipped[nextCount++]=b;a=b;da=db;
+        }
+        polygon=clipped;count=nextCount;
+    }
+    double area=0;if(count==0)return 0;
+    auto a=polygon[count-1];for(size_t i=0;i<count;++i){const auto b=polygon[i];area+=a.x*b.y-a.y*b.x;a=b;}
+    return std::clamp(std::abs(area)*.5,0.,1.);
+}
 double Approach(double value,double target,double amount) { return value+std::clamp(target-value,-amount,amount); }
 uint16_t Checksum(const std::array<uint8_t,12>& bytes) {
     uint16_t crc=0xffff;
@@ -67,6 +86,7 @@ std::vector<uint8_t> RobotWorld::CaptureNv12(uint32_t id,uint32_t stream) const 
     const double c=std::cos(truth_.yaw),s=std::sin(truth_.yaw);
     const double ox=truth_.x+.1*c,oy=truth_.y+.1*s,oz=.35;
     const double markerX=task_=="T1"?4.0:2.8;
+    std::vector<double> depths(Width*Height,30);
     constexpr uint16_t pattern=0x8B35; // fixed, asymmetric internal 4 x 4 marker
     for(uint32_t v=40;v<Height;++v) for(uint32_t u=0;u<Width;++u) {
         const double left=-(u+.5-Width*.5)/fx,up=-(v+.5-Height*.5)/fx;
@@ -85,19 +105,31 @@ std::vector<uint8_t> RobotWorld::CaptureNv12(uint32_t id,uint32_t stream) const 
                 closest=t; shade=(std::fmod(x,.5)<.015||std::fmod(z,.2)<.008)?90:(wallY>0?200:174);
             }
         }
-        if(dx>1e-9) {
-            const double t=(markerX-ox)/dx,my=oy+t*dy,mz=oz+t*up;
-            if(t>0&&t<closest&&std::abs(my)<=.145&&std::abs(mz-.35)<=.145) {
-                shade=235;
-                if(std::abs(my)<=.12&&std::abs(mz-.35)<=.12) {
-                    const int col=std::clamp(static_cast<int>((.12-my)/.04),0,5);
-                    const int row=std::clamp(static_cast<int>((.47-mz)/.04),0,5);
-                    shade=(row==0||row==5||col==0||col==5)?16:((pattern>>((row-1)*4+col-1))&1)?235:16;
-                }
-            }
-        }
-        pixels[v*Width+u]=static_cast<uint8_t>(shade);
+        pixels[v*Width+u]=static_cast<uint8_t>(shade);depths[v*Width+u]=closest;
     }
+    // Integrate polygon coverage over each pixel rather than point-sample the marker.
+    // This is camera rasterisation, not pose/visibility information sent to recognition.
+    auto paint=[&](double left,double right,double bottom,double top,int shade){
+        std::vector<CoveragePoint> quad;
+        for(auto yz:{std::pair{left,top},std::pair{right,top},std::pair{right,bottom},std::pair{left,bottom}}){
+            const double wx=markerX-ox,wy=yz.first-oy,z=c*wx+s*wy;
+            if(z<=.01)return;
+            quad.push_back({Width*.5-fx*(-s*wx+c*wy)/z,Height*.5-fx*(yz.second-oz)/z});
+        }
+        double minX=640,maxX=0,minY=360,maxY=0;
+        for(auto p:quad){minX=std::min(minX,p.x);maxX=std::max(maxX,p.x);minY=std::min(minY,p.y);maxY=std::max(maxY,p.y);}
+        for(int v=std::max(40,int(std::floor(minY)));v<std::min(360,int(std::ceil(maxY)));++v)
+            for(int u=std::max(0,int(std::floor(minX)));u<std::min(640,int(std::ceil(maxX)));++u){
+                const double rayX=c+(u+.5-320)/fx*s;
+                if(rayX<=0||(markerX-ox)/rayX>=depths[v*640+u])continue;
+                const double coverage=PixelCoverage(quad,u,v);
+                pixels[v*640+u]=static_cast<uint8_t>(std::clamp(std::lround(pixels[v*640+u]*(1-coverage)+shade*coverage),0L,255L));
+            }
+    };
+    paint(.145,-.145,.205,.495,235);
+    paint(.12,-.12,.23,.47,16);
+    for(int row=0;row<4;++row)for(int col=0;col<4;++col)if((pattern>>(row*4+col))&1)
+        paint(.08-col*.04,.04-col*.04,.39-row*.04,.43-row*.04,235);
     PaintIdentity(pixels,id,stream); return pixels;
 }
 PixelIdentity ReadPixelIdentity(const uint8_t* y,uint32_t pitch,uint32_t width,uint32_t height) {
@@ -114,7 +146,17 @@ PixelIdentity ReadPixelIdentity(const uint8_t* y,uint32_t pitch,uint32_t width,u
     for(int i=0;i<4;++i) { result.frameId|=uint32_t(bytes[2+i])<<(8*i); result.streamId|=uint32_t(bytes[6+i])<<(8*i); }
     return result;
 }
-std::string RobotWorld::ModelJson() {
-    return R"({"model":"planar_kinematic_v1","coordinate_axes":"x_forward_y_left_z_up","radius_m":0.20,"max_v_m_s":0.30,"max_w_rad_s":0.8,"acceleration_m_s2":0.30,"braking_m_s2":0.60,"angular_acceleration_rad_s2":1.6,"slip":false,"camera":{"width":640,"height":360,"horizontal_fov_deg":70,"forward_m":0.10,"height_m":0.35,"distortion":false,"format":"NV12","bitrate_bps":1500000,"fps":30},"marker":{"side_m":0.24,"internal_pattern_hex":"8B35","grid_including_border":6},"command_source":"time_script_v1","script":"v=0.15 until 12s, then 0; w=0","truth_access":"renderer_evaluator_dashboard_only","visual_control":false,"reverse_command_udp":false,"diagnostic_barcode_rows":[0,39],"task_deadline_s":60,"success_hold_s":1})";
+std::string RobotWorld::ModelJson(bool visualControl,bool commandUdp) {
+    std::string model=R"({"model":"planar_kinematic_v1","coordinate_axes":"x_forward_y_left_z_up","radius_m":0.20,"max_v_m_s":0.30,"max_w_rad_s":0.8,"acceleration_m_s2":0.30,"braking_m_s2":0.60,"angular_acceleration_rad_s2":1.6,"slip":false,"camera":{"width":640,"height":360,"horizontal_fov_deg":70,"forward_m":0.10,"height_m":0.35,"distortion":false,"format":"NV12","bitrate_bps":1500000,"fps":30,"marker_rasterisation":"analytic_polygon_pixel_coverage"},"marker":{"side_m":0.24,"internal_pattern_hex":"8B35","grid_including_border":6},"command_source":"time_script_v1","script":"v=0.15 until 12s, then 0; w=0","truth_access":"renderer_evaluator_dashboard_only","visual_control":false,"reverse_command_udp":false,"diagnostic_barcode_rows":[0,39],"task_deadline_s":60,"success_hold_s":1})";
+    if(visualControl){
+        const auto at=model.find("time_script_v1");model.replace(at,std::string("time_script_v1").size(),"received_image_v1");
+        const auto script=model.find("v=0.15 until 12s, then 0; w=0");model.replace(script,std::string("v=0.15 until 12s, then 0; w=0").size(),"disabled; local image command adapter");
+        const auto visual=model.find("\"visual_control\":false");model.replace(visual,22,"\"visual_control\":true");
+    }
+    if(commandUdp){
+        auto at=model.find("disabled; local image command adapter");model.replace(at,std::string("disabled; local image command adapter").size(),"disabled; reverse command UDP");
+        at=model.find("\"reverse_command_udp\":false");model.replace(at,std::string("\"reverse_command_udp\":false").size(),"\"reverse_command_udp\":true");
+    }
+    return model;
 }
 }

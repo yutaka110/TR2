@@ -1,0 +1,4 @@
+{
+  "uplink": {"queue_ip_bytes": 16384, "capacity": [{"at_us": 0, "bps": 3000000}]},
+  "downlink": {"queue_ip_bytes": 16384, "capacity": [{"at_us": 0, "bps": 500000}]}
+}

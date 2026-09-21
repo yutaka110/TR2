@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "stage": "visual_control",
+  "task": "T2",
+  "seed": 101,
+  "duration_s": 15,
+  "tick_rates_hz": { "physics": 100, "camera": 30, "control": 20 },
+  "max_catchup_steps": 5,
+  "encoder": "auto",
+  "world": { "initial_y_m": 0, "initial_yaw_rad": 0, "corridor_width_m": 0.75 }
+}

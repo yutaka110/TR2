@@ -132,6 +132,8 @@ public:
 private:
     // Called on the decode worker before display-queue eviction; must not throw.
     std::function<void(const DecodedVideoFrame&)> observer_;
+    // Research mode also bypasses presentation-only input/output freshness
+    // eviction. The observer must enforce its own capture deadline.
     bool requireContiguousH264Frames_ = false;
     struct PendingDecodedFrame {
         DecodedVideoFrame frame;

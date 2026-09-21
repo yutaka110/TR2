@@ -1134,6 +1134,7 @@ bool H264Encoder::PumpHardwareEncoderEvents(
         }
 
         if (type == METransformNeedInput) {
+            if(trackedMode_&&!trackedInputCredits_.Add()){trackedError_=true;return false;}
             hardwareNeedsInput_ = true;
         }
         else if (type == METransformHaveOutput) {
@@ -1237,11 +1238,13 @@ bool H264Encoder::SubmitFrameNoWait(const BYTE* data, UINT dataSize) {
 }
 
 bool H264Encoder::CanAcceptInput() const {
-    return !asyncHardwareEncoder_ || hardwareNeedsInput_;
+    return !asyncHardwareEncoder_ || (trackedMode_?trackedInputCredits_.pending>0:hardwareNeedsInput_);
 }
 
 bool H264Encoder::SubmitTrackedFrame(const BYTE* data, UINT size, int64_t pts) {
-    trackedMode_ = true;
+    lastFrameTiming_={};lastFrameTiming_.hardware=usingHardwareEncoder_;lastFrameTiming_.async=asyncHardwareEncoder_;
+    const auto trackedStart=EncoderClock::now();
+    EnableTrackedMode();
     if (!encoder_ || trackedDraining_ || pts < 0 || !data ||
         size != width_ * height_ * 3 / 2 || !CanAcceptInput()) return false;
     ComPtr<IMFSample> sample;
@@ -1256,19 +1259,26 @@ bool H264Encoder::SubmitTrackedFrame(const BYTE* data, UINT size, int64_t pts) {
         memcpy(dest,data,size); buffer->Unlock();
         if (FAILED(buffer->SetCurrentLength(size)) || FAILED(sample->AddBuffer(buffer.Get()))) return false;
     }
+    lastFrameTiming_.sampleCreateMs=ElapsedMs(trackedStart);
     if (FAILED(sample->SetSampleTime(pts)) || FAILED(sample->SetSampleDuration(10000000/fps_))) return false;
+    const auto trackedInputStart=EncoderClock::now();
     if (FAILED(encoder_->ProcessInput(0,sample.Get(),0))) return false;
-    hardwareNeedsInput_=false;
+    lastFrameTiming_.processInputMs=ElapsedMs(trackedInputStart);lastFrameTiming_.callMs=ElapsedMs(trackedStart);
+    if(asyncHardwareEncoder_&&!trackedInputCredits_.Take())return false;
+    hardwareNeedsInput_=trackedInputCredits_.pending>0;
     ++frameCount_;
     return true;
 }
 
 bool H264Encoder::PollTrackedOutput(TrackedAccessUnit& out) {
-    out={}; trackedMode_=true;
+    out={}; EnableTrackedMode();
     if (!encoder_) return false;
     if (asyncHardwareEncoder_) {
         // No event is a normal empty poll; actual codec errors are latched.
-        if (trackedOutputs_.empty()) PumpHardwareEncoderEvents(0,nullptr);
+        // Drain a bounded batch of available events. Do not sleep between a
+        // NeedInput and HaveOutput already waiting in the same event queue.
+        if (trackedOutputs_.empty())for(int i=0;i<16&&!trackedError_;++i)
+            if(!PumpHardwareEncoderEvents(0,nullptr))break;
         if(trackedError_)return false;
         if (!trackedOutputs_.empty()) { out=std::move(trackedOutputs_.front()); trackedOutputs_.pop_front(); }
         return true;
@@ -1281,7 +1291,7 @@ bool H264Encoder::PollTrackedOutput(TrackedAccessUnit& out) {
 
 bool H264Encoder::BeginTrackedDrain() {
     if (!encoder_ || trackedDraining_) return false;
-    trackedMode_=true; trackedDraining_=true; trackedDrainComplete_=false;
+    EnableTrackedMode(); trackedDraining_=true; trackedDrainComplete_=false;trackedInputCredits_.EndStream();
     return SUCCEEDED(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM,0)) &&
            SUCCEEDED(encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN,0));
 }
@@ -1707,6 +1717,7 @@ bool H264Encoder::EncodeFrame(const BYTE* rgbData, UINT dataSize, std::vector<BY
 
 void H264Encoder::Shutdown() {
     trackedMode_ = trackedDraining_ = trackedDrainComplete_ = false;
+    trackedInputCredits_={};
     trackedError_=false;
     trackedOutputs_.clear();
     lastOutputPtsValid_ = false;

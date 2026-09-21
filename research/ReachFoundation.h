@@ -1,4 +1,6 @@
 #pragma once
+#include "ReachBufferedLog.h"
+#include "ReachLinkModel.h"
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -8,6 +10,10 @@
 namespace reach {
 struct FoundationConfig {
     std::string stage = "foundation", encoder = "auto";
+    std::string commandScenario="normal";
+    bool boundedLink=false;
+    LinkConfig uplink,downlink;
+    bool HasVisualControl() const {return stage=="visual_control"||stage=="command_udp";}
     double initialY = 0, initialYaw = 0, corridorWidth = 0.75;
     std::string task;
     uint32_t seed = 0;
@@ -55,7 +61,7 @@ private:
     void Manifest(const FoundationConfig& config, const std::filesystem::path& executable, bool headless);
     std::string id_;
     std::filesystem::path directory_;
-    std::ofstream events_;
+    BufferedLog events_;
     std::mutex mutex_;
     uint64_t startUs_ = 0, sequence_ = 0;
     bool finished_ = false;

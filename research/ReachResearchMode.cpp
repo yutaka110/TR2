@@ -1,6 +1,7 @@
 #define NOMINMAX
 #include "ReachFoundation.h"
 #include "ReachRobotVideo.h"
+#include "ReachCommandUdp.h"
 #include <Windows.h>
 #include <algorithm>
 #include <chrono>
@@ -46,6 +47,12 @@ struct Dashboard {
     double corridorWidth=.75;
     RobotTruth truth;
     RobotVideoView video;
+    bool visual=false;
+    MotionCommand command;
+    bool commandUdp=false;
+    bool boundedLink=false;
+    std::wstring linkCaption;
+    CommandApplication applied;
 };
 void Fill(HDC dc,RECT rect,COLORREF color) {
     HBRUSH brush=CreateSolidBrush(color); FillRect(dc,&rect,brush); DeleteObject(brush);
@@ -73,13 +80,20 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wparam,LPARAM lparam
             Fill(buffer,client,RGB(241,245,250));
             Fill(buffer,{0,0,client.right,128},RGB(18,37,62));
             Label(buffer,36,21,1000,40,L"Reach-RT  /  Robot & Video Lab",30,RGB(255,255,255),true);
-            Label(buffer,38,72,1040,36,L"G1-02 / 03   仮想ロボット・実映像通信・撮影時刻の照合",21,RGB(190,216,240));
+            Label(buffer,38,72,1040,36,state->boundedLink?state->linkCaption:state->commandUdp?L"G1-05   映像 → 認識 → 指令UDP → 期限監視・制動":state->visual?L"G1-04   受信画像から認識・制御 ／ 既知マーカー・平面移動":L"G1-02 / 03   仮想ロボット・実映像通信・撮影時刻の照合",21,RGB(190,216,240));
             Label(buffer,36,146,640,30,L"受信映像  —  H.264 / RNVP / UDP / 復号",20,RGB(24,46,70),true);
             Fill(buffer,{36,188,676,548},RGB(25,36,47));
             if(!state->video.bgra.empty()) {
                 BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=640;
                 info.bmiHeader.biHeight=-360;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
                 StretchDIBits(buffer,36,188,640,360,0,0,640,360,state->video.bgra.data(),&info,DIB_RGB_COLORS,SRCCOPY);
+                if(state->visual&&state->video.observation.valid){
+                    HPEN pen=CreatePen(PS_SOLID,2,RGB(40,230,120));auto oldPen=SelectObject(buffer,pen);
+                    const auto& corners=state->video.observation.corners;
+                    MoveToEx(buffer,36+int(corners[3].u),188+int(corners[3].v),nullptr);
+                    for(auto corner:corners)LineTo(buffer,36+int(corner.u),188+int(corner.v));
+                    SelectObject(buffer,oldPen);DeleteObject(pen);
+                }
             } else Label(buffer,100,345,520,45,L"コーデックの出力を待っています",22,RGB(255,255,255));
             Fill(buffer,{702,188,client.right-36,548},RGB(255,255,255));
             Label(buffer,724,205,340,32,L"観測用マップ（真値）",20,RGB(24,46,70),true);
@@ -98,7 +112,19 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wparam,LPARAM lparam
             Label(buffer,724,432,340,28,L"復号ID  "+std::to_wstring(state->video.frameId),22,RGB(24,46,70),true);
             Label(buffer,724,473,340,50,L"撮影→復号  "+std::to_wstring(static_cast<int>(state->video.ageMs))+L" ms\n画像番号・PTS照合  "+std::to_wstring(state->video.matched)+L" / "+std::to_wstring(state->video.decoded),18,RGB(24,112,86));
             Label(buffer,36,563,1040,36,L"撮影 "+std::to_wstring(state->video.captured)+L"   符号化 "+std::to_wstring(state->video.encoded)+L"   復号 "+std::to_wstring(state->video.decoded)+L"   不一致 "+std::to_wstring(state->video.errors)+L"     "+state->state,20,RGB(24,46,70),true);
-            Label(buffer,36,605,1040,55,L"接続検証：12秒まで前進、以後は制動。画像による自動制御は次のG1-04です。\n上端の白黒帯は画像IDの検証用です。マップの真値は制御に渡しません。",17,RGB(78,100,121));
+            if(state->visual){
+                const auto& c=state->command;const auto& o=state->video.observation;
+                wchar_t text[300];swprintf_s(text,L"%s / %s   指令 v %.2f m/s  ω %.2f rad/s   使用画像 #%u（%.0f ms）\n画像推定 x %.2f / y %.2f m  yaw %.1f° ／ %s  ※指令はローカル接続。UDP化はG1-05",
+                    Wide(c.state).c_str(),Wide(c.reason).c_str(),c.v,c.w,c.sourceFrameId,c.ageMs,o.x,o.y,o.yaw*180/3.141592653589793,Wide(o.reason).c_str());
+                Label(buffer,36,605,1040,55,text,17,RGB(38,84,109));
+                if(state->commandUdp){
+                    Fill(buffer,{36,605,1100,660},RGB(241,245,250));
+                    const auto& a=state->applied;
+                    swprintf_s(text,L"生成 #%llu  v %.2f / ω %.2f  → UDP受信 #%llu   %s\n実適用 v %.2f m/s / ω %.2f rad/s　使用画像 #%u ／ 指令期限100 ms・通信断監視250 ms",
+                        c.sequence,c.v,c.w,a.command.sequence,Wide(a.reason).c_str(),a.command.v,a.command.w,a.command.sourceFrameId);
+                    Label(buffer,36,605,1040,55,text,17,RGB(38,84,109));
+                }
+            }else Label(buffer,36,605,1040,55,L"接続検証：12秒まで前進、以後は制動。画像による自動制御は次のG1-04です。\n上端の白黒帯は画像IDの検証用です。マップの真値は制御に渡しません。",17,RGB(78,100,121));
             Label(buffer,36,660,1040,28,L"保存先（下の欄で全文を選択・コピーできます）",15,RGB(84,104,126));
             BitBlt(dc,0,0,client.right,client.bottom,buffer,0,0,SRCCOPY);
             SelectObject(buffer,old);DeleteObject(bitmap);DeleteDC(buffer);EndPaint(window,&paint);return 0;
@@ -150,17 +176,35 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
         if(length==0||length>=32768) throw std::runtime_error("executable path unavailable");
         session=std::make_unique<ResearchSession>(config,outputEnv.empty()?L"artifacts/reach_rt/runs":outputEnv,executable,headless);
         Dashboard state{Wide(session->Id()),Wide(config.task),session->Directory().wstring()};
+        state.boundedLink=config.boundedLink;
         state.durationUs=config.durationUs;
-        state.robot=config.stage=="robot_video";
+        state.robot=config.stage!="foundation";
+        state.visual=config.HasVisualControl();
+        state.commandUdp=config.stage=="command_udp";
         state.corridorWidth=config.corridorWidth;
         std::unique_ptr<RobotWorld> robot;
         std::unique_ptr<RobotVideo> video;
-        std::ofstream worldLog;
+        std::unique_ptr<RemoteTaskController> controller;
+        std::unique_ptr<CommandUdp> commandLink;
+        BufferedLog worldLog,commandLog,captureEvaluation,appliedCommands;
+        uint64_t commandCount=0,movingCommands=0,stopCommands=0;
         if(state.robot) {
             robot=std::make_unique<RobotWorld>(config.task,config.initialY,config.initialYaw,config.corridorWidth);
             video=std::make_unique<RobotVideo>(config,*session);
             worldLog.open(session->Directory()/"world.csv");worldLog.exceptions(std::ios::badbit|std::ios::failbit);
+            worldLog.precision(12);
             worldLog<<"physics_tick,simulation_s,x_m,y_m,yaw_rad,v_m_s,w_rad_s,collision,out_of_bounds,goal_hold_s,success,timeout\n";
+            if(state.visual){
+                controller=std::make_unique<RemoteTaskController>(config.task,config.corridorWidth);
+                commandLog.open(session->Directory()/"commands.csv");commandLog.exceptions(std::ios::badbit|std::ios::failbit);commandLog.precision(12);
+                commandLog<<"sequence,generated_us,valid_until_us,source_frame_id,source_stream_id,source_capture_us,age_ms,state,reason,v_m_s,w_rad_s,distance_m,wall_margin_m,estimated_complete\n";
+                captureEvaluation.open(session->Directory()/"capture_evaluation.csv");captureEvaluation.exceptions(std::ios::badbit|std::ios::failbit);captureEvaluation.precision(12);
+                captureEvaluation<<"frame_id,physics_tick,x_m,y_m,yaw_rad\n";
+                appliedCommands.open(session->Directory()/(state.commandUdp?"udp_applied_commands.csv":"local_applied_commands.csv"));appliedCommands.exceptions(std::ios::badbit|std::ios::failbit);appliedCommands.precision(12);
+                appliedCommands<<"physics_tick,applied_us,sequence,live,v_m_s,w_rad_s"<<(state.commandUdp?",reason,accepted_us,generated_us,valid_until_us,source_frame_id,source_capture_us\n":"\n");
+                if(state.commandUdp)commandLink=std::make_unique<CommandUdp>(session->Id(),session->Directory(),config.commandScenario,config.boundedLink?&config.downlink:nullptr);
+                session->Event("visual_control_started",state.commandUdp?"receiver pixels -> fixed controller -> serialized reverse UDP -> robot deadline/watchdog":"receiver pixels -> marker pose -> fixed controller -> local diagnostic adapter; command UDP pending G1-05");
+            }
         }
         state.rates[0]=config.physicsHz; state.rates[1]=config.cameraHz; state.rates[2]=config.controlHz;
         if(!headless) {
@@ -172,12 +216,17 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                 nullptr,nullptr,wc.hInstance,&state);
             if(!window) throw std::runtime_error("research window creation failed");
             if(state.robot) SetWindowTextW(window,L"Reach-RT | G1-02 / 03 Robot & Video");
+            if(state.visual) SetWindowTextW(window,L"Reach-RT | G1-04 Received Image Control");
+            if(state.commandUdp) SetWindowTextW(window,L"Reach-RT | G1-05 Reverse Command UDP");
+            if(state.boundedLink)SetWindowTextW(window,L"Reach-RT | G2-01 Bidirectional Capacity Link");
             HWND pathEdit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",state.directory.c_str(),WS_CHILD|WS_VISIBLE|ES_READONLY|ES_AUTOHSCROLL,
                 36,690,1040,25,window,nullptr,wc.hInstance,nullptr);
             SendMessageW(pathEdit,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
             ShowWindow(window,SW_SHOW); UpdateWindow(window);
         }
         const auto origin=MonotonicUs();
+        if(video)video->StartLink(origin);
+        if(commandLink)commandLink->Start(origin);
         session->Event("schedule_origin","absolute monotonic microseconds",origin);
         PeriodicDeadline physics(origin,config.physicsHz,config.maxCatchupSteps);
         PeriodicDeadline camera(origin,config.cameraHz,config.maxCatchupSteps);
@@ -200,30 +249,75 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
             if(cameras)session->Event("clock_tick","camera",cameras);
             if(robot) {
                 video->Check();
+                if(controller&&controls){
+                    if(controls>1)throw std::runtime_error("visual control deadline missed; cannot reconstruct historical observations");
+                    const auto observed=video->Observation();
+                    state.command=controller->Update(observed,MonotonicUs());
+                    if(commandLink)commandLink->Offer(state.command);
+                    const auto& c=state.command;++commandCount;if(c.v>0||std::abs(c.w)>0)++movingCommands;else++stopCommands;
+                    commandLog<<c.sequence<<','<<c.generatedUs<<','<<c.validUntilUs<<','<<c.sourceFrameId<<','<<c.sourceStreamId<<','<<c.sourceCaptureUs<<','<<c.ageMs<<','
+                        <<c.state<<','<<c.reason<<','<<c.v<<','<<c.w<<','<<c.distanceM<<','<<c.wallMarginM<<','<<c.estimatedComplete<<'\n';
+                }
+                if(commandLink)commandLink->Pump();
                 for(uint32_t i=0;i<physical;++i) {
                     // Script reads time only. No pose/goal information enters its command.
                     const auto tick=physics.Count()-physical+i;
-                    if(tick%5==0)robot->Command(tick<1200?.15:0,0);
+                    if(commandLink){
+                        const auto appliedUs=MonotonicUs();state.applied=commandLink->Application(appliedUs);
+                        const auto& a=state.applied;const auto& c=a.command;
+                        // Only decoded UDP receiver state enters the actuator.
+                        robot->Command(c.v,c.w);
+                        appliedCommands<<tick+1<<','<<appliedUs<<','<<c.sequence<<','<<a.live<<','<<c.v<<','<<c.w<<','<<a.reason<<','<<a.acceptedUs<<','<<c.generatedUs<<','<<c.validUntilUs<<','<<c.sourceFrameId<<','<<c.sourceCaptureUs<<'\n';
+                    }else if(controller){
+                        // Temporary local adapter; G1-05 replaces this with the UDP command receiver.
+                        const auto appliedUs=MonotonicUs();const bool live=appliedUs<=state.command.validUntilUs;
+                        robot->Command(live?state.command.v:0,live?state.command.w:0);
+                        appliedCommands<<tick+1<<','<<appliedUs<<','<<state.command.sequence<<','<<live<<','<<(live?state.command.v:0)<<','<<(live?state.command.w:0)<<'\n';
+                    }else if(tick%5==0)robot->Command(tick<1200?.15:0,0);
                     robot->Step(.01);const auto& t=robot->Truth();
                     worldLog<<tick+1<<','<<t.elapsed<<','<<t.x<<','<<t.y<<','<<t.yaw<<','<<t.v<<','<<t.w<<','<<t.collision<<','<<t.outOfBounds<<','<<t.hold<<','<<t.success<<','<<t.timeout<<'\n';
                 }
                 if(cameras>1) throw std::runtime_error("camera deadline missed; historical pixels cannot be reconstructed");
-                if(cameras)video->Capture(*robot);
+                if(cameras){
+                    video->Capture(*robot);
+                    if(controller){
+                        // Evaluation sink only. Nothing reads these values back into control.
+                        const auto& evaluation=robot->Truth();
+                        captureEvaluation<<camera.Count()<<','<<physics.Count()<<','<<evaluation.x<<','<<evaluation.y<<','<<evaluation.yaw<<'\n';
+                    }
+                }
                 state.truth=robot->Truth();
                 if(now>=nextUi)state.video=video->View();
             }
             state.elapsedUs=until-origin;
+            if(state.boundedLink&&now>=nextUi){
+                auto rate=[&](const LinkConfig& link){uint64_t bps=0;for(auto p:link.capacity){if(p.atUs>state.elapsedUs)break;bps=p.bps;}return bps;};
+                state.linkCaption=L"G2-01  双方向容量・FIFO ／ 上り "+std::to_wstring(rate(config.uplink))+L" bps・下り "+std::to_wstring(rate(config.downlink))+L" bps";
+            }
             state.ticks[0]=physics.Count(); state.ticks[1]=camera.Count(); state.ticks[2]=control.Count();
             if(now>=nextHeartbeat) { session->Event("heartbeat",state.robot?"robot/video validation active":"foundation scheduling active"); nextHeartbeat=now+1000000; }
             if(now>=nextUi) { if(window)InvalidateRect(window,nullptr,FALSE); nextUi=now+100000; }
             if(now>=origin+config.durationUs) {
+                if(commandLink)commandLink->Finish();
                 if(video) {
                     const bool ok=video->Finish();state.video=video->View();
                     if(!ok) throw std::runtime_error("robot/video validation failed; see robot_video_summary.json");
                 }
-                session->Finish(state.robot?"robot_video_completed":"foundation_completed",state.robot?"scripted robot/video identity validation; autonomous task not run":"configured clock interval completed; task not run",physics.Count(),camera.Count(),control.Count());
+                if(controller){
+                    const auto& t=robot->Truth();
+                    std::ofstream out(session->Directory()/"visual_control_summary.json");out.exceptions(std::ios::badbit|std::ios::failbit);
+                    out<<"{\"commands\":"<<commandCount<<",\"moving_commands\":"<<movingCommands<<",\"stop_commands\":"<<stopCommands
+                        <<",\"recognized\":"<<state.video.recognized<<",\"rejected\":"<<state.video.rejected<<",\"local_evaluator_success\":"<<(t.success?"true":"false")
+                        <<",\"collision\":"<<(t.collision?"true":"false")<<",\"out_of_bounds\":"<<(t.outOfBounds?"true":"false")
+                        <<",\"command_udp\":"<<(state.commandUdp?"true":"false")<<",\"closed_loop_validated\":false,\"task_result\":\""<<(state.commandUdp?"udp_integration_only":"local_diagnostic_only")<<"\"}\n";
+                }
+                // Flush measurement buffers after scheduling ends, before certifying completion.
+                if(worldLog.is_open())worldLog.close();if(commandLog.is_open())commandLog.close();
+                if(captureEvaluation.is_open())captureEvaluation.close();if(appliedCommands.is_open())appliedCommands.close();
+                session->Finish(state.commandUdp?"command_udp_completed":state.visual?"visual_control_completed":state.robot?"robot_video_completed":"foundation_completed",state.boundedLink?"capacity-limited UDP trial recorded; link verification and task outcome adjudicated separately":state.commandUdp?"reverse UDP trial recorded; task and G1 gate adjudicated by external auditor":state.visual?"image recognition/control local diagnostic completed; command UDP and G1-06 validation pending":state.robot?"scripted robot/video identity validation; autonomous task not run":"configured clock interval completed; task not run",physics.Count(),camera.Count(),control.Count());
                 state.completed=true; state.state=L"基盤確認 完了";
                 if(state.robot)state.state=L"接続・照合 完了";
+                if(state.visual)state.state=L"認識・指令生成 記録完了";
                 if(window) InvalidateRect(window,nullptr,FALSE);
                 break;
             }

@@ -1435,7 +1435,10 @@ void NetworkVideoReceiver::DecodeLoop() {
         }
 
         UpdateInputFrameAge(inputFrameAgeMs);
-        if (IsStaleFrame(inputFrameAgeMs, freshnessDropThresholdMs)) {
+        // The audited research path preserves the ordered AU stream and delivers
+        // decoded pixels to its observer. Recognition/control owns its 200 ms
+        // capture deadline; presentation freshness must not silently remove AUs.
+        if (!requireContiguousH264Frames_ && IsStaleFrame(inputFrameAgeMs, freshnessDropThresholdMs)) {
             std::lock_guard<std::mutex> lock(mutex_);
             stats_.freshnessDroppedFrames++;
             RecordDropLocked(
@@ -1727,7 +1730,7 @@ void NetworkVideoReceiver::DecodeLoop() {
                 FrameFreshnessAgeMs(
                     decodedFrame.decodedTimeUs,
                     decodedFrame);
-            if (IsStaleFrame(
+            if (!requireContiguousH264Frames_ && IsStaleFrame(
                     decodedFreshnessAgeMs,
                     freshnessDropThresholdMs)) {
                 std::lock_guard<std::mutex> lock(mutex_);

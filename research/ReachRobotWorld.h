@@ -20,7 +20,7 @@ public:
     const std::string& Task() const { return task_; }
     double CorridorWidth() const { return corridorWidth_; }
     std::vector<uint8_t> CaptureNv12(uint32_t frameId,uint32_t streamId) const;
-    static std::string ModelJson();
+    static std::string ModelJson(bool visualControl=false,bool commandUdp=false);
 private:
     RobotTruth truth_;
     std::string task_;

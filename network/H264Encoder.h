@@ -1,4 +1,5 @@
 #pragma once
+#include "AsyncInputCredits.h"
 #include <mfapi.h>
 #include <mftransform.h>
 #include <mfidl.h>
@@ -61,8 +62,10 @@ public:
     bool PollTrackedOutput(TrackedAccessUnit& output);
     bool BeginTrackedDrain();
     bool TrackedDrainComplete() const { return trackedDrainComplete_; }
+    net::AsyncInputCredits TrackedInputCredits() const { return trackedInputCredits_; }
 
 private:
+    void EnableTrackedMode(){if(!trackedMode_){trackedMode_=true;if(asyncHardwareEncoder_&&hardwareNeedsInput_)trackedInputCredits_.Add();}}
     bool InitializeInternal(
         UINT32 width,
         UINT32 height,
@@ -98,6 +101,7 @@ private:
     FrameTiming lastFrameTiming_{};
     bool trackedMode_=false, trackedDraining_=false, trackedDrainComplete_=false;
     bool trackedError_=false;
+    net::AsyncInputCredits trackedInputCredits_;
     int64_t lastOutputPts100ns_=0;
     bool lastOutputPtsValid_=false;
     std::deque<TrackedAccessUnit> trackedOutputs_;

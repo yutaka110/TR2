@@ -65,13 +65,29 @@ std::string ReadFile(const std::filesystem::path& path, uint64_t maxBytes) {
 FoundationConfig FoundationConfig::Parse(const std::string& text) {
     const auto root=ParseJson(text);
     const auto stage=root.At("stage").StringValue();
-    if(stage=="robot_video") Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder"});
+    const bool bounded=root.ObjectValue().count("link_model")!=0;
+    if(stage=="command_udp"&&bounded) Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link","link_model"});
+    else if(stage=="command_udp") Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link"});
+    else if(stage=="robot_video"||stage=="visual_control") Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder"});
     else Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps"});
     if(Number(root,"schema_version",1,1,true)!=1) throw std::runtime_error("unsupported schema");
-    if(stage!="foundation"&&stage!="robot_video") throw std::runtime_error("unsupported research stage");
+    if(stage!="foundation"&&stage!="robot_video"&&stage!="visual_control"&&stage!="command_udp") throw std::runtime_error("unsupported research stage");
     FoundationConfig config;
+    config.boundedLink=bounded;
+    if(bounded){
+        const auto& links=root.At("link_model");Keys(links,{"uplink","downlink"});
+        auto parseLink=[&](const char* direction){
+            const auto& value=links.At(direction);Keys(value,{"queue_ip_bytes","capacity"});LinkConfig c;
+            c.queueBytes=static_cast<uint64_t>(Number(value,"queue_ip_bytes",28,16777216,true));c.capacity.clear();
+            const auto* trace=std::get_if<Json::Array>(&value.At("capacity").value);
+            if(!trace)throw std::runtime_error("capacity must be an array");
+            for(const auto& point:*trace){Keys(point,{"at_us","bps"});c.capacity.push_back({static_cast<uint64_t>(Number(point,"at_us",0,3600000000,true)),static_cast<uint64_t>(Number(point,"bps",0,1000000000,true))});}
+            c.Validate();return c;
+        };
+        config.uplink=parseLink("uplink");config.downlink=parseLink("downlink");
+    }
     config.stage=stage;
-    if(stage=="robot_video") {
+    if(stage!="foundation") {
         config.encoder=root.At("encoder").StringValue();
         if(config.encoder!="auto"&&config.encoder!="software") throw std::runtime_error("encoder must be auto or software");
         const auto& world=root.At("world");
@@ -79,6 +95,12 @@ FoundationConfig FoundationConfig::Parse(const std::string& text) {
         config.initialY=Number(world,"initial_y_m",-0.15,0.15);
         config.initialYaw=Number(world,"initial_yaw_rad",-0.175,0.175);
         config.corridorWidth=Number(world,"corridor_width_m",0.65,0.90);
+    }
+    if(stage=="command_udp"){
+        const auto& link=root.At("command_link");Keys(link,{"scenario"});config.commandScenario=link.At("scenario").StringValue();
+        const auto& s=config.commandScenario;
+        if(s!="normal"&&s!="duplicate"&&s!="reorder"&&s!="late"&&s!="outage"&&s!="recovery"&&s!="invalid")throw std::runtime_error("unknown command scenario");
+        if(bounded&&s!="normal")throw std::runtime_error("capacity model requires normal command scenario; diagnostics are isolated");
     }
     config.task=root.At("task").StringValue();
     if(config.task!="T1"&&config.task!="T2") throw std::runtime_error("task must be T1 or T2");
@@ -91,7 +113,7 @@ FoundationConfig FoundationConfig::Parse(const std::string& text) {
     config.controlHz=static_cast<uint32_t>(Number(rates,"control",1,200,true));
     config.maxCatchupSteps=static_cast<uint32_t>(Number(root,"max_catchup_steps",1,100,true));
     if(config.physicsHz<config.controlHz) throw std::runtime_error("physics rate must be >= control rate");
-    if(stage=="robot_video"&&(config.physicsHz!=100||config.cameraHz!=30||config.controlHz!=20||config.durationUs>60000000))
+    if(stage!="foundation"&&(config.physicsHz!=100||config.cameraHz!=30||config.controlHz!=20||config.durationUs>60000000))
         throw std::runtime_error("robot_video requires 100/30/20 Hz and duration <= 60s");
     config.raw=text;
     return config;
@@ -103,8 +125,16 @@ std::string FoundationConfig::EffectiveJson() const {
         << ",\"seed\":" << seed << ",\"duration_s\":" << std::fixed << std::setprecision(6) << durationUs/1000000.0
         << ",\"tick_rates_hz\":{\"physics\":" << physicsHz << ",\"camera\":" << cameraHz << ",\"control\":" << controlHz
         << "},\"max_catchup_steps\":" << maxCatchupSteps;
-    if(stage=="robot_video") out << ",\"encoder\":" << JsonString(encoder) << ",\"world\":{\"initial_y_m\":" << initialY
+    if(stage!="foundation") out << ",\"encoder\":" << JsonString(encoder) << ",\"world\":{\"initial_y_m\":" << initialY
         << ",\"initial_yaw_rad\":" << initialYaw << ",\"corridor_width_m\":" << corridorWidth << "}";
+    if(stage=="command_udp")out<<",\"command_link\":{\"scenario\":"<<JsonString(commandScenario)<<"}";
+    if(boundedLink){
+        out<<",\"link_model\":{";bool firstDirection=true;
+        for(const auto& pair:{std::pair{"uplink",&uplink},std::pair{"downlink",&downlink}}){
+            if(!firstDirection)out<<',';firstDirection=false;out<<JsonString(pair.first)<<":{\"queue_ip_bytes\":"<<pair.second->queueBytes<<",\"capacity\":[";bool first=true;
+            for(auto point:pair.second->capacity){if(!first)out<<',';first=false;out<<"{\"at_us\":"<<point.atUs<<",\"bps\":"<<point.bps<<'}';}out<<"]}";
+        }out<<'}';
+    }
     out << "}\n";
     return out.str();
 }
@@ -151,7 +181,7 @@ ResearchSession::ResearchSession(const FoundationConfig& config,const std::files
     startUs_=MonotonicUs();
     Manifest(config,executable,headless);
     // Origin is fixed before startup IO; actual schedule uses a logged later origin.
-    Event("session_started",config.stage=="foundation"?"foundation only; task and seed are labels":"robot/video validation; scripted commands; no visual controller; seed reserved (deterministic world)");
+    Event("session_started",config.stage=="command_udp"?"received-image controller; reverse UDP with robot-side deadline/watchdog":config.stage=="visual_control"?"received-image controller; local diagnostic adapter; no command UDP":config.stage=="foundation"?"foundation only; task and seed are labels":"robot/video validation; scripted commands; no visual controller; seed reserved (deterministic world)");
 }
 void ResearchSession::Manifest(const FoundationConfig& config,const std::filesystem::path& executable,bool headless) {
     std::ostringstream out;
@@ -163,7 +193,7 @@ void ResearchSession::Manifest(const FoundationConfig& config,const std::filesys
         << ",\"effective_config_sha256\":" << JsonString(Sha256(config.EffectiveJson()))
         << ",\"headless\":" << (headless?"true":"false")
         << ",\"capabilities\":{\"config_validation\":true,\"common_clock\":true,\"lifecycle_log\":true,"
-        << "\"world\":" << (config.stage=="robot_video"?"true":"false") << ",\"video_transport\":" << (config.stage=="robot_video"?"true":"false") << ",\"visual_control\":false,\"command_udp\":false},"
+        << "\"world\":" << (config.stage!="foundation"?"true":"false") << ",\"video_transport\":" << (config.stage!="foundation"?"true":"false") << ",\"visual_control\":" << (config.HasVisualControl()?"true":"false") << ",\"command_udp\":"<<(config.stage=="command_udp"?"true":"false")<<",\"capacity_queue_model\":"<<(config.boundedLink?"true":"false")<<"},"
            "\"task_result\":\"not_run\",\"build_configuration\":";
 #ifdef _DEBUG
     out << "\"Debug\"";
@@ -183,7 +213,7 @@ void ResearchSession::Event(const std::string& type,const std::string& detail,ui
             << ",\"monotonic_us\":" << now << ",\"elapsed_us\":" << now-startUs_
             << ",\"event\":" << JsonString(type) << ",\"detail\":" << JsonString(detail)
             << ",\"count\":" << count << "}\n";
-    if(type!="clock_tick") events_.flush();
+    if(type=="session_started"||type=="session_finished") events_.flush();
 }
 void ResearchSession::Finish(const std::string& status,const std::string& reason,
                              uint64_t physics,uint64_t camera,uint64_t control) {
