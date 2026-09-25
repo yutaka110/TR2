@@ -91,8 +91,8 @@ FoundationConfig FoundationConfig::Parse(const std::string& text) {
     config.budgeted=budgeted;
     config.stateFeedback=stateFeedback;
     if(baseline){const auto& b=root.At("baseline");Keys(b,{"mode","lambda"});config.baseline=b.At("mode").StringValue();config.baselineLambda=Number(b,"lambda",0,3);
-        if(config.baseline!="B0"&&config.baseline!="B1"&&config.baseline!="B2"&&config.baseline!="B3"&&config.baseline!="G4-01"&&config.baseline!="G4-02")throw std::runtime_error("unknown baseline mode");
-        if((config.baseline=="G4-01"||config.baseline=="G4-02")&&config.baselineLambda!=.1)throw std::runtime_error("G4 development modes have no tunable lambda");
+        if(config.baseline!="B0"&&config.baseline!="B1"&&config.baseline!="B2"&&config.baseline!="B3"&&config.baseline!="G4-01"&&config.baseline!="G4-02"&&config.baseline!="G4-03"&&config.baseline!="G4-04")throw std::runtime_error("unknown baseline mode");
+        if((config.baseline=="G4-01"||config.baseline=="G4-02"||config.baseline=="G4-03")&&config.baselineLambda!=.1)throw std::runtime_error("G4 development modes have no tunable lambda");
         if(config.baseline=="B0"&&config.baselineLambda!=.1)throw std::runtime_error("B0 lambda is fixed at 0.1 (unused)");}
     if(budgeted){
         const auto& value=root.At("ip_budget");Keys(value,{"total","uplink","downlink","fec_group_chunks"});
@@ -193,8 +193,14 @@ std::string Sha256(const std::string& bytes) {
     BCRYPT_ALG_HANDLE algorithm=nullptr;
     if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0) throw std::runtime_error("SHA256 provider failed");
     unsigned char hash[32]{};
-    const auto status=BCryptHash(algorithm,nullptr,0,reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())),
-                               static_cast<ULONG>(bytes.size()),hash,32);
+    // The Debug project targets Windows 8, where the BCryptHash one-shot API
+    // is not declared. The incremental CNG API produces the same SHA-256 bytes.
+    BCRYPT_HASH_HANDLE state=nullptr;
+    auto status=BCryptCreateHash(algorithm,&state,nullptr,0,nullptr,0,0);
+    if(status>=0)status=BCryptHashData(state,reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())),
+                                    static_cast<ULONG>(bytes.size()),0);
+    if(status>=0)status=BCryptFinishHash(state,hash,32,0);
+    if(state)BCryptDestroyHash(state);
     BCryptCloseAlgorithmProvider(algorithm,0);
     if(status<0) throw std::runtime_error("SHA256 calculation failed");
     constexpr char hex[]="0123456789abcdef"; std::string result;

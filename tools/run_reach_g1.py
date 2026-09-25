@@ -29,7 +29,9 @@ def main() -> int:
     parser.add_argument("--trace-bundle", type=Path, help="G2-02 frozen link.json + manifest.json; verifies seed, hash and horizon")
     parser.add_argument("--budget-config", type=Path, help="G2-03 shared/directional IP budget and FEC configuration")
     parser.add_argument("--state-feedback", action="store_true", help="G2-05 receiver/task reports over budgeted downlink")
-    parser.add_argument("--baseline", choices=['B0','B1','B2','B3','G4-01','G4-02'])
+    parser.add_argument("--baseline", choices=['B0','B1','B2','B3','G4-01','G4-02','G4-03','G4-04'])
+    parser.add_argument('--scheduler-variant',choices=['common','decode','task','joint','scalar'])
+    parser.add_argument("--scheduler-diagnostic",choices=['timeout'],help="G4-03 synthetic budget exhaustion; not a measured CPU overload")
     parser.add_argument("--prediction-model",type=Path,help="G4-02 empirical paths; frozen model and optional .cal copied into invocation")
     parser.add_argument("--process-priority", choices=['normal','above_normal'], default='normal')
     parser.add_argument("--precise-wait",action='store_true')
@@ -105,11 +107,17 @@ def main() -> int:
                  "TR2_REACH_HEADLESS": "0" if args.show else "1"}
     env.update(overrides)
     if args.prediction_model:
-        if args.baseline!='G4-02':parser.error('prediction model requires G4-02')
+        if args.baseline not in ('G4-02','G4-03','G4-04'):parser.error('prediction model requires G4-02/03/04')
         model=invocation/'prediction_paths.csv';model.write_bytes(args.prediction_model.read_bytes())
         cal=Path(str(args.prediction_model)+'.cal')
         if cal.exists():Path(str(model)+'.cal').write_bytes(cal.read_bytes())
         overrides['TR2_REACH_PREDICTION_MODEL']=str(model);env.update(overrides)
+    if args.scheduler_variant:
+        if args.baseline!='G4-04':parser.error('scheduler variant requires G4-04')
+        overrides['TR2_REACH_SCHEDULER_VARIANT']=args.scheduler_variant;env.update(overrides)
+    if args.scheduler_diagnostic:
+        if args.baseline not in ('G4-03','G4-04'):parser.error('scheduler diagnostic requires G4-03/04')
+        overrides['TR2_REACH_SCHEDULER_DIAGNOSTIC']=args.scheduler_diagnostic;env.update(overrides)
     if args.state_diagnostic!='normal':
         if not args.state_feedback:parser.error('state diagnostic requires state feedback')
         overrides['TR2_REACH_STATE_DIAGNOSTIC']=args.state_diagnostic;env.update(overrides)

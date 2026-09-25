@@ -62,6 +62,8 @@ public:
     void SetDatagramSendHook(net::DatagramSendHook hook){sendHook_=std::move(hook);}
     void SetControlReceiveObserver(net::DatagramObserver hook){receiveObserver_=std::move(hook);}
     void SetResearchRepairGate(std::function<bool(uint32_t,std::span<const uint16_t>)> gate){researchRepairGate_=std::move(gate);}
+    // Delayed research repair, re-read the actual cache; send hook still authorizes every packet.
+    uint32_t SendResearchRepair(uint32_t streamId,uint32_t frameId,const std::vector<uint16_t>& chunks);
     void StopResearchPacer(){packetPacer_.Stop();} // Join callbacks before closing opt-in action logs.
     bool ConfigureResearchControlSocket(){int bytes=4194304;u_long mode=1;
         return !controlReceiverRunning_&&setsockopt(udpSocket_,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&bytes),sizeof(bytes))==0&&ioctlsocket(udpSocket_,FIONBIO,&mode)==0;}
@@ -361,7 +363,8 @@ private:
         uint32_t ackLatestSequence = 0,
         uint32_t retransmitAttempt = 0,
         uint32_t ackMissingChunks = 0,
-        uint64_t originalFrameSendTimeUs = 0
+        uint64_t originalFrameSendTimeUs = 0,
+        bool researchAuthorized = false
     );
 
     void TrackSentFrame(

@@ -4,6 +4,7 @@
 #include "ReachCommandUdp.h"
 #include "ReachBudgetTransport.h"
 #include "ReachStateFeedbackUdp.h"
+#include "../application/ReachReportNavigation.h"
 #include <Windows.h>
 #include <algorithm>
 #include <chrono>
@@ -13,6 +14,10 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <atomic>
+#include <functional>
+#include <future>
+#include <mutex>
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
 
@@ -55,6 +60,12 @@ std::wstring Wide(const std::string& value) {
     return result;
 }
 struct Dashboard {
+    ResearchUiNavigation* navigation=nullptr;
+    uint64_t paints=0;
+    std::atomic<bool>* closeSignal=nullptr;
+    std::atomic<bool>* backSignal=nullptr;
+    std::atomic<uint64_t>* paintSignal=nullptr;
+    std::function<void()> refresh;
     std::wstring id, task, directory, state=L"実行中";
     uint64_t elapsedUs=0, durationUs=0;
     uint64_t ticks[3]{};
@@ -71,6 +82,12 @@ struct Dashboard {
     std::wstring linkCaption;
     CommandApplication applied;
 };
+void ReturnToLegacy(HWND window,Dashboard& state){
+    if(!state.navigation)return;
+    if(state.backSignal)state.backSignal->store(true);else state.navigation->returnToLegacy=true;
+    state.closed=true;if(state.closeSignal)state.closeSignal->store(true);
+    if(window)DestroyWindow(window);
+}
 void Fill(HDC dc,RECT rect,COLORREF color) {
     HBRUSH brush=CreateSolidBrush(color); FillRect(dc,&rect,brush); DeleteObject(brush);
 }
@@ -87,9 +104,17 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wparam,LPARAM lparam
         state=static_cast<Dashboard*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
         SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state));
     }
-    if(message==WM_CLOSE) { if(state) state->closed=true; DestroyWindow(window); return 0; }
+    if(message==WM_CLOSE) { if(state){state->closed=true;if(state->closeSignal)state->closeSignal->store(true);} DestroyWindow(window); return 0; }
+    if(message==WM_APP+1&&state&&state->refresh){auto refresh=state->refresh;refresh();return 0;}
+    if(message==WM_COMMAND&&LOWORD(wparam)==4101&&HIWORD(wparam)==BN_CLICKED){
+        if(state&&state->completed)reachui::OpenReportHub(window);
+        return 0;
+    }
+    if(message==WM_COMMAND&&LOWORD(wparam)==4102&&HIWORD(wparam)==BN_CLICKED&&state){ReturnToLegacy(window,*state);return 0;}
     if(message==WM_ERASEBKGND) return 1;
     if(message==WM_PAINT&&state) {
+        ++state->paints;
+        if(state->paintSignal)++*state->paintSignal;
         PAINTSTRUCT paint{}; HDC dc=BeginPaint(window,&paint); RECT client{}; GetClientRect(window,&client);
         HDC buffer=CreateCompatibleDC(dc); HBITMAP bitmap=CreateCompatibleBitmap(dc,client.right,client.bottom);
         auto old=SelectObject(buffer,bitmap);
@@ -174,8 +199,84 @@ LRESULT CALLBACK WindowProc(HWND window,UINT message,WPARAM wparam,LPARAM lparam
     }
     return DefWindowProcW(window,message,wparam,lparam);
 }
+HWND CreateResearchWindow(Dashboard& state,const FoundationConfig& config){
+    HWND window=nullptr;
+    WNDCLASSW wc{}; wc.lpfnWndProc=WindowProc; wc.hInstance=GetModuleHandleW(nullptr);
+    wc.lpszClassName=L"ReachRTFoundation"; wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    if(!RegisterClassW(&wc)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw std::runtime_error("window registration failed");
+    window=CreateWindowExW(0,wc.lpszClassName,L"Reach-RT | G1-01 Research Foundation",
+        WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1140,790,
+        nullptr,nullptr,wc.hInstance,&state);
+    if(!window) throw std::runtime_error("research window creation failed");
+    if(state.robot) SetWindowTextW(window,L"Reach-RT | G1-02 / 03 Robot & Video");
+    if(state.visual) SetWindowTextW(window,L"Reach-RT | G1-04 Received Image Control");
+    if(state.commandUdp) SetWindowTextW(window,L"Reach-RT | G1-05 Reverse Command UDP");
+    if(state.boundedLink)SetWindowTextW(window,L"Reach-RT | G2-02 Time-based Link Trace");
+    if(config.budgeted)SetWindowTextW(window,L"Reach-RT | G2-03 Shared IP Budget");
+    if(config.stateFeedback)SetWindowTextW(window,L"Reach-RT | G2-05 Received Notification Estimate");
+    if(state.navigation){
+        SetWindowTextW(window,L"Reach-RT | Research Live - T2 | 通常画面へ戻れます");
+        HWND back=CreateWindowExW(0,L"BUTTON",L"通常画面へ戻る",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,
+            650,142,195,34,window,reinterpret_cast<HMENU>(4102),wc.hInstance,nullptr);
+        if(!back)throw std::runtime_error("return button creation failed");
+        SendMessageW(back,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
+    }
+    HWND reportButton=CreateWindowExW(0,L"BUTTON",L"検証結果（計測終了後）",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_DISABLED|BS_PUSHBUTTON,
+        858,state.robot?142:174,220,34,window,reinterpret_cast<HMENU>(4101),wc.hInstance,nullptr);
+    if(!reportButton)throw std::runtime_error("report navigation button creation failed");
+    SendMessageW(reportButton,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
+    HWND pathEdit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",state.directory.c_str(),WS_CHILD|WS_VISIBLE|ES_READONLY|ES_AUTOHSCROLL,
+        36,690,1040,25,window,nullptr,wc.hInstance,nullptr);
+    SendMessageW(pathEdit,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
+    ShowWindow(window,SW_SHOW); UpdateWindow(window);
+    return window;
 }
-bool RunResearchModeFromEnvironment(int& exitCode) {
+// The GDI window owns its snapshot and message pump. Expensive paint/activation
+// messages never run on the physics/control clock thread.
+class LiveDashboard {
+    Dashboard pending_,view_;
+    std::mutex mutex_;
+    std::thread thread_;
+    std::atomic<HWND> window_{nullptr};
+    std::atomic<bool> closed_{false},back_{false},failed_{false};
+    std::atomic<uint64_t> paints_{0};
+    void Bind(){
+        view_.closeSignal=&closed_;view_.backSignal=&back_;view_.paintSignal=&paints_;
+        view_.refresh=[this](){Refresh();};
+    }
+    void Refresh(){
+        {std::lock_guard lock(mutex_);view_=pending_;}Bind();
+        const auto window=window_.load();
+        if(view_.completed){EnableWindow(GetDlgItem(window,4101),TRUE);SetWindowTextW(GetDlgItem(window,4101),L"検証結果を開く");}
+        InvalidateRect(window,nullptr,FALSE);
+    }
+public:
+    LiveDashboard(const Dashboard& initial,const FoundationConfig& config):pending_(initial),view_(initial){
+        Bind();std::promise<void> ready;auto future=ready.get_future();
+        thread_=std::thread([this,&config,ready=std::move(ready)]()mutable{
+            try{
+                window_=CreateResearchWindow(view_,config);ready.set_value();
+                MSG message{};
+                while(!view_.closed&&GetMessageW(&message,nullptr,0,0)>0){TranslateMessage(&message);DispatchMessageW(&message);}
+            }catch(...){failed_=true;try{ready.set_exception(std::current_exception());}catch(...){} }
+            const auto window=window_.exchange(nullptr);if(window&&IsWindow(window))DestroyWindow(window);
+            closed_=true;
+        });
+        try{future.get();}catch(...){if(thread_.joinable())thread_.join();throw;}
+    }
+    ~LiveDashboard(){const auto window=window_.load();if(window)PostMessageW(window,WM_CLOSE,0,0);if(thread_.joinable())thread_.join();}
+    void Publish(const Dashboard& snapshot){
+        {std::lock_guard lock(mutex_);pending_=snapshot;}
+        const auto window=window_.load();if(window)PostMessageW(window,WM_APP+1,0,0);
+    }
+    void RequestReturn(){const auto window=window_.load();if(window)PostMessageW(window,WM_COMMAND,MAKEWPARAM(4102,BN_CLICKED),0);}
+    bool Closed()const{return closed_.load();}
+    bool Back()const{return back_.load();}
+    uint64_t Paints()const{return paints_.load();}
+    void Check()const{if(failed_)throw std::runtime_error("research display thread failed");}
+};
+}
+bool RunResearchModeFromEnvironment(int& exitCode,ResearchUiNavigation* navigation) {
     const auto mode=Env(L"TR2_RESEARCH_MODE");
     if(mode.empty()||mode==L"legacy") return false;
     std::unique_ptr<ResearchSession> session;
@@ -192,7 +293,9 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
         const auto length=GetModuleFileNameW(nullptr,executable,32768);
         if(length==0||length>=32768) throw std::runtime_error("executable path unavailable");
         session=std::make_unique<ResearchSession>(config,outputEnv.empty()?L"artifacts/reach_rt/runs":outputEnv,executable,headless);
-        Dashboard state{Wide(session->Id()),Wide(config.task),session->Directory().wstring()};
+        Dashboard state;state.navigation=navigation;state.id=Wide(session->Id());state.task=Wide(config.task);state.directory=session->Directory().wstring();
+        std::unique_ptr<LiveDashboard> liveUi;
+        if(navigation)session->Event("interactive_live_view","Visual Studio same-process demo; not frozen performance evidence");
         state.boundedLink=config.boundedLink;
         state.durationUs=config.durationUs;
         state.robot=config.stage!="foundation";
@@ -231,23 +334,10 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
         }
         state.rates[0]=config.physicsHz; state.rates[1]=config.cameraHz; state.rates[2]=config.controlHz;
         if(!headless) {
-            WNDCLASSW wc{}; wc.lpfnWndProc=WindowProc; wc.hInstance=GetModuleHandleW(nullptr);
-            wc.lpszClassName=L"ReachRTFoundation"; wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
-            if(!RegisterClassW(&wc)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw std::runtime_error("window registration failed");
-            window=CreateWindowExW(0,wc.lpszClassName,L"Reach-RT | G1-01 Research Foundation",
-                WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,1140,790,
-                nullptr,nullptr,wc.hInstance,&state);
-            if(!window) throw std::runtime_error("research window creation failed");
-            if(state.robot) SetWindowTextW(window,L"Reach-RT | G1-02 / 03 Robot & Video");
-            if(state.visual) SetWindowTextW(window,L"Reach-RT | G1-04 Received Image Control");
-            if(state.commandUdp) SetWindowTextW(window,L"Reach-RT | G1-05 Reverse Command UDP");
-            if(state.boundedLink)SetWindowTextW(window,L"Reach-RT | G2-02 Time-based Link Trace");
-            if(config.budgeted)SetWindowTextW(window,L"Reach-RT | G2-03 Shared IP Budget");
-            if(config.stateFeedback)SetWindowTextW(window,L"Reach-RT | G2-05 Received Notification Estimate");
-            HWND pathEdit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",state.directory.c_str(),WS_CHILD|WS_VISIBLE|ES_READONLY|ES_AUTOHSCROLL,
-                36,690,1040,25,window,nullptr,wc.hInstance,nullptr);
-            SendMessageW(pathEdit,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
-            ShowWindow(window,SW_SHOW); UpdateWindow(window);
+            if(navigation){
+                liveUi=std::make_unique<LiveDashboard>(state,config);
+                session->Event("live_return_button_created","return to normal view available");
+            }else window=CreateResearchWindow(state,config);
         }
         const bool preciseWait=Flag(L"TR2_REACH_PRECISE_WAIT");ResearchWait researchWait(preciseWait);
         BufferedLog scheduleTiming;scheduleTiming.open(session->Directory()/"schedule_timing.csv");
@@ -267,6 +357,7 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
         uint64_t nextUi=origin, nextHeartbeat=origin+1000000;
         while(!state.closed) {
             mark("window");
+            if(liveUi){liveUi->Check();state.closed=liveUi->Closed();navigation->returnToLegacy=liveUi->Back();}
             if(window) {
                 MSG message{};
                 while(PeekMessageW(&message,window,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
@@ -274,6 +365,7 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
             if(state.closed) break;
             mark("clock");
             const auto now=MonotonicUs();
+            if(navigation&&navigation->diagnosticReturnAfterUs&&now-origin>=navigation->diagnosticReturnAfterUs){ReturnToLegacy(window,state);break;}
             const auto until=std::min(now,origin+config.durationUs);
             const auto physical=physics.Poll(until);
             const auto controls=control.Poll(until);
@@ -336,10 +428,11 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                 state.linkCaption=L"G2-02  上り "+status(config.uplink)+L"・下り "+status(config.downlink);
                 if(config.budgeted)state.linkCaption=L"G2-03  共通IP予算 "+std::to_wstring(config.ipBudget.total.rateBps)+L" bps / 最大 "+std::to_wstring(config.ipBudget.total.maxBytes)+L" byte ／ 映像・FEC・再送・ACK・指令";
                 if(config.stateFeedback)state.linkCaption=L"G2-05  送信側の受信通知 #"+std::to_wstring(senderEstimate.report.sequence)+L" / 古さ "+std::to_wstring(senderEstimate.ageUs/1000)+L" ms / "+(senderEstimate.notificationLive?L"通知有効":L"未到着・失効")+L" / 世代 "+std::to_wstring(senderEstimate.report.generation);
+                if(navigation&&config.stateFeedback)state.linkCaption=L"G4-04 ライブ / T2 / 20秒   受信通知 #"+std::to_wstring(senderEstimate.report.sequence)+L" / "+(senderEstimate.notificationLive?L"有効":L"未到着・失効")+L" / 古さ "+std::to_wstring(senderEstimate.ageUs/1000)+L" ms";
             }
             state.ticks[0]=physics.Count(); state.ticks[1]=camera.Count(); state.ticks[2]=control.Count();
             if(now>=nextHeartbeat) { session->Event("heartbeat",state.robot?"robot/video validation active":"foundation scheduling active"); nextHeartbeat=now+1000000; }
-            if(now>=nextUi) { if(window)InvalidateRect(window,nullptr,FALSE); nextUi=now+100000; }
+            if(now>=nextUi) { if(window)InvalidateRect(window,nullptr,FALSE);if(liveUi)liveUi->Publish(state); nextUi=now+100000; }
             if(now>=origin+config.durationUs) {
                 if(budget)budget->CloseAdmission();
                 if(commandLink&&!budget)commandLink->Finish();
@@ -360,27 +453,39 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                 if(worldLog.is_open())worldLog.close();if(commandLog.is_open())commandLog.close();
                 if(captureEvaluation.is_open())captureEvaluation.close();if(appliedCommands.is_open())appliedCommands.close();
                 scheduleTiming.close();
+                if(navigation)session->Event("live_ui_paints","native research window paint count",liveUi?liveUi->Paints():state.paints);
                 session->Finish(state.commandUdp?"command_udp_completed":state.visual?"visual_control_completed":state.robot?"robot_video_completed":"foundation_completed",state.boundedLink?"capacity-limited UDP trial recorded; link verification and task outcome adjudicated separately":state.commandUdp?"reverse UDP trial recorded; task and G1 gate adjudicated by external auditor":state.visual?"image recognition/control local diagnostic completed; command UDP and G1-06 validation pending":state.robot?"scripted robot/video identity validation; autonomous task not run":"configured clock interval completed; task not run",physics.Count(),camera.Count(),control.Count());
                 state.completed=true; state.state=L"基盤確認 完了";
                 if(state.robot)state.state=L"接続・照合 完了";
                 if(state.visual)state.state=L"認識・指令生成 記録完了";
-                if(window) InvalidateRect(window,nullptr,FALSE);
+                if(liveUi)liveUi->Publish(state);
+                if(window) {
+                    EnableWindow(GetDlgItem(window,4101),TRUE);
+                    SetWindowTextW(GetDlgItem(window,4101),L"検証結果を開く");
+                    InvalidateRect(window,nullptr,FALSE);
+                }
                 break;
             }
             mark("wait");researchWait.Wait();mark("between_loops");
         }
         if(!state.completed) {
+            if(navigation)session->Event("live_ui_paints","native research window paint count",liveUi?liveUi->Paints():state.paints);
             if(budget)budget->CloseAdmission();
             if(video)video->Finish();
             if(budget){commandLink->Finish();video->FinishFeedback(commandLink->FeedbackDelivered());if(stateFeedback)stateFeedback->Finish(commandLink->StateDelivered());budget->Finish();}
-            session->Finish("interrupted","window closed before interval completed",physics.Count(),camera.Count(),control.Count());
+            session->Finish("interrupted",navigation&&navigation->returnToLegacy?"returned to normal view before interval completed":"window closed before interval completed",physics.Count(),camera.Count(),control.Count());
         }
         exitCode=state.completed?0:3;
+        if(navigation&&navigation->diagnosticAutoReturn){if(liveUi)liveUi->RequestReturn();else ReturnToLegacy(window,state);}
         // Keep the completed report visible until the user closes the research window.
         while(window&&!state.closed) {
             MSG message{};
             if(GetMessageW(&message,window,0,0)<=0) break;
             TranslateMessage(&message); DispatchMessageW(&message);
+        }
+        if(liveUi){
+            while(!liveUi->Closed()){liveUi->Check();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            navigation->returnToLegacy=liveUi->Back();
         }
         return true;
     } catch(const std::exception& error) {
@@ -390,8 +495,9 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
         OutputDebugStringA(message.c_str());
         // STDERR is captured by the launcher; UI launches also receive a visible error.
         fprintf(stderr,"%s\n",message.c_str());
-        if(!headless) MessageBoxW(nullptr,Wide(message).c_str(),L"Reach-RT",MB_OK|MB_ICONERROR);
+        if(!headless&&(!navigation||!navigation->diagnosticAutoReturn)) MessageBoxW(nullptr,Wide(message).c_str(),L"Reach-RT",MB_OK|MB_ICONERROR);
         exitCode=2;
+        if(navigation)navigation->returnToLegacy=true;
         return true;
     }
 }

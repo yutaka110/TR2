@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "stage": "command_udp",
+  "task": "T2",
+  "seed": 101,
+  "duration_s": 20.0,
+  "tick_rates_hz": {
+    "physics": 100,
+    "camera": 30,
+    "control": 20
+  },
+  "max_catchup_steps": 5,
+  "encoder": "auto",
+  "world": {
+    "initial_y_m": 0,
+    "initial_yaw_rad": 0,
+    "corridor_width_m": 0.75
+  },
+  "command_link": {
+    "scenario": "normal"
+  },
+  "link_model": {
+    "uplink": {
+      "queue_ip_bytes": 65536,
+      "capacity": [
+        {
+          "at_us": 0,
+          "bps": 6000000
+        }
+      ],
+      "impairment": [
+        {
+          "at_us": 0,
+          "delay_us": 10000,
+          "drop": false
+        }
+      ]
+    },
+    "downlink": {
+      "queue_ip_bytes": 65536,
+      "capacity": [
+        {
+          "at_us": 0,
+          "bps": 6000000
+        }
+      ],
+      "impairment": [
+        {
+          "at_us": 0,
+          "delay_us": 10000,
+          "drop": false
+        }
+      ]
+    }
+  },
+  "ip_budget": {
+    "total": {
+      "rate_bps": 4000000,
+      "burst_ip_bytes": 65536,
+      "max_ip_bytes": 20000000
+    },
+    "uplink": {
+      "rate_bps": 3500000,
+      "burst_ip_bytes": 65536,
+      "max_ip_bytes": 19000000
+    },
+    "downlink": {
+      "rate_bps": 500000,
+      "burst_ip_bytes": 16384,
+      "max_ip_bytes": 1000000
+    },
+    "fec_group_chunks": 4
+  },
+  "state_feedback": true,
+  "baseline": {
+    "mode": "G4-04",
+    "lambda": 1.0
+  }
+}

@@ -558,6 +558,12 @@
     <ClInclude Include="application\AppImGuiLayer.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
+    <ClInclude Include="application\ReachReportNavigation.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="application\ReachLiveNavigation.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
     <ClInclude Include="application\AppParticleSystem.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>

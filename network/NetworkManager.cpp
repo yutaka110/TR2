@@ -1156,6 +1156,18 @@ uint32_t NetworkManager::SendRNVPKeySyncUepDuplicates(
     return sentPackets;
 }
 
+uint32_t NetworkManager::SendResearchRepair(uint32_t streamId,uint32_t frameId,const std::vector<uint16_t>& chunks){
+    if(!researchRepairGate_)return 0;
+    SentFrameRecord record;
+    {std::lock_guard<std::mutex> lock(sentFramesMutex_);
+        auto it=std::find_if(sentFrames_.begin(),sentFrames_.end(),[&](const SentFrameRecord& r){return r.streamId==streamId&&r.frameId==frameId;});
+        if(it==sentFrames_.end()||it->acked)return 0;record=*it;
+    }
+    const auto sent=SendRNVPSelectedChunks(record.payload,frameId,record.codecType,streamId,record.keyFrame,
+        NowMicroseconds(),chunks,"research_scheduled_repair",0,record.retransmitCount,static_cast<uint32_t>(chunks.size()),record.sendTimeUs,true);
+    if(sent){std::lock_guard<std::mutex> lock(sentFramesMutex_);++ackRetransmittedFrameCount_;ackRetransmittedChunkCount_+=sent;}
+    return sent;
+}
 uint32_t NetworkManager::SendRNVPSelectedChunks(
     const std::vector<uint8_t>& data,
     uint32_t frameId,
@@ -1168,12 +1180,13 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
     uint32_t ackLatestSequence,
     uint32_t retransmitAttempt,
     uint32_t ackMissingChunks,
-    uint64_t originalFrameSendTimeUs
+    uint64_t originalFrameSendTimeUs,
+    bool researchAuthorized
 ) {
     if (udpSocket_ == INVALID_SOCKET || data.empty() || chunkIndices.empty()) {
         return 0;
     }
-    if(researchRepairGate_&&!researchRepairGate_(frameId,chunkIndices))return 0;
+    if(!researchAuthorized&&researchRepairGate_&&!researchRepairGate_(frameId,chunkIndices))return 0;
 
     const size_t maxPayload = net::kMaxUdpPayloadSize;
     const size_t totalSize = data.size();

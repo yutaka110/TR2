@@ -1,4 +1,6 @@
 #include "AppImGuiLayer.h"
+#include "ReachReportNavigation.h"
+#include "ReachLiveNavigation.h"
 
 #include "AppRuntimeState.h"
 #include "EffectRuntime.h"
@@ -1772,6 +1774,14 @@ void AppImGuiLayer::BuildUi(
     DrawReceivedVideoLatencyOverlay(runtimeState, networkStats);
 
     if (!runtimeState.showImGui) {
+        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.9f);
+        ImGui::Begin("Reach-RT navigation", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+        if (ImGui::Button("Research Live", ImVec2(170, 32))) reachui::RequestResearchLive();
+        if (ImGui::Button("Reach-RT Results", ImVec2(170, 32))) reachui::OpenReportHub();
+        ImGui::End();
         return;
     }
 
@@ -1805,6 +1815,11 @@ void AppImGuiLayer::BuildUi(
         ImVec2(leftPanelWidth, displaySize.y - toolbarHeight - gap * 2.0f),
         ImGuiCond_Always);
     if (ImGui::Begin("Network Lab", nullptr, panelFlags)) {
+        if (ImGui::Button("Research Live - T2", ImVec2(-1, 36))) reachui::RequestResearchLive();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Switch to the live robot / received-video view. Return with the normal-view button.");
+        if (ImGui::Button("Reach-RT Results", ImVec2(-1, 32))) reachui::OpenReportHub();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open saved verification: G4-04 / G4-03 / G4-02");
+        ImGui::Separator();
         if (runtimeState.showReceivedVideoPreviewWindow) {
             DrawPreviewImage("RNVP Received Texture", receivedVideoPreview);
             ImGui::Separator();

@@ -64,6 +64,7 @@
 #include "AppAudio.h"
 #include "AppBootstrap.h"
 #include "AppImGuiLayer.h"
+#include "ReachLiveNavigation.h"
 #include "AppFrameRenderer.h"
 #include "AppPipelines.h"
 #include "AppParticleSystem.h"
@@ -1694,6 +1695,23 @@ int AppMain::Run() {
 	if (reach::RunResearchModeFromEnvironment(researchExitCode)) {
 		return researchExitCode;
 	}
+	const auto diagnostic=reachui::NavigationDiagnostic();
+	unsigned visit=0;
+	for(;;){
+		// Destroying the previous normal window posts WM_QUIT. It belongs only
+		// to that view, not to the next view in this same debugger process.
+		MSG quit{};while(PeekMessageW(&quit,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE)){}
+		reachui::ResetResearchLiveRequest();
+		reachui::NavigationTrace("legacy_enter");
+		const int result=RunLegacy(diagnostic.empty()?0:++visit);
+		reachui::NavigationTrace("legacy_exit",result);
+		if(result!=0||!reachui::ResearchLiveRequested())return result;
+		while(PeekMessageW(&quit,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE)){}
+		if(!reachui::RunResearchLive(researchExitCode,diagnostic))return researchExitCode;
+	}
+}
+
+int AppMain::RunLegacy(unsigned navigationTestVisit) {
 	TraceStartup("run-enter");
 	D3DResourceLeakChecker leakCheck;
 
@@ -5923,7 +5941,8 @@ int AppMain::Run() {
 		udpReceiver->IsRunning();
 	bool autoNetworkExperimentShutdownRequested = false;
 
-	while (msg.message != WM_QUIT) {
+	unsigned navigationTestFrames=0;
+	while (msg.message != WM_QUIT && !reachui::ResearchLiveRequested()) {
 		if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
@@ -6364,6 +6383,12 @@ int AppMain::Run() {
 			}
 
 			runLoop.RenderFrame();
+			// Explicit diagnostic only: exercise the same request and full teardown
+			// twice without synthesizing UI input or changing a production trial.
+			if(navigationTestVisit&&++navigationTestFrames==30){
+				if(navigationTestVisit<=2)reachui::RequestResearchLive();
+				else PostQuitMessage(0);
+			}
 		}
 
 	}
@@ -6407,9 +6432,7 @@ int AppMain::Run() {
 	std::string dateString = std::format("{:%Y%m%d_%H%M%S}", localTime);
 	std::string logFilePath = std::string("logs/") + dateString + "log";
 	std::ofstream logStream(logFilePath);
-#if defined(_DEBUG)||DEVELOP
 	imguiLayer.Shutdown();
-#endif
 
 	runLoop.Shutdown();
 	engineContext.Shutdown();

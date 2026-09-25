@@ -2,10 +2,8 @@
 #include <shellscalingapi.h> // SetProcessDpiAwareness
 #pragma comment(lib, "Shcore.lib")
 #include"utils/ProjectSettings.h"
-#if defined(DEVELOP) || defined(_DEBUG)
 #include "../../../externals/imgui/imgui.h"
 #include "../../../externals/imgui/imgui_impl_win32.h"
-#endif
 using namespace eng::platform;
 
 //void Window::EnableDpiAwareness() {
@@ -22,7 +20,7 @@ bool Window::RegisterClass() {
     wc.hInstance = hinst_;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = L"EngWindowClass";
-    return RegisterClassExW(&wc) != 0;
+    return RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
 
 bool Window::Create(const WindowDesc& desc) {
@@ -94,10 +92,8 @@ LRESULT CALLBACK Window::WndProcStatic(HWND h, UINT m, WPARAM w, LPARAM l) {
 LRESULT Window::WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
     // Window::WndProc 冒頭あたり
-#if defined(DEVELOP) || defined(_DEBUG)
     extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
     if (ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return true;
-#endif
 
 
     switch (m) {

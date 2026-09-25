@@ -58,6 +58,11 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <LocalDebuggerCommand>$(TargetPath)</LocalDebuggerCommand>
+    <LocalDebuggerWorkingDirectory>$(ProjectDir)</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)..\generated\outputs\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)..\generated\objs\$(ProjectName)\$(Configuration)\</IntDir>
@@ -178,7 +183,14 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClCompile Include="research\ReachJson.cpp" />
     <ClCompile Include="research\ReachFoundation.cpp" />
     <ClCompile Include="research\ReachResearchMode.cpp" />
-    <ClCompile Include="research\ReachRobotWorld.cpp" />
+    <ClCompile Include="application\ReachLiveNavigation.cpp" />
+    <ClCompile Include="research\ReachRobotWorld.cpp">
+      <!-- Pixel coverage rasterisation must finish within the 30 Hz camera period,
+           including the otherwise unoptimized Debug and Development builds. -->
+      <Optimization Condition="'$(Configuration)'=='Debug' Or '$(Configuration)'=='Development'">MaxSpeed</Optimization>
+      <BasicRuntimeChecks Condition="'$(Configuration)'=='Debug'">Default</BasicRuntimeChecks>
+      <SupportJustMyCode Condition="'$(Configuration)'=='Debug'">false</SupportJustMyCode>
+    </ClCompile>
     <ClCompile Include="research\ReachRobotVideo.cpp" />
     <ClCompile Include="research\ReachVisualControl.cpp" />
     <ClCompile Include="research\ReachCommandProtocol.cpp" />
@@ -375,6 +387,8 @@ copy "$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxil.dll" "$(TargetDir)dx
     <ClInclude Include="application\PostProcessStack.h" />
     <ClInclude Include="application\AppRenderResources.h" />
     <ClInclude Include="application\AppImGuiLayer.h" />
+    <ClInclude Include="application\ReachReportNavigation.h" />
+    <ClInclude Include="application\ReachLiveNavigation.h" />
     <ClInclude Include="application\AppMain.h" />
     <ClInclude Include="research\ReachJson.h" />
     <ClInclude Include="research\ReachFoundation.h" />

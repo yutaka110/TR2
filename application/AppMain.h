@@ -8,5 +8,6 @@ public:
     void Finalize();
 
 private:
+    int RunLegacy(unsigned navigationTestVisit = 0);
     HINSTANCE hInstance_ = nullptr;
 };

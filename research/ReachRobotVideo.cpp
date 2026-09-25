@@ -127,7 +127,7 @@ struct RobotVideo::Impl {
         udp.SetJitterBufferAutoModeEnabled(false); udp.SetJitterBufferTargetDelayMs(0);
         if(c.boundedLink)link=std::make_unique<DatagramLink>(c.uplink,s.Directory(),"uplink",udp.BoundPort());
         sender=std::make_unique<NetworkManager>("127.0.0.1",link?link->Port():udp.BoundPort());
-        if(c.baseline=="G4-01"||c.baseline=="G4-02")actions=std::make_unique<ActionExecution>(*budget,s.Directory(),c.baseline=="G4-02"?sender.get():nullptr,c.task=="T1"?1:2);
+        if(c.baseline=="G4-01"||c.baseline=="G4-02"||c.baseline=="G4-03"||c.baseline=="G4-04")actions=std::make_unique<ActionExecution>(*budget,s.Directory(),c.baseline!="G4-01"?sender.get():nullptr,c.task=="T1"?1:2,c.baseline=="G4-03"||c.baseline=="G4-04",c.baseline=="G4-04",c.baselineLambda);
         else if(!c.baseline.empty())baseline=std::make_unique<Baseline>(c.baseline,c.baselineLambda,static_cast<uint32_t>(std::min(c.ipBudget.total.rateBps,c.ipBudget.up.rateBps)),s.Directory());
         sender->SetPacingEnabled(false); sender->SetFecEnabled(false); sender->SetAdaptiveFecEnabled(false);
         if(budget){
@@ -150,7 +150,7 @@ struct RobotVideo::Impl {
         session.Event("robot_video_started","loopback port="+std::to_string(udp.BoundPort())+"; stream="+std::to_string(stream)+"; diagnostic_drop="+std::to_string(dropFrame));
     }
     ~Impl() {
-        closing=true; if(worker.joinable()) worker.join(); decoder.Stop(); udp.Stop();if(sender){sender->StopRNVPControlReceiver();if(actions)sender->StopResearchPacer();}
+        closing=true; if(worker.joinable()) worker.join();if(actions)actions->StopScheduler(); decoder.Stop(); udp.Stop();if(sender){sender->StopRNVPControlReceiver();if(actions)sender->StopResearchPacer();}
         if(actions)actions->Close();
     }
     void Fail(const std::string& reason) { std::lock_guard lock(mutex); if(error.empty()) error=reason; }
@@ -263,8 +263,9 @@ struct RobotVideo::Impl {
                     proof.write(reinterpret_cast<const char*>(output.bytes.data()),output.bytes.size());
                 }
                 NetworkManager::RnvpFrameProtectionOptions protection;
-                const bool offer=actions?actions->Plan(identity->frameId,stream,identity->captureUs,payload.size(),idr,protection):!baseline||baseline->Plan(identity->frameId,identity->captureUs,payload.size(),idr,*sender,protection);
-                if(!dropped&&offer) sender->SendRNVPFragmented(payload,identity->frameId,net::CodecType::H264,stream,idr,protection);
+                if(actions&&actions->Scheduled())actions->Queue(identity->frameId,stream,identity->captureUs,std::move(payload),idr,dropped);
+                else{const bool offer=actions?actions->Plan(identity->frameId,stream,identity->captureUs,payload.size(),idr,protection):!baseline||baseline->Plan(identity->frameId,identity->captureUs,payload.size(),idr,*sender,protection);
+                    if(!dropped&&offer) sender->SendRNVPFragmented(payload,identity->frameId,net::CodecType::H264,stream,idr,protection);}
                 encodedLog<<identity->frameId<<','<<stream<<','<<identity->captureUs<<','<<output.pts100ns<<','<<now<<','<<output.bytes.size()<<','<<idr<<','<<dropped<<','<<drain<<'\n';
                 std::lock_guard lock(mutex); ++view.encoded; if(!dropped)++view.sent; if(drain)++encoderTail;
                 return true;
@@ -319,7 +320,7 @@ void RobotVideo::FinishFeedback(uint64_t expected){auto& p=*impl_;if(!p.budget)r
     const auto deadline=MonotonicUs()+1000000;while(p.budget->Received()<expected&&MonotonicUs()<deadline)Pause();
     p.sender->StopRNVPControlReceiver();if(p.baseline)p.baseline->Close();if(p.actions){p.sender->StopResearchPacer();p.actions->Close();}Require(p.budget->Received()==expected,"feedback UDP delivery mismatch");p.budget->Check();}
 RobotVideo::~RobotVideo(){try{if(impl_&&!impl_->finished)Finish();}catch(...){}}
-void RobotVideo::StartLink(uint64_t origin){impl_->decodeJournal->Start(origin,impl_->config.durationUs);if(impl_->link)impl_->link->Start(origin);if(impl_->budget){Require(impl_->feedbackIngress!=0,"feedback route missing");Require(impl_->sender->StartRNVPControlReceiver(),"feedback receiver start failed");}}
+void RobotVideo::StartLink(uint64_t origin){impl_->decodeJournal->Start(origin,impl_->config.durationUs);if(impl_->link)impl_->link->Start(origin);if(impl_->budget){Require(impl_->feedbackIngress!=0,"feedback route missing");Require(impl_->sender->StartRNVPControlReceiver(),"feedback receiver start failed");}if(impl_->actions)impl_->actions->StartScheduler(origin,impl_->config.durationUs);}
 void RobotVideo::RecordControl(const MotionCommand& command){impl_->decodeJournal->Control(command);}
 StateReport RobotVideo::ReceiverNotification(){return impl_->decodeJournal->NotificationSnapshot(impl_->stream);}
 void RobotVideo::Capture(const RobotWorld& world) {
@@ -342,10 +343,11 @@ RobotVideoView RobotVideo::View() {
     std::lock_guard lock(p.mutex); return p.view;
 }
 VisualObservation RobotVideo::Observation(){std::lock_guard lock(impl_->mutex);return impl_->view.observation;}
-void RobotVideo::Check(){if(impl_->budget)impl_->budget->Check();if(impl_->link)impl_->link->Check();std::lock_guard lock(impl_->mutex);if(!impl_->error.empty())throw std::runtime_error(impl_->error);}
+void RobotVideo::Check(){if(impl_->actions)impl_->actions->CheckScheduler();if(impl_->budget)impl_->budget->Check();if(impl_->link)impl_->link->Check();std::lock_guard lock(impl_->mutex);if(!impl_->error.empty())throw std::runtime_error(impl_->error);}
 bool RobotVideo::Finish() {
     auto& p=*impl_; if(p.finished)return p.passed;
     p.Checkpoint("encoder_join");auto stopStart=MonotonicUs();p.closing=true;if(p.worker.joinable())p.worker.join();p.encoderStopUs=MonotonicUs()-stopStart;
+    if(p.actions){p.actions->StopScheduler();p.actions->CheckScheduler();}
     if(p.baseline||p.actions){const auto deadline=MonotonicUs()+1000000;while(p.sender->GetPacingStats().queuedPackets&&MonotonicUs()<deadline)Pause();Require(p.sender->GetPacingStats().queuedPackets==0,"research pacer did not drain");}
     if(p.link)p.link->Finish();
     p.Checkpoint("decoder_drain");

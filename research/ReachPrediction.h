@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -20,6 +21,15 @@ struct PredictionInput {
     PredictionVector x{};
     bool live=false,eligible=false,causal=true;
 };
+enum class PredictionMask {Common,Decode,Task,Both};
+inline bool DecodeVisible(PredictionMask m){return m==PredictionMask::Decode||m==PredictionMask::Both;}
+inline bool TaskVisible(PredictionMask m){return m==PredictionMask::Task||m==PredictionMask::Both;}
+inline bool FeatureVisible(PredictionMask m,size_t j){return (j!=14||DecodeVisible(m))&&((j!=8&&(j<10||j>13))||TaskVisible(m));}
+inline PredictionInput ProjectPrediction(PredictionInput q,PredictionMask mask){
+    if(!DecodeVisible(mask))q.reference=-1;if(!TaskVisible(mask))q.stage=-1;
+    for(size_t j=0;j<q.x.size();++j)if(!FeatureVisible(mask,j))q.x[j]=0;
+    return q;
+}
 struct PredictionSample {int run=0;PredictionInput input;std::array<double,6> y{};std::array<double,3> delay{999,999,999};};
 struct PredictionResult {
     std::string status="calibration_not_loaded";size_t support=0,runs=0;
@@ -55,8 +65,11 @@ public:
         }
         std::ifstream cal(file+".cal");if(cal){for(auto& v:calibrated_){if(!(cal>>v)||!std::isfinite(v)||v< -1||v>1)throw std::runtime_error("invalid calibration");}std::string extra;if(cal>>extra)throw std::runtime_error("extra calibration value");calibratedLoaded_=true;}
     }
-    PredictionResult Predict(const PredictionInput& q)const{
+    PredictionResult Predict(const PredictionInput& q,const std::function<bool()>& stop={},PredictionMask mask=PredictionMask::Both)const{
         PredictionResult out;
+        auto expired=[&](){return stop&&stop();};
+        auto cancelled=[](){PredictionResult p;p.status="compute_budget";return p;};
+        if(expired())return cancelled();
         if(!q.eligible){out.status="ineligible";return out;}
         if(!q.causal){out.status="future_input";return out;}
         if(!q.live){out.status="notification_unavailable";return out;}
@@ -64,12 +77,17 @@ public:
         if(samples_.empty())return out;
         std::vector<std::pair<double,size_t>> neighbors;
         for(size_t i=0;i<samples_.size();++i){const auto& s=samples_[i];const auto& p=s.input;
-            if(p.kind!=q.kind||p.group!=q.group||p.idr!=q.idr||p.reference!=q.reference||p.stage!=q.stage||p.task!=q.task)continue;
-            double d=0,maxd=0;for(size_t j=0;j<q.x.size();++j){const double z=std::abs(q.x[j]-p.x[j])/PredictionScales[j];d+=z*z;maxd=std::max(maxd,z);}
+            if((i%64)==0&&expired())return cancelled();
+            if(p.kind!=q.kind||p.group!=q.group||p.idr!=q.idr||p.task!=q.task||
+                (DecodeVisible(mask)&&p.reference!=q.reference)||(TaskVisible(mask)&&p.stage!=q.stage))continue;
+            double d=0,maxd=0;for(size_t j=0;j<q.x.size();++j){if(!FeatureVisible(mask,j))continue;const double z=std::abs(q.x[j]-p.x[j])/PredictionScales[j];d+=z*z;maxd=std::max(maxd,z);}
             // Explicit local support, never silently extrapolate through large gaps.
             if(maxd<=2&&d<=9)neighbors.push_back({d,i});
         }
-        std::sort(neighbors.begin(),neighbors.end());if(neighbors.size()>64)neighbors.resize(64);
+        if(expired())return cancelled();
+        const auto count=std::min<size_t>(64,neighbors.size());
+        std::partial_sort(neighbors.begin(),neighbors.begin()+count,neighbors.end());neighbors.resize(count);
+        if(expired())return cancelled();
         std::set<int> runs;for(auto [d,i]:neighbors)runs.insert(samples_[i].run);
         out.support=neighbors.size();out.runs=runs.size();out.distance=neighbors.empty()?-1:std::sqrt(neighbors.front().first);
         if(out.support<8||out.runs<2){out.status="out_of_domain";return out;}
@@ -85,7 +103,7 @@ public:
         if(calibratedLoaded_&&std::any_of(out.probability.begin(),out.probability.end(),[](double p){return p<0;}))out.status="calibration_partial";
         for(size_t j=0;j<3;++j){std::vector<double> delays;for(auto [d,i]:neighbors)delays.push_back(samples_[i].delay[j]);std::sort(delays.begin(),delays.end());
             out.p50[j]=delays[static_cast<size_t>(std::ceil(.5*delays.size()))-1];out.p90[j]=delays[static_cast<size_t>(std::ceil(.9*delays.size()))-1];}
-        return out;
+        if(expired())return cancelled();return out;
     }
 };
 }

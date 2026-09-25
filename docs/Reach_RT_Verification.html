@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reach-RT | 検証画面</title>
+<style>
+:root{color-scheme:light;font-family:"Yu Gothic UI",system-ui,sans-serif;color:#17314b;background:#edf2f7}
+*{box-sizing:border-box}body{margin:0}header{background:#132a43;color:white;padding:20px 28px}
+.topline{display:flex;align-items:center;justify-content:space-between;gap:20px}h1{font-size:26px;margin:0}header p{color:#bbd0e3;margin:8px 0 0;font-size:14px}
+.badge{border:1px solid #627c96;border-radius:20px;padding:6px 12px;white-space:nowrap;font-size:13px}
+nav{display:flex;gap:10px;padding:16px 28px 8px;flex-wrap:wrap}button{font:inherit;cursor:pointer;border:1px solid #bdcddd;border-radius:9px;background:white;color:#244864;padding:12px 18px;text-align:left}
+button span{display:block;font-size:13px;margin-top:4px}button[aria-selected="true"]{background:#1666b0;color:white;border-color:#1666b0;box-shadow:0 3px 9px #123b6026}
+button:hover{border-color:#1666b0}button:focus-visible,a:focus-visible{outline:3px solid #e6a629;outline-offset:3px}
+.context{display:flex;justify-content:space-between;align-items:center;gap:15px;margin:8px 28px 14px;font-size:14px}.context p{margin:0;line-height:1.6}.context a{white-space:nowrap;color:#145d9f}
+iframe{display:block;width:calc(100% - 32px);height:calc(100vh - 240px);min-height:470px;border:1px solid #c7d4e2;border-radius:10px;background:white;margin:0 16px 16px}
+.hint{font-size:13px;margin:12px 28px;color:#536a80}noscript p{padding:16px}
+@media(max-width:650px){header{padding:18px}h1{font-size:22px}.badge{display:none}nav{padding:12px;gap:8px}button{flex:1;padding:10px;min-width:110px}.context{margin:8px 16px 12px;align-items:flex-start;flex-direction:column}iframe{height:70vh;width:calc(100% - 16px);margin:0 8px 12px}.hint{margin:10px 16px}}
+</style>
+</head>
+<body>
+<header><div class="topline"><h1>Reach-RT / 検証画面</h1><span class="badge">G4-04まで完了 · 全体28/38</span></div><p>ボタンで保存済みの検証結果を切り替えます。実験の再実行は行いません。</p></header>
+<nav role="tablist" aria-label="検証工程">
+<button type="button" role="tab" id="tab-comparison" data-page="comparison" aria-controls="report-panel" aria-selected="true">G4-04 比較<span>厳密解・情報の寄与</span></button>
+<button type="button" role="tab" id="tab-scheduler" data-page="scheduler" aria-controls="report-panel" aria-selected="false" tabindex="-1">G4-03 選択<span>周期・打切り・代替処理</span></button>
+<button type="button" role="tab" id="tab-prediction" data-page="prediction" aria-controls="report-panel" aria-selected="false" tabindex="-1">G4-02 予測<span>予測誤差・校正</span></button>
+</nav>
+<div class="context"><p id="description" aria-live="polite"></p><a id="standalone" target="_blank" rel="noopener">この結果を別タブで開く ↗</a></div>
+<section id="report-panel" role="tabpanel" aria-labelledby="tab-comparison"><iframe id="report" title="G4-04 厳密解との比較・アブレーション"></iframe></section>
+<p class="hint">ページが表示されない場合は「この結果を別タブで開く」を使ってください。各結果は実施時点の記録です。ライブ映像はアプリ側で表示します。</p>
+<noscript><p>JavaScriptを有効にするか、<a href="../artifacts/reach_g4_comparison_20260925/verification/final_01/index.html">G4-04の結果を直接開いてください</a>。</p></noscript>
+<script>
+'use strict';
+const pages={
+ comparison:{url:'../artifacts/reach_g4_comparison_20260925/verification/final_01/index.html',title:'G4-04 厳密解との比較・アブレーション',description:'改善・悪化・無効果の条件を比較。各条件1試行の探索結果で、統計的優位性は未認定です。'},
+ scheduler:{url:'../artifacts/reach_g4_scheduler_20260925/verification/final_01/index.html',title:'G4-03 ReachSchedulerと代替処理',description:'20 ms周期の選択、計算打切り、範囲外での代替処理を確認した当時の記録です。'},
+ prediction:{url:'../artifacts/reach_g4_prediction_20260924/verification/final_01/index.html',title:'G4-02 到着・作業価値の予測と校正',description:'候補の予測と実測誤差を比較。今回の校正では誤差改善が確認できなかった結果も表示します。'}
+};
+const buttons=[...document.querySelectorAll('[role="tab"]')],frame=document.getElementById('report'),panel=document.getElementById('report-panel');
+function selectPage(key){
+ if(!Object.hasOwn(pages,key))key='comparison';
+ const page=pages[key];
+ for(const button of buttons){const active=button.dataset.page===key;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;}
+ panel.setAttribute('aria-labelledby','tab-'+key);frame.title=page.title;
+ if(frame.getAttribute('src')!==page.url)frame.src=page.url;
+ document.getElementById('description').textContent=page.description;document.getElementById('standalone').href=page.url;
+ document.title='Reach-RT | '+page.title;
+}
+for(const [index,button] of buttons.entries()){
+ button.addEventListener('click',()=>{location.hash=button.dataset.page;selectPage(button.dataset.page);});
+ button.addEventListener('keydown',event=>{
+  let next;if(event.key==='ArrowRight')next=(index+1)%buttons.length;else if(event.key==='ArrowLeft')next=(index+buttons.length-1)%buttons.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=buttons.length-1;else return;
+  event.preventDefault();buttons[next].focus();buttons[next].click();
+ });
+}
+addEventListener('hashchange',()=>selectPage(location.hash.slice(1)));
+selectPage(location.hash.slice(1));
+</script>
+</body>
+</html>

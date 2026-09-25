@@ -73,5 +73,11 @@ private:
 
 // Returns false only when research mode was not requested. Invalid mode requests
 // return an error instead of silently launching the legacy experiment.
-bool RunResearchModeFromEnvironment(int& exitCode);
+struct ResearchUiNavigation {
+    bool returnToLegacy=false;
+    // Internal lifecycle smoke checks; never enabled by the live-view button.
+    bool diagnosticAutoReturn=false;
+    uint64_t diagnosticReturnAfterUs=0;
+};
+bool RunResearchModeFromEnvironment(int& exitCode, ResearchUiNavigation* navigation=nullptr);
 }

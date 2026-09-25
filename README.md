@@ -1,8 +1,26 @@
 # RNVP Realtime Video Communication Engine
 
-Reach-RTは**G4-02「到着・作業価値の予測と校正」完了**です。受信済み通知と送信側の履歴から、候補別に200 ms内の画像利用・復号・参照状態・指令利用等を予測するC++実装を追加しました。学習8試行・校正4試行を分離し、新しい検証4試行・ストレス2試行で誤差と範囲外を記録しています。予測はまだ送信選択へ使いません。
+Reach-RTは**G4-04「厳密解との比較・アブレーション」完了**です。同じ候補に対する復号・作業情報の寄与と、小規模厳密解に対する短期選択の損失を比較できるようにしました。実通信104試行の計測監査、同一状態8,028問の再評価、単体3,080検査と旧方式の回帰が合格しました。
 
-[実装意図・構造・限界](docs/Reach_RT_G4_Prediction.md)、[誤差の結果画面](artifacts/reach_g4_prediction_20260924/verification/final_01/index.html)、[完了判定](artifacts/reach_g4_prediction_20260924/verification/final_01/task_decision.json)、[実装進捗](docs/Reach_RT_Implementation_Progress.md)を参照してください。別試行の4,095判断中3,870が範囲内。今回の5区間校正は誤差改善を確認できず、作業全体の成功確率・Rの優位性は未実証です。予測単体37・実行層684・既存2,000検査、G4-01実UDP 7条件・B3・従来モードの回帰が合格。**G4は2/5、全体26/38項目、研究ゲート4/7。次はG4-03「ReachSchedulerと代替処理」**です。[G4-01実行層](docs/Reach_RT_G4_Actions.md)、[G3の仮説判定](docs/Reach_RT_G3_Decision.md)と旧実測は当時の証拠として保持しています。
+[実装意図・結果・限界](docs/Reach_RT_G4_Comparison.md)、[条件別の結果画面](artifacts/reach_g4_comparison_20260925/verification/final_01/index.html)、[完了判定](artifacts/reach_g4_comparison_20260925/verification/final_01/task_decision.json)、[実装進捗](docs/Reach_RT_Implementation_Progress.md)を参照してください。通常T1では両情報版が完了し共通情報版は未完了、通常T2では両情報版のほうが遅い結果でした。各条件1回の探索比較で、優位性は未認定。有限モデルでは160比較中78で短期選択が厳密解を下回り、最大差は成功確率7.03125ポイントでした。**G4は4/5、全体28/38項目、研究ゲート4/7。次はG4-05「予備実験の終了判定」**です。[G4-03の周期・代替処理](docs/Reach_RT_G4_Scheduler.md)、[G4-02校正の負の結果](docs/Reach_RT_G4_Prediction.md)、[G4-01実行層](docs/Reach_RT_G4_Actions.md)は当時の証拠として保持しています。
+
+検証画面は`tools/open_reach_verification.cmd`をダブルクリックすると開き、上部の**G4-04 比較／G4-03 選択／G4-02 予測**ボタンで切り替えられます。[検証ページ](docs/Reach_RT_Verification.html)からも開けます。保存結果の閲覧で、実験を再実行しません。
+
+**Visual StudioでCtrl+Shift+B → F5 → 左側Network Lab上部の「Research Live - T2」**を押すと、受信映像・認識・仮想ロボットが動く研究画面へ切り替わります。**「通常画面へ戻る」**で戻れます。同じプロセス内で切り替えるため、F5のデバッグを継続できます。ライブはG4-04両情報版のT2・20秒。途中で戻った実行は中断として記録します。[ライブ切替の実装・操作](docs/Reach_RT_Live_Switch.md)。
+
+保存済み結果は、その下の「Reach-RT Results」から開きます。F1でUIを隠しても左上に両方のボタンが残ります。スタートアッププロジェクトは`GE3`です。[操作と確認範囲](docs/Reach_RT_Verification.md)を参照してください。
+
+`tools/open_reach_app.cmd`は以前の結果閲覧版を起動する補助ファイルです。今回のライブ切替はVisual Studioから再ビルドして使ってください。
+
+個別の画面を見る場合は、エクスプローラーで`tools`フォルダーの次のファイルをダブルクリックしてください。
+
+- `open_reach_g4_comparison.cmd`：今回のG4-04比較結果。条件別の成功・時間・通信量、同一候補の判断差、厳密解との差を表示。
+- `open_reach_g4_scheduler.cmd`：前工程G4-03検証結果。条件を選び、判断の列をクリックして選択・代替理由を確認。
+- `open_reach_g4_scheduler_live.cmd`：G4-03の研究モードを20秒実行し、受信映像・認識・仮想ロボットの状態を表示。
+- `open_reach_g4_prediction.cmd`：前工程G4-02の校正・誤差の結果を表示。
+- `open_reach_g4_prediction_live.cmd`：G4-02の研究モードを20秒実行。受信映像・認識・ロボット位置等を表示し、終了後も閉じるまで画面を保持。途中で閉じると中断扱いになる。
+
+`GE3.exe`の通常起動は従来の映像通信モードです。候補ごとの予測値を並べるライブUIは未実装で、予測値は実行ログへ保存します。新しい起動ファイルのGUI目視確認は未実施です。
 
 C++ / DirectX 12 / Media Foundationで構築した、低遅延映像通信エンジンです。
 独自UDPプロトコル`RNVP`により、カメラ映像または生成映像をH.264/MJPEG/Rawで送受信し、パケット欠損、ジッタ、再送期限、表示期限、エンコード負荷、デコード負荷を観測しながらQoEを守ることを目的にしています。
