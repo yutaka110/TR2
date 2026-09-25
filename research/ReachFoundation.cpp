@@ -66,7 +66,21 @@ FoundationConfig FoundationConfig::Parse(const std::string& text) {
     const auto root=ParseJson(text);
     const auto stage=root.At("stage").StringValue();
     const bool bounded=root.ObjectValue().count("link_model")!=0;
-    if(stage=="command_udp"&&bounded) Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link","link_model"});
+    const bool budgeted=root.ObjectValue().count("ip_budget")!=0;
+    const bool stateFeedback=root.ObjectValue().count("state_feedback")!=0;
+    const bool baseline=root.ObjectValue().count("baseline")!=0;
+    if(baseline){
+        if(stage!="command_udp"||!bounded||!budgeted||!stateFeedback)throw std::runtime_error("baseline requires command UDP, bounded link, common budget and state feedback");
+        const auto* enabled=std::get_if<bool>(&root.At("state_feedback").value);if(!enabled||!*enabled)throw std::runtime_error("state_feedback must be true");
+        Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link","link_model","ip_budget","state_feedback","baseline"});
+    }
+    else if(stateFeedback){
+        if(stage!="command_udp"||!bounded||!budgeted)throw std::runtime_error("state feedback requires command UDP, bounded link and common budget");
+        const auto* enabled=std::get_if<bool>(&root.At("state_feedback").value);if(!enabled||!*enabled)throw std::runtime_error("state_feedback must be true or omitted");
+        Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link","link_model","ip_budget","state_feedback"});
+    }
+    else if(stage=="command_udp"&&bounded&&budgeted) Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link","link_model","ip_budget"});
+    else if(stage=="command_udp"&&bounded) Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link","link_model"});
     else if(stage=="command_udp") Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder","command_link"});
     else if(stage=="robot_video"||stage=="visual_control") Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps","world","encoder"});
     else Keys(root,{"schema_version","stage","task","seed","duration_s","tick_rates_hz","max_catchup_steps"});
@@ -74,14 +88,38 @@ FoundationConfig FoundationConfig::Parse(const std::string& text) {
     if(stage!="foundation"&&stage!="robot_video"&&stage!="visual_control"&&stage!="command_udp") throw std::runtime_error("unsupported research stage");
     FoundationConfig config;
     config.boundedLink=bounded;
+    config.budgeted=budgeted;
+    config.stateFeedback=stateFeedback;
+    if(baseline){const auto& b=root.At("baseline");Keys(b,{"mode","lambda"});config.baseline=b.At("mode").StringValue();config.baselineLambda=Number(b,"lambda",0,3);
+        if(config.baseline!="B0"&&config.baseline!="B1"&&config.baseline!="B2"&&config.baseline!="B3"&&config.baseline!="G4-01"&&config.baseline!="G4-02")throw std::runtime_error("unknown baseline mode");
+        if((config.baseline=="G4-01"||config.baseline=="G4-02")&&config.baselineLambda!=.1)throw std::runtime_error("G4 development modes have no tunable lambda");
+        if(config.baseline=="B0"&&config.baselineLambda!=.1)throw std::runtime_error("B0 lambda is fixed at 0.1 (unused)");}
+    if(budgeted){
+        const auto& value=root.At("ip_budget");Keys(value,{"total","uplink","downlink","fec_group_chunks"});
+        auto limit=[&](const char* name){const auto& v=value.At(name);Keys(v,{"rate_bps","burst_ip_bytes","max_ip_bytes"});return BudgetLimit{
+            static_cast<uint64_t>(Number(v,"rate_bps",0,1000000000,true)),static_cast<uint64_t>(Number(v,"burst_ip_bytes",28,16777216,true)),static_cast<uint64_t>(Number(v,"max_ip_bytes",0,1000000000000.0,true))};};
+        config.ipBudget.total=limit("total");config.ipBudget.up=limit("uplink");config.ipBudget.down=limit("downlink");
+        config.ipBudget.fecGroup=static_cast<uint16_t>(Number(value,"fec_group_chunks",0,16,true));config.ipBudget.Validate();
+        if(baseline&&(config.ipBudget.total.rateBps<100000||config.ipBudget.up.rateBps<100000))throw std::runtime_error("baseline pacing budget must be at least 100 kbps");
+    }
     if(bounded){
         const auto& links=root.At("link_model");Keys(links,{"uplink","downlink"});
         auto parseLink=[&](const char* direction){
-            const auto& value=links.At(direction);Keys(value,{"queue_ip_bytes","capacity"});LinkConfig c;
+            const auto& value=links.At(direction);const bool impaired=value.ObjectValue().count("impairment")!=0;
+            if(impaired)Keys(value,{"queue_ip_bytes","capacity","impairment"});else Keys(value,{"queue_ip_bytes","capacity"});LinkConfig c;
             c.queueBytes=static_cast<uint64_t>(Number(value,"queue_ip_bytes",28,16777216,true));c.capacity.clear();
             const auto* trace=std::get_if<Json::Array>(&value.At("capacity").value);
             if(!trace)throw std::runtime_error("capacity must be an array");
             for(const auto& point:*trace){Keys(point,{"at_us","bps"});c.capacity.push_back({static_cast<uint64_t>(Number(point,"at_us",0,3600000000,true)),static_cast<uint64_t>(Number(point,"bps",0,1000000000,true))});}
+            if(impaired){
+                const auto* states=std::get_if<Json::Array>(&value.At("impairment").value);
+                if(!states)throw std::runtime_error("impairment must be an array");c.impairment.clear();
+                for(const auto& point:*states){
+                    Keys(point,{"at_us","drop","delay_us"});const auto* drop=std::get_if<bool>(&point.At("drop").value);
+                    if(!drop)throw std::runtime_error("drop must be boolean");
+                    c.impairment.push_back({static_cast<uint64_t>(Number(point,"at_us",0,3600000000,true)),*drop,static_cast<uint64_t>(Number(point,"delay_us",0,1000000,true))});
+                }
+            }
             c.Validate();return c;
         };
         config.uplink=parseLink("uplink");config.downlink=parseLink("downlink");
@@ -118,7 +156,7 @@ FoundationConfig FoundationConfig::Parse(const std::string& text) {
     config.raw=text;
     return config;
 }
-FoundationConfig FoundationConfig::Load(const std::filesystem::path& path) { return Parse(ReadFile(path,65536)); }
+FoundationConfig FoundationConfig::Load(const std::filesystem::path& path) { return Parse(ReadFile(path,4194304)); }
 std::string FoundationConfig::EffectiveJson() const {
     std::ostringstream out; out.imbue(std::locale::classic());
     out << "{\"schema_version\":1,\"stage\":" << JsonString(stage) << ",\"task\":" << JsonString(task)
@@ -131,10 +169,18 @@ std::string FoundationConfig::EffectiveJson() const {
     if(boundedLink){
         out<<",\"link_model\":{";bool firstDirection=true;
         for(const auto& pair:{std::pair{"uplink",&uplink},std::pair{"downlink",&downlink}}){
-            if(!firstDirection)out<<',';firstDirection=false;out<<JsonString(pair.first)<<":{\"queue_ip_bytes\":"<<pair.second->queueBytes<<",\"capacity\":[";bool first=true;
-            for(auto point:pair.second->capacity){if(!first)out<<',';first=false;out<<"{\"at_us\":"<<point.atUs<<",\"bps\":"<<point.bps<<'}';}out<<"]}";
+            if(!firstDirection)out<<',';firstDirection=false;
+            out<<JsonString(pair.first)<<":{\"queue_ip_bytes\":"<<pair.second->queueBytes<<','<<LinkTraceJson(*pair.second).substr(1);
         }out<<'}';
     }
+    if(budgeted){
+        out<<",\"ip_budget\":{\"fec_group_chunks\":"<<ipBudget.fecGroup;
+        for(const auto& p:{std::pair{"total",ipBudget.total},std::pair{"uplink",ipBudget.up},std::pair{"downlink",ipBudget.down}})
+            out<<','<<JsonString(p.first)<<":{\"rate_bps\":"<<p.second.rateBps<<",\"burst_ip_bytes\":"<<p.second.burstBytes<<",\"max_ip_bytes\":"<<p.second.maxBytes<<'}';
+        out<<'}';
+    }
+    if(stateFeedback)out<<",\"state_feedback\":true";
+    if(!baseline.empty())out<<",\"baseline\":{\"mode\":"<<JsonString(baseline)<<",\"lambda\":"<<baselineLambda<<'}';
     out << "}\n";
     return out.str();
 }
@@ -213,12 +259,12 @@ void ResearchSession::Event(const std::string& type,const std::string& detail,ui
             << ",\"monotonic_us\":" << now << ",\"elapsed_us\":" << now-startUs_
             << ",\"event\":" << JsonString(type) << ",\"detail\":" << JsonString(detail)
             << ",\"count\":" << count << "}\n";
-    if(type=="session_started"||type=="session_finished") events_.flush();
 }
 void ResearchSession::Finish(const std::string& status,const std::string& reason,
                              uint64_t physics,uint64_t camera,uint64_t control) {
     if(finished_) return;
     Event("session_finished",status+": "+reason);
+    events_.close(); // Persist before publishing the completion marker; propagate IO errors.
     std::ostringstream out;
     out << "{\"session_id\":" << JsonString(id_) << ",\"status\":" << JsonString(status)
         << ",\"reason\":" << JsonString(reason) << ",\"elapsed_us\":" << MonotonicUs()-startUs_

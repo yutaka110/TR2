@@ -59,9 +59,13 @@ int main(int argc,char** argv){
         check(detector.Process(input).reason=="ambiguous_markers","multiple matching markers rejected");
         RemoteTaskController control("T2",.75);VisualObservation obs;auto cmd=control.Update(obs,1000000);
         check(cmd.v==0&&cmd.w==0&&cmd.state=="OBSERVE","no observation stops");
+        check(!cmd.observationUsed,"no image is not counted as control use");
         obs=o;obs.receivedUs=1001000;cmd=control.Update(obs,1050000);
         check(cmd.v>0&&cmd.sourceFrameId==o.frameId&&cmd.validUntilUs==1150000,"valid image creates bounded forward command with provenance");
+        check(cmd.observationUsed,"verified fresh image counted as control use");
+        check(control.Update(obs,1200000).observationUsed,"capture deadline equality remains usable");
         check(control.Update(obs,1200001).reason=="observation_expired","deadline uses capture not receive");
+        check(!control.Update(obs,1200002).observationUsed,"expired source ID does not imply control use");
         obs.captureUs=1250000;obs.receivedUs=1251000;obs.frameId=2;obs.x=2;obs.y=0;obs.yaw=.2;
         cmd=control.Update(obs,1300000);check(cmd.v==0&&cmd.w<0&&cmd.state=="ALIGN","align rotates toward target yaw");
         obs.yaw=0;obs.speedValid=true;obs.speed=0;cmd=control.Update(obs,1300001);
@@ -69,6 +73,7 @@ int main(int argc,char** argv){
         obs.x=1.8;cmd=control.Update(obs,1300002);check(cmd.state=="APPROACH","align hysteresis exits outside 10cm");
         obs.yaw=1;cmd=control.Update(obs,1300003);check(cmd.v==0&&cmd.w<0,"large heading error rotates without translation");
         obs.positionErrorM=.3;cmd=control.Update(obs,1300004);check(cmd.v==0&&cmd.w==0&&cmd.reason=="uncertainty_stop","large uncertainty stops");
+        check(cmd.observationUsed,"uncertainty braking still uses the valid image estimate");
         obs.positionErrorM=.04;obs.x=std::numeric_limits<double>::quiet_NaN();check(control.Update(obs,1300005).reason=="invalid_observation","nonfinite estimate rejected");
         obs.x=0;obs.captureUs=1400000;obs.receivedUs=1400001;obs.frameId=3;obs.y=.14;obs.yaw=.1;
         RemoteTaskController corridor("T1",.75);cmd=corridor.Update(obs,1450000);

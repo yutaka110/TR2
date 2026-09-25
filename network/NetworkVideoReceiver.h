@@ -1,4 +1,5 @@
 #pragma once
+#include "DecodeTrace.h"
 
 #include "FrameReassembler.h"
 
@@ -100,6 +101,8 @@ struct DecodedVideoFrame {
     int64_t h264OutputSampleTime100ns = 0;
     bool h264OutputSampleTimeValid = false;
     bool h264IdentityMatched = false;
+    uint64_t referenceGeneration=0,decoderInputUs=0;
+    bool referenceTrusted=false;
     uint64_t h264MatchedSourcePtsUs = 0;
     DecodedVideoFrameFormat format = DecodedVideoFrameFormat::Rgba8;
     std::vector<uint8_t> rgba;
@@ -111,6 +114,8 @@ struct DecodedVideoFrame {
 
 class NetworkVideoReceiver {
 public:
+    // Configure before Start; callback must not throw or call decoder methods.
+    void SetDecodeTraceObserver(DecodeTraceObserver observer){traceObserver_=std::move(observer);}
     NetworkVideoReceiver() = default;
     ~NetworkVideoReceiver();
 
@@ -130,6 +135,7 @@ public:
     bool DecoderDrainComplete() const { return drainComplete_.load(); }
 
 private:
+    DecodeTraceObserver traceObserver_;
     // Called on the decode worker before display-queue eviction; must not throw.
     std::function<void(const DecodedVideoFrame&)> observer_;
     // Research mode also bypasses presentation-only input/output freshness

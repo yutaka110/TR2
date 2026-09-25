@@ -45,9 +45,9 @@ def audit(session, link_loss=False):
     from collections import Counter
     if link_loss:
         require(model['capacity_queue_model'], 'capacity audit without link model')
-        link=rows('downlink_link.csv');arrivals={r['packet_id']:r for r in link if r['event'] in ('admitted','tail_drop')}
+        link=rows('downlink_link.csv');arrivals={r['packet_id']:r for r in link if r['event'] in ('admitted','tail_drop') and r['wire_hex'].startswith('52434d44')}
         require(Counter(sent)==Counter(r['wire_hex'] for r in arrivals.values()),'command ingress lost before modeled queue')
-        delivered=[arrivals[r['packet_id']]['wire_hex'] for r in link if r['event']=='delivered']
+        delivered=[arrivals[r['packet_id']]['wire_hex'] for r in link if r['event']=='delivered' and r['packet_id'] in arrivals]
         require(Counter(delivered)==Counter(r['wire_hex'] for r in rx),'unexpected UDP loss after modeled link')
     else:
         require(summary["received_datagrams"] == summary["sent_datagrams"], "unexpected actual UDP loss")

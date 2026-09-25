@@ -54,6 +54,12 @@ int main() {
         auto second=ledger.Take(200),first=ledger.Take(100);
         check(second&&second->frameId==2&&first&&first->frameId==1&&first->captureUs==10,"out of order and delayed output identity");
         check(!ledger.Take(100),"duplicate output rejected");
+        net::FrameIdentity oldGeneration{40,7,640,360,400,400};oldGeneration.referenceGeneration=1;oldGeneration.decoderInputUs=450;
+        net::FrameIdentity newGeneration{45,7,640,360,500,500};newGeneration.referenceGeneration=2;newGeneration.decoderInputUs=550;newGeneration.idr=true;
+        check(ledger.Insert(4000,oldGeneration)&&ledger.Insert(5000,newGeneration),"overlapping IDR generations accepted");
+        auto oldOutput=ledger.Take(4000),newOutput=ledger.Take(5000);
+        check(oldOutput&&oldOutput->referenceGeneration==1&&oldOutput->decoderInputUs==450&&!oldOutput->idr&&
+            newOutput&&newOutput->referenceGeneration==2&&newOutput->idr,"buffered output retains its own generation and wait origin");
         ledger.Insert(100,{3});ledger.Clear();check(!ledger.Take(100),"flush clears stale identity");
         check(ledger.Insert(100,{4,8}),"new stream can reuse timestamps after reset");ledger.Clear();
         for(int i=0;i<256;++i)check(ledger.Insert(i,{uint32_t(i+1)}),"bounded ledger input");

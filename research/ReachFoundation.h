@@ -1,6 +1,7 @@
 #pragma once
 #include "ReachBufferedLog.h"
 #include "ReachLinkModel.h"
+#include "ReachIpBudget.h"
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,9 @@ struct FoundationConfig {
     std::string stage = "foundation", encoder = "auto";
     std::string commandScenario="normal";
     bool boundedLink=false;
+    bool budgeted=false;IpBudgetConfig ipBudget;
+    bool stateFeedback=false;
+    std::string baseline;double baselineLambda=.1;
     LinkConfig uplink,downlink;
     bool HasVisualControl() const {return stage=="visual_control"||stage=="command_udp";}
     double initialY = 0, initialYaw = 0, corridorWidth = 0.75;

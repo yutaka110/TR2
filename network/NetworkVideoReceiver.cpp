@@ -383,6 +383,11 @@ H264AccessUnitValidation ValidateH264AccessUnit(
 
 class H264CpuDecoder {
 public:
+    DecodeTraceObserver observer;
+    static uint64_t Clock(){return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+    void Event(const char* event,uint32_t frame=0,uint64_t capture=0,bool idr=false,const char* reason="",uint64_t input=0,uint64_t generation=0,bool trusted=false){
+        if(observer)observer({event,frame,streamId_,Clock(),capture,generation?generation:generation_,input,idr,trusted,reason});
+    }
     ~H264CpuDecoder() {
         Shutdown();
     }
@@ -471,7 +476,13 @@ public:
         return synced_;
     }
 
-    void MarkReferenceBroken() {
+    void MarkReferenceBroken(const char* reason="decoder_error") {
+        const bool ending=std::string(reason)=="end_of_stream";
+        if(!ending)Event("reference_uncertain",lastInputFrameId_,0,false,reason);
+        for(const auto& entry:identities_.Entries()){
+            const auto& i=entry.second;Event("input_abandoned",i.frameId,i.captureUs,i.idr,reason,i.decoderInputUs,i.referenceGeneration);
+        }
+        Event(ending?"decoder_drained":"recovery_pending",lastInputFrameId_,0,false,reason);
         identities_.Clear();
         pendingOutputs_.clear();
         synced_ = false;
@@ -488,8 +499,13 @@ public:
         bool decoderSync,
         DecodedVideoFrame& outFrame,
         bool requireContiguous = false) {
-        if (streamId_ != 0 && streamId_ != outFrame.streamId) { MarkReferenceBroken(); lastInputFrameId_=0; }
-        if(requireContiguous&&lastInputFrameId_!=0&&outFrame.frameId!=lastInputFrameId_+1) MarkReferenceBroken();
+        if (streamId_ != 0 && streamId_ != outFrame.streamId) { MarkReferenceBroken("stream_change"); lastInputFrameId_=0; }
+        // A late/duplicate AU cannot repair already flushed decoder history.
+        if(requireContiguous&&lastInputFrameId_!=0&&outFrame.frameId<=lastInputFrameId_){
+            Event("input_rejected",outFrame.frameId,outFrame.cameraCaptureCompletedTimeUs,decoderSync,"late_or_duplicate_no_replay");
+            return H264DecodeStatus::NeedMoreInput;
+        }
+        if(requireContiguous&&lastInputFrameId_!=0&&outFrame.frameId!=lastInputFrameId_+1) MarkReferenceBroken("frame_gap");
         lastInputFrameId_=outFrame.frameId;
         streamId_ = outFrame.streamId;
         outFrame.h264IdentityMatched = false;
@@ -503,6 +519,7 @@ public:
         }
 
         if (!synced_ && !decoderSync) {
+            Event("input_rejected",outFrame.frameId,outFrame.cameraCaptureCompletedTimeUs,false,"awaiting_idr");
             return H264DecodeStatus::NeedMoreInput;
         }
         const bool wasSyncedBeforeInput = synced_;
@@ -557,11 +574,14 @@ public:
         FrameIdentity identity{outFrame.frameId,outFrame.streamId,outFrame.width,outFrame.height,
             ptsUs,outFrame.cameraCaptureCompletedTimeUs,outFrame.encoderOutputTimeUs,
             outFrame.sendTimeUs,outFrame.receiveTimeUs};
+        if(decoderSync)++generation_;
+        identity.referenceGeneration=generation_;identity.decoderInputUs=Clock();identity.idr=decoderSync;
         if (ptsUs > static_cast<uint64_t>(INT64_MAX / 10) || !identities_.Insert(static_cast<int64_t>(ptsUs * 10),identity)) {
             MarkReferenceBroken();
             return H264DecodeStatus::Failed;
         }
         discontinuity_ = false;
+        Event("input_accepted",identity.frameId,identity.captureUs,decoderSync,"process_input_ok",identity.decoderInputUs,identity.referenceGeneration);
         if (decoderSync) {
             synced_ = true;
         }
@@ -592,7 +612,7 @@ public:
             if (DrainOne(output)!=H264DecodeStatus::Decoded) break;
             result.push_back(std::move(output));
         }
-        MarkReferenceBroken();
+        MarkReferenceBroken("end_of_stream");
         return result;
     }
 
@@ -925,6 +945,10 @@ private:
         outFrame.encoderOutputTimeUs=identity->encoderOutputUs;
         outFrame.h264MatchedSourcePtsUs=identity->ptsUs;
         outFrame.h264IdentityMatched=true;
+        outFrame.referenceGeneration=identity->referenceGeneration;
+        outFrame.decoderInputUs=identity->decoderInputUs;
+        UINT32 corrupted=0;output.pSample->GetUINT32(MFSampleExtension_FrameCorruption,&corrupted);
+        outFrame.referenceTrusted=synced_&&corrupted==0;
         ComPtr<IMFMediaBuffer> contiguous;
         hr = output.pSample->ConvertToContiguousBuffer(&contiguous);
         if (FAILED(hr)) {
@@ -965,6 +989,9 @@ private:
         if (output.pSample != sample.Get()) {
             output.pSample->Release();
         }
+        if(converted)Event("decoded_output",outFrame.frameId,outFrame.cameraCaptureCompletedTimeUs,identity->idr,
+            outFrame.referenceTrusted?"pixels_and_pts_verified":"corruption_reported",outFrame.decoderInputUs,outFrame.referenceGeneration,outFrame.referenceTrusted);
+        if(converted&&!outFrame.referenceTrusted)MarkReferenceBroken("reported_corruption");
         return converted
             ? H264DecodeStatus::Decoded
             : H264DecodeStatus::Failed;
@@ -972,6 +999,7 @@ private:
 
 private:
     FrameIdentityLedger identities_;
+    uint64_t generation_=0;
     uint32_t streamId_=0;
     uint32_t lastInputFrameId_=0;
     std::deque<DecodedVideoFrame> pendingOutputs_;
@@ -1323,6 +1351,7 @@ void NetworkVideoReceiver::DecodeLoop() {
     } runtime;
     if(FAILED(runtime.mf)) { std::lock_guard lock(mutex_);++stats_.decodeFailures;stats_.lastDropReason="decoder-media-runtime-init-failed";return; }
     H264CpuDecoder h264Decoder;
+    h264Decoder.observer=traceObserver_;
 
     while (running_.load()) {
         UdpReceiver* receiver = nullptr;
@@ -1365,6 +1394,7 @@ void NetworkVideoReceiver::DecodeLoop() {
         }
 
         const uint64_t inputCheckUs = NowMicroseconds();
+        if(traceObserver_)traceObserver_({"decode_dequeued",frame.frameId,frame.streamId,inputCheckUs,0,0,0,false,false,"completed_queue"});
         const double inputFrameAgeMs =
             FrameFreshnessAgeMs(inputCheckUs, frame);
         const NetworkStatsSnapshot receiverSnapshot = receiver->GetStats();
@@ -1530,6 +1560,7 @@ void NetworkVideoReceiver::DecodeLoop() {
                 std::lock_guard<std::mutex> lock(mutex_);
                 stats_.decodeFailures++;
                 RecordH264AuInvalidLocked("payload-header-failure");
+                if(traceObserver_)traceObserver_({"input_rejected",frame.frameId,frame.streamId,NowMicroseconds(),0,0,0,false,false,"payload_header_failure"});
                 RecordDropLocked("h264-payload-header-failure", false);
                 receiver->RequestKeyFrame(
                     frame.frameId,
@@ -1540,6 +1571,7 @@ void NetworkVideoReceiver::DecodeLoop() {
             const H264AccessUnitValidation auValidation =
                 ValidateH264AccessUnit(frame, auHeader);
             if (!auValidation.valid) {
+                if(traceObserver_)traceObserver_({"input_rejected",frame.frameId,frame.streamId,NowMicroseconds(),auHeader.cameraCaptureCompletedTimeUs,0,0,false,false,auValidation.reason.c_str()});
                 TraceH264Receive(
                     frame.frameId,
                     auHeader.frameId,
@@ -1580,6 +1612,7 @@ void NetworkVideoReceiver::DecodeLoop() {
                     AgeMs(h264InputCheckUs, auHeader.encoderOutputTimeUs));
             }
             const bool decoderSync = auValidation.decoderSync;
+            if(traceObserver_)traceObserver_({"au_validated",frame.frameId,frame.streamId,NowMicroseconds(),auHeader.cameraCaptureCompletedTimeUs,0,0,decoderSync,false,"crc_nal_flags_valid"});
             const bool decoderWasSyncedBeforeInit = h264Decoder.HasSync();
 
             if (!h264Decoder.IsInitializedFor(
@@ -1589,6 +1622,7 @@ void NetworkVideoReceiver::DecodeLoop() {
                     !h264Decoder.Initialize(
                         auHeader.width,
                         auHeader.height)) {
+                    if(traceObserver_)traceObserver_({"input_rejected",frame.frameId,frame.streamId,NowMicroseconds(),auHeader.cameraCaptureCompletedTimeUs,0,0,decoderSync,false,!decoderSync?"awaiting_initial_idr":"decoder_init_failed"});
                     TraceH264Receive(
                         frame.frameId,
                         auHeader.frameId,
@@ -1680,6 +1714,7 @@ void NetworkVideoReceiver::DecodeLoop() {
             const double decodeMs = ElapsedMs(decodeStart);
             if (decodeStatus != H264DecodeStatus::Decoded ||
                 !HasDecodedPayload(decodedFrame)) {
+                if(traceObserver_)traceObserver_({"decoder_failed",frame.frameId,frame.streamId,NowMicroseconds(),auHeader.cameraCaptureCompletedTimeUs,0,0,decoderSync,false,"failed_or_empty_output"});
                 TraceH264Receive(
                     frame.frameId,
                     auHeader.frameId,

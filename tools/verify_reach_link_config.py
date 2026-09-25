@@ -25,7 +25,17 @@ def main():
       ('duplicate_time',lambda x:x['link_model']['uplink']['capacity'].append(dict(at_us=0,bps=1))),
       ('unknown_key',lambda x:x['link_model']['uplink'].update(bandwidth=1000)),
       ('missing_direction',lambda x:x['link_model'].pop('downlink')),
-      ('mixed_diagnostic',lambda x:x['command_link'].update(scenario='late'))]
+      ('mixed_diagnostic',lambda x:x['command_link'].update(scenario='late')),
+      ('empty_impairment',lambda x:x['link_model']['uplink'].update(impairment=[])),
+      ('non_array_impairment',lambda x:x['link_model']['uplink'].update(impairment={})),
+      ('numeric_drop',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=0,drop=1,delay_us=0)])),
+      ('negative_delay',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=0,drop=False,delay_us=-1)])),
+      ('excess_delay',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=0,drop=False,delay_us=1000001)])),
+      ('fractional_delay',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=0,drop=False,delay_us=.5)])),
+      ('missing_drop',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=0,delay_us=0)])),
+      ('impairment_origin',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=1,drop=False,delay_us=0)])),
+      ('duplicate_impairment_time',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=0,drop=False,delay_us=0)]*2)),
+      ('excess_trace_points',lambda x:x['link_model']['uplink'].update(impairment=[dict(at_us=i,drop=False,delay_us=0) for i in range(4097)]))]
     exe=root/'bin/Release/GE3.exe';report=dict(passed=False,executable_sha256=hashlib.sha256(exe.read_bytes()).hexdigest(),cases=[])
     startup=subprocess.STARTUPINFO();startup.dwFlags|=subprocess.STARTF_USESHOWWINDOW;startup.wShowWindow=subprocess.SW_HIDE
     for name,mutate in mutations:

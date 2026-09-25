@@ -2,6 +2,8 @@
 #include "ReachFoundation.h"
 #include "ReachRobotVideo.h"
 #include "ReachCommandUdp.h"
+#include "ReachBudgetTransport.h"
+#include "ReachStateFeedbackUdp.h"
 #include <Windows.h>
 #include <algorithm>
 #include <chrono>
@@ -16,6 +18,21 @@
 
 namespace reach {
 namespace {
+class ResearchWait {
+    HANDLE timer_=nullptr;
+public:
+    explicit ResearchWait(bool precise){
+        if(precise){timer_=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE);
+            if(!timer_)throw std::runtime_error("high resolution research timer unavailable");}
+    }
+    ~ResearchWait(){if(timer_)CloseHandle(timer_);}
+    void Wait(){
+        if(!timer_){std::this_thread::sleep_for(std::chrono::milliseconds(1));return;}
+        LARGE_INTEGER due{};due.QuadPart=-10000; // One millisecond, relative 100 ns units.
+        if(!SetWaitableTimerEx(timer_,&due,0,nullptr,nullptr,nullptr,0)||WaitForSingleObject(timer_,1000)!=WAIT_OBJECT_0)
+            throw std::runtime_error("research timer wait failed");
+    }
+};
 std::wstring Env(const wchar_t* name) {
     const DWORD size=GetEnvironmentVariableW(name,nullptr,0);
     if(size==0) return {};
@@ -183,14 +200,18 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
         state.commandUdp=config.stage=="command_udp";
         state.corridorWidth=config.corridorWidth;
         std::unique_ptr<RobotWorld> robot;
+        std::shared_ptr<BudgetTransport> budget;
+        if(config.budgeted)budget=std::make_shared<BudgetTransport>(config.ipBudget,session->Directory(),config.durationUs);
         std::unique_ptr<RobotVideo> video;
         std::unique_ptr<RemoteTaskController> controller;
+        std::unique_ptr<StateFeedbackUdp> stateFeedback;
+        SenderStateEstimate senderEstimate;
         std::unique_ptr<CommandUdp> commandLink;
         BufferedLog worldLog,commandLog,captureEvaluation,appliedCommands;
         uint64_t commandCount=0,movingCommands=0,stopCommands=0;
         if(state.robot) {
             robot=std::make_unique<RobotWorld>(config.task,config.initialY,config.initialYaw,config.corridorWidth);
-            video=std::make_unique<RobotVideo>(config,*session);
+            video=std::make_unique<RobotVideo>(config,*session,budget);
             worldLog.open(session->Directory()/"world.csv");worldLog.exceptions(std::ios::badbit|std::ios::failbit);
             worldLog.precision(12);
             worldLog<<"physics_tick,simulation_s,x_m,y_m,yaw_rad,v_m_s,w_rad_s,collision,out_of_bounds,goal_hold_s,success,timeout\n";
@@ -202,7 +223,9 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                 captureEvaluation<<"frame_id,physics_tick,x_m,y_m,yaw_rad\n";
                 appliedCommands.open(session->Directory()/(state.commandUdp?"udp_applied_commands.csv":"local_applied_commands.csv"));appliedCommands.exceptions(std::ios::badbit|std::ios::failbit);appliedCommands.precision(12);
                 appliedCommands<<"physics_tick,applied_us,sequence,live,v_m_s,w_rad_s"<<(state.commandUdp?",reason,accepted_us,generated_us,valid_until_us,source_frame_id,source_capture_us\n":"\n");
-                if(state.commandUdp)commandLink=std::make_unique<CommandUdp>(session->Id(),session->Directory(),config.commandScenario,config.boundedLink?&config.downlink:nullptr);
+                if(state.commandUdp)commandLink=std::make_unique<CommandUdp>(session->Id(),session->Directory(),config.commandScenario,config.boundedLink?&config.downlink:nullptr,budget);
+                if(budget){video->SetFeedbackIngress(commandLink->IngressPort());commandLink->SetFeedbackDestination(video->SenderPort());}
+                if(config.stateFeedback){stateFeedback=std::make_unique<StateFeedbackUdp>(session->Id(),session->Directory(),budget);commandLink->SetStateDestination(stateFeedback->Port());}
                 session->Event("visual_control_started",state.commandUdp?"receiver pixels -> fixed controller -> serialized reverse UDP -> robot deadline/watchdog":"receiver pixels -> marker pose -> fixed controller -> local diagnostic adapter; command UDP pending G1-05");
             }
         }
@@ -218,26 +241,38 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
             if(state.robot) SetWindowTextW(window,L"Reach-RT | G1-02 / 03 Robot & Video");
             if(state.visual) SetWindowTextW(window,L"Reach-RT | G1-04 Received Image Control");
             if(state.commandUdp) SetWindowTextW(window,L"Reach-RT | G1-05 Reverse Command UDP");
-            if(state.boundedLink)SetWindowTextW(window,L"Reach-RT | G2-01 Bidirectional Capacity Link");
+            if(state.boundedLink)SetWindowTextW(window,L"Reach-RT | G2-02 Time-based Link Trace");
+            if(config.budgeted)SetWindowTextW(window,L"Reach-RT | G2-03 Shared IP Budget");
+            if(config.stateFeedback)SetWindowTextW(window,L"Reach-RT | G2-05 Received Notification Estimate");
             HWND pathEdit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",state.directory.c_str(),WS_CHILD|WS_VISIBLE|ES_READONLY|ES_AUTOHSCROLL,
                 36,690,1040,25,window,nullptr,wc.hInstance,nullptr);
             SendMessageW(pathEdit,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
             ShowWindow(window,SW_SHOW); UpdateWindow(window);
         }
+        const bool preciseWait=Flag(L"TR2_REACH_PRECISE_WAIT");ResearchWait researchWait(preciseWait);
+        BufferedLog scheduleTiming;scheduleTiming.open(session->Directory()/"schedule_timing.csv");
+        scheduleTiming.exceptions(std::ios::badbit|std::ios::failbit);scheduleTiming<<"phase,start_us,end_us,elapsed_us\n";
+        std::ofstream(session->Directory()/"schedule_model.json")<<"{\"precise_wait\":"<<(preciseWait?"true":"false")<<",\"requested_wait_us\":1000,\"record_threshold_us\":2000,\"clock_guards_unchanged\":true}";
+        auto phaseStart=MonotonicUs();const char* phase="setup";
+        auto mark=[&](const char* next){const auto end=MonotonicUs();if(end-phaseStart>2000)scheduleTiming<<phase<<','<<phaseStart<<','<<end<<','<<end-phaseStart<<'\n';phaseStart=end;phase=next;};
         const auto origin=MonotonicUs();
+        if(budget)budget->Start(origin);
         if(video)video->StartLink(origin);
         if(commandLink)commandLink->Start(origin);
+        if(stateFeedback)stateFeedback->Start(origin,config.durationUs,commandLink->IngressPort(),commandLink->RelaySourcePort());
         session->Event("schedule_origin","absolute monotonic microseconds",origin);
         PeriodicDeadline physics(origin,config.physicsHz,config.maxCatchupSteps);
         PeriodicDeadline camera(origin,config.cameraHz,config.maxCatchupSteps);
         PeriodicDeadline control(origin,config.controlHz,config.maxCatchupSteps);
         uint64_t nextUi=origin, nextHeartbeat=origin+1000000;
         while(!state.closed) {
+            mark("window");
             if(window) {
                 MSG message{};
                 while(PeekMessageW(&message,window,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
             }
             if(state.closed) break;
+            mark("clock");
             const auto now=MonotonicUs();
             const auto until=std::min(now,origin+config.durationUs);
             const auto physical=physics.Poll(until);
@@ -247,18 +282,23 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
             if(physical)session->Event("clock_tick","physics",physical);
             if(controls)session->Event("clock_tick","control",controls);
             if(cameras)session->Event("clock_tick","camera",cameras);
+            mark("state_poll");
             if(robot) {
                 video->Check();
+                if(stateFeedback)stateFeedback->Poll();
+                mark("control");
                 if(controller&&controls){
                     if(controls>1)throw std::runtime_error("visual control deadline missed; cannot reconstruct historical observations");
                     const auto observed=video->Observation();
                     state.command=controller->Update(observed,MonotonicUs());
+                    video->RecordControl(state.command);
+                    if(stateFeedback){stateFeedback->Send(video->ReceiverNotification());senderEstimate=stateFeedback->Estimate();video->PublishBaselineState(senderEstimate);}
                     if(commandLink)commandLink->Offer(state.command);
                     const auto& c=state.command;++commandCount;if(c.v>0||std::abs(c.w)>0)++movingCommands;else++stopCommands;
                     commandLog<<c.sequence<<','<<c.generatedUs<<','<<c.validUntilUs<<','<<c.sourceFrameId<<','<<c.sourceStreamId<<','<<c.sourceCaptureUs<<','<<c.ageMs<<','
                         <<c.state<<','<<c.reason<<','<<c.v<<','<<c.w<<','<<c.distanceM<<','<<c.wallMarginM<<','<<c.estimatedComplete<<'\n';
                 }
-                if(commandLink)commandLink->Pump();
+                mark("command_pump");if(commandLink)commandLink->Pump();mark("physics");
                 for(uint32_t i=0;i<physical;++i) {
                     // Script reads time only. No pose/goal information enters its command.
                     const auto tick=physics.Count()-physical+i;
@@ -277,7 +317,7 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                     robot->Step(.01);const auto& t=robot->Truth();
                     worldLog<<tick+1<<','<<t.elapsed<<','<<t.x<<','<<t.y<<','<<t.yaw<<','<<t.v<<','<<t.w<<','<<t.collision<<','<<t.outOfBounds<<','<<t.hold<<','<<t.success<<','<<t.timeout<<'\n';
                 }
-                if(cameras>1) throw std::runtime_error("camera deadline missed; historical pixels cannot be reconstructed");
+                mark("capture");if(cameras>1) throw std::runtime_error("camera deadline missed; historical pixels cannot be reconstructed");
                 if(cameras){
                     video->Capture(*robot);
                     if(controller){
@@ -286,23 +326,28 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                         captureEvaluation<<camera.Count()<<','<<physics.Count()<<','<<evaluation.x<<','<<evaluation.y<<','<<evaluation.yaw<<'\n';
                     }
                 }
-                state.truth=robot->Truth();
+                mark("ui");state.truth=robot->Truth();
                 if(now>=nextUi)state.video=video->View();
             }
             state.elapsedUs=until-origin;
             if(state.boundedLink&&now>=nextUi){
                 auto rate=[&](const LinkConfig& link){uint64_t bps=0;for(auto p:link.capacity){if(p.atUs>state.elapsedUs)break;bps=p.bps;}return bps;};
-                state.linkCaption=L"G2-01  双方向容量・FIFO ／ 上り "+std::to_wstring(rate(config.uplink))+L" bps・下り "+std::to_wstring(rate(config.downlink))+L" bps";
+                auto status=[&](const LinkConfig& link){auto p=link.impairment[link.StateIndex(state.elapsedUs)];return std::to_wstring(rate(link))+L" bps / "+(p.drop?L"損失区間":L"送達区間")+L" / "+std::to_wstring(p.delayUs/1000)+L" ms";};
+                state.linkCaption=L"G2-02  上り "+status(config.uplink)+L"・下り "+status(config.downlink);
+                if(config.budgeted)state.linkCaption=L"G2-03  共通IP予算 "+std::to_wstring(config.ipBudget.total.rateBps)+L" bps / 最大 "+std::to_wstring(config.ipBudget.total.maxBytes)+L" byte ／ 映像・FEC・再送・ACK・指令";
+                if(config.stateFeedback)state.linkCaption=L"G2-05  送信側の受信通知 #"+std::to_wstring(senderEstimate.report.sequence)+L" / 古さ "+std::to_wstring(senderEstimate.ageUs/1000)+L" ms / "+(senderEstimate.notificationLive?L"通知有効":L"未到着・失効")+L" / 世代 "+std::to_wstring(senderEstimate.report.generation);
             }
             state.ticks[0]=physics.Count(); state.ticks[1]=camera.Count(); state.ticks[2]=control.Count();
             if(now>=nextHeartbeat) { session->Event("heartbeat",state.robot?"robot/video validation active":"foundation scheduling active"); nextHeartbeat=now+1000000; }
             if(now>=nextUi) { if(window)InvalidateRect(window,nullptr,FALSE); nextUi=now+100000; }
             if(now>=origin+config.durationUs) {
-                if(commandLink)commandLink->Finish();
+                if(budget)budget->CloseAdmission();
+                if(commandLink&&!budget)commandLink->Finish();
                 if(video) {
                     const bool ok=video->Finish();state.video=video->View();
                     if(!ok) throw std::runtime_error("robot/video validation failed; see robot_video_summary.json");
                 }
+                if(budget){commandLink->Finish();video->FinishFeedback(commandLink->FeedbackDelivered());if(stateFeedback)stateFeedback->Finish(commandLink->StateDelivered());budget->Finish();}
                 if(controller){
                     const auto& t=robot->Truth();
                     std::ofstream out(session->Directory()/"visual_control_summary.json");out.exceptions(std::ios::badbit|std::ios::failbit);
@@ -314,6 +359,7 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                 // Flush measurement buffers after scheduling ends, before certifying completion.
                 if(worldLog.is_open())worldLog.close();if(commandLog.is_open())commandLog.close();
                 if(captureEvaluation.is_open())captureEvaluation.close();if(appliedCommands.is_open())appliedCommands.close();
+                scheduleTiming.close();
                 session->Finish(state.commandUdp?"command_udp_completed":state.visual?"visual_control_completed":state.robot?"robot_video_completed":"foundation_completed",state.boundedLink?"capacity-limited UDP trial recorded; link verification and task outcome adjudicated separately":state.commandUdp?"reverse UDP trial recorded; task and G1 gate adjudicated by external auditor":state.visual?"image recognition/control local diagnostic completed; command UDP and G1-06 validation pending":state.robot?"scripted robot/video identity validation; autonomous task not run":"configured clock interval completed; task not run",physics.Count(),camera.Count(),control.Count());
                 state.completed=true; state.state=L"基盤確認 完了";
                 if(state.robot)state.state=L"接続・照合 完了";
@@ -321,10 +367,12 @@ bool RunResearchModeFromEnvironment(int& exitCode) {
                 if(window) InvalidateRect(window,nullptr,FALSE);
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            mark("wait");researchWait.Wait();mark("between_loops");
         }
         if(!state.completed) {
+            if(budget)budget->CloseAdmission();
             if(video)video->Finish();
+            if(budget){commandLink->Finish();video->FinishFeedback(commandLink->FeedbackDelivered());if(stateFeedback)stateFeedback->Finish(commandLink->StateDelivered());budget->Finish();}
             session->Finish("interrupted","window closed before interval completed",physics.Count(),camera.Count(),control.Count());
         }
         exitCode=state.completed?0:3;

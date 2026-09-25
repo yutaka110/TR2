@@ -195,6 +195,7 @@ MotionCommand RemoteTaskController::Update(const VisualObservation& o,uint64_t n
     if(o.frameId<lastFrame_||o.captureUs<lastCapture_||(o.frameId==lastFrame_&&o.captureUs!=lastCapture_)||
         (o.frameId>lastFrame_&&o.captureUs<=lastCapture_))return stop("out_of_order");
     lastFrame_=o.frameId;lastCapture_=o.captureUs;
+    c.observationUsed=true;
     const double dx=goalX_-o.x,dy=-o.y,rho=std::hypot(dx,dy),alpha=Wrap(std::atan2(dy,dx)-o.yaw);
     c.distanceM=rho;c.reason="image_feedback";
     // T1 must clear x=3.20 before stopping: the goal at 3.25 leaves only

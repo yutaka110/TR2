@@ -26,6 +26,7 @@ namespace net {
         uint32_t queuedPackets = 0;
         uint32_t highPriorityQueuedPackets = 0;
         uint32_t normalQueuedPackets = 0;
+        uint64_t queuedPayloadBytes = 0; // Live UDP payload backlog, not historical residence time.
         uint64_t enqueuedPackets = 0;
         uint64_t sentPackets = 0;
         uint64_t sentBytes = 0;

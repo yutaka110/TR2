@@ -119,7 +119,7 @@ class Reader {
 public:
     explicit Reader(const std::string& s):text(s) {}
     Json Read() {
-        if(text.size()>65536) Fail("configuration exceeds 64 KiB");
+        if(text.size()>4194304) Fail("configuration exceeds 4 MiB");
         if(text.compare(0,3,"\xef\xbb\xbf")==0) pos=3;
         auto value=Value(0); Space(); if(pos!=text.size()) Fail("trailing data"); return value;
     }

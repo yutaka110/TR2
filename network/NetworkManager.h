@@ -9,6 +9,7 @@
 #include "PacketPacer.h"
 #include "BandwidthEstimator.h"
 #include "NetworkConditionSimulator.h"
+#include "DatagramSendHook.h"
 
 #include <atomic>
 #include <cstdint>
@@ -18,6 +19,7 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
+#include <functional>
 
 class NetworkManager {
 public:
@@ -52,10 +54,18 @@ public:
         uint64_t extraPacingDeadlineUs = 0;
         uint16_t uepDuplicateFirstChunkCount = 0;
         uint8_t uepDuplicatePacketCopies = 0;
+        bool disableFec = false;
     };
 
     NetworkManager(const std::string& ip, uint16_t port);
     ~NetworkManager();
+    void SetDatagramSendHook(net::DatagramSendHook hook){sendHook_=std::move(hook);}
+    void SetControlReceiveObserver(net::DatagramObserver hook){receiveObserver_=std::move(hook);}
+    void SetResearchRepairGate(std::function<bool(uint32_t,std::span<const uint16_t>)> gate){researchRepairGate_=std::move(gate);}
+    void StopResearchPacer(){packetPacer_.Stop();} // Join callbacks before closing opt-in action logs.
+    bool ConfigureResearchControlSocket(){int bytes=4194304;u_long mode=1;
+        return !controlReceiverRunning_&&setsockopt(udpSocket_,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&bytes),sizeof(bytes))==0&&ioctlsocket(udpSocket_,FIONBIO,&mode)==0;}
+    uint16_t BoundPort() const {sockaddr_in a{};int size=sizeof(a);return getsockname(udpSocket_,reinterpret_cast<sockaddr*>(&a),&size)==0?ntohs(a.sin_port):0;}
 
     // ============================================================
     // Legacy / Current Sender
@@ -311,7 +321,8 @@ private:
         bool keyFrame,
         uint64_t sendTimeUs,
         const char* context,
-        const RnvpFrameProtectionOptions& protection
+        const RnvpFrameProtectionOptions& protection,
+        bool retransmit
     );
 
     bool SendRNVPFecParity(
@@ -486,6 +497,9 @@ private:
     uint64_t NowMicroseconds() const;
     uint32_t NextRNVPSequence();
 
+    net::DatagramSendHook sendHook_;
+    net::DatagramObserver receiveObserver_;
+    std::function<bool(uint32_t,std::span<const uint16_t>)> researchRepairGate_;
     bool SendPacketRaw(
         const uint8_t* packetData,
         size_t packetSize,

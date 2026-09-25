@@ -20,6 +20,23 @@ int main(int argc,char** argv) {
         const auto config=reach::FoundationConfig::Load(argv[1]);
         Require(config.physicsHz==100&&config.cameraHz==30&&config.controlHz==20,"initial rates");
         Require(reach::FoundationConfig::Parse(config.EffectiveJson()).durationUs==config.durationUs,"effective config roundtrip");
+        auto feedbackConfig=reach::FoundationConfig::Load("config/reach_rt_g1_command.json");
+        feedbackConfig.boundedLink=true;feedbackConfig.budgeted=true;feedbackConfig.stateFeedback=true;
+        Require(reach::FoundationConfig::Parse(feedbackConfig.EffectiveJson()).stateFeedback,"state feedback config roundtrip");
+        auto stateText=feedbackConfig.EffectiveJson();
+        for(const std::string value:{"false","1","\"true\"","null"}){
+            auto invalid=stateText;auto at=invalid.find("\"state_feedback\":true");invalid.replace(at,21,"\"state_feedback\":"+value);
+            Reject([&](){reach::FoundationConfig::Parse(invalid);},"non-true state feedback option accepted");
+        }
+        feedbackConfig.budgeted=false;Reject([&](){reach::FoundationConfig::Parse(feedbackConfig.EffectiveJson());},"state feedback without budget accepted");
+        feedbackConfig.budgeted=true;feedbackConfig.boundedLink=false;Reject([&](){reach::FoundationConfig::Parse(feedbackConfig.EffectiveJson());},"state feedback without modeled link accepted");
+        feedbackConfig.boundedLink=true;feedbackConfig.baseline="B1";feedbackConfig.baselineLambda=.3;
+        Require(reach::FoundationConfig::Parse(feedbackConfig.EffectiveJson()).baseline=="B1","baseline roundtrip");
+        for(const auto mode:{"B2","B3"}){auto valid=feedbackConfig;valid.baseline=mode;Require(reach::FoundationConfig::Parse(valid.EffectiveJson()).baseline==mode,"ablation mode roundtrip");}
+        for(const auto mode:{"B4","R","b1"}){auto invalid=feedbackConfig;invalid.baseline=mode;Reject([&](){reach::FoundationConfig::Parse(invalid.EffectiveJson());},"unknown baseline accepted");}
+        for(double lambda:{-1.,3.01}){auto invalid=feedbackConfig;invalid.baselineLambda=lambda;Reject([&](){reach::FoundationConfig::Parse(invalid.EffectiveJson());},"invalid lambda accepted");}
+        {auto invalid=feedbackConfig;invalid.stateFeedback=false;Reject([&](){reach::FoundationConfig::Parse(invalid.EffectiveJson());},"baseline without state mode accepted");}
+        {auto invalid=feedbackConfig;invalid.baseline="B0";Reject([&](){reach::FoundationConfig::Parse(invalid.EffectiveJson());},"variable B0 accepted");}
         Require(reach::Sha256("abc")=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","SHA256 known vector");
         for(const std::string invalid:std::initializer_list<std::string>{"{\"a\":1,\"a\":2}","{\"a\":1,\"\\u0061\":2}","[1,]","{\"x\":true,}",
               "01","1e999","NaN","1e","+2","{} false","\"\\uD800\"","\"\\uDC00\"","\"\\x20\"",std::string("\"\xc0\x80\"")})
@@ -27,7 +44,8 @@ int main(int argc,char** argv) {
         Require(reach::ParseJson("\"\\uD83D\\uDE80\"").StringValue()=="\xf0\x9f\x9a\x80","unicode surrogate pair");
         Require(reach::ParseJson("\"日本語\"").StringValue()=="日本語","UTF8 input");
         Require(reach::ParseJson(reach::JsonString("quote\"\n\\")).StringValue()=="quote\"\n\\","escaped log roundtrip");
-        Reject([](){reach::ParseJson(std::string(65537,' '));},"oversized config accepted");
+        Require(reach::ParseJson(std::string(65536,' ')+"0").NumberValue()==0,"trace-sized JSON supported");
+        Reject([](){reach::ParseJson(std::string(4194304,' ')+"0");},"oversized config accepted");
         Reject([](){reach::ParseJson(std::string(18,'[')+"0"+std::string(18,']'));},"excessive nesting accepted");
         auto invalidConfig=[&](const std::string& before,const std::string& after) {
             auto text=config.EffectiveJson(); auto p=text.find(before);

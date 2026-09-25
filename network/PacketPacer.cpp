@@ -255,6 +255,9 @@ namespace {
             static_cast<uint32_t>(highPriorityQueue_.size());
         stats.normalQueuedPackets =
             static_cast<uint32_t>(normalQueue_.size());
+        stats.queuedPayloadBytes = 0;
+        for (const auto& packet : highPriorityQueue_) stats.queuedPayloadBytes += packet.data.size();
+        for (const auto& packet : normalQueue_) stats.queuedPayloadBytes += packet.data.size();
         stats.videoCreditBytes = pacingCreditBytes_;
         stats.repairCreditBytes = repairCreditBytes_;
         return stats;

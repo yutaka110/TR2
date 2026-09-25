@@ -51,6 +51,8 @@ struct MotionCommand {
     double v=0,w=0,ageMs=0,distanceM=0,wallMarginM=0;
     std::string state="OBSERVE",reason="no_image";
     bool estimatedComplete=false;
+    // Local audit only; not part of the RCMD wire representation.
+    bool observationUsed=false;
 };
 class RemoteTaskController {
 public:

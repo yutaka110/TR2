@@ -1,5 +1,6 @@
 """G2-01 independent service-integral audit of real UDP relay records."""
 import argparse
+import bisect
 from collections import Counter
 import hashlib
 import json
@@ -29,6 +30,16 @@ def link_audit(session,direction):
     offered=[r for r in data if r['event'] in ('admitted','tail_drop')]
     delivered={int(r['packet_id']):r for r in data if r['event']=='delivered'}
     cancelled={int(r['packet_id']):r for r in data if r['event']=='cancelled_at_close'}
+    lost={int(r['packet_id']):r for r in data if r['event']=='trace_drop'}
+    propagation_cancelled={int(r['packet_id']):r for r in data if r['event']=='propagation_cancelled_at_close'}
+    propagating={int(r['packet_id']):r for r in data if r['event']=='propagating'}
+    trace_path=session/(direction+'_trace.json')
+    states=[dict(at_us=0,drop=False,delay_us=0)]
+    if trace_path.exists():
+        require(hashlib.sha256(trace_path.read_bytes()).hexdigest()==summary['trace_sha256'],'trace hash mismatch')
+        trace=read(trace_path);states=trace['impairment']
+        require(trace['capacity']==summary['capacity_trace'],'capacity trace mismatch')
+        require(summary['trace_sample_clock']=='serialization_completion_us','wrong state sampling clock')
     active=[];last_end=0;admitted={};max_occupied=0;crossed=0
     for i,r in enumerate(offered,1):
         require(int(r['packet_id'])==i,'arrival sequence')
@@ -41,21 +52,46 @@ def link_audit(session,direction):
             start=max(now,last_end);end=finish_time(start,b,summary['capacity_trace']);last_end=end
             active.append((end,b));admitted[i]=(r,start,end);occupied+=b
             if any(start<p['at_us']<end for p in summary['capacity_trace']):crossed+=1
-            if i in delivered:
-                d=delivered[i]
+            terminal=delivered.get(i) or lost.get(i) or propagation_cancelled.get(i)
+            if terminal:
+                d=terminal
                 require(int(d['start_us'])==start and int(d['completion_us'])==end,'serialization differs from capacity integral')
-                require(int(d['actual_send_us'])>=end,'UDP sent before serialization complete')
+                index=bisect.bisect_right([p['at_us'] for p in states],end)-1;s=states[index];due=end+s['delay_us']
+                if trace_path.exists():
+                    require(int(d['trace_index'])==index and int(d['trace_at_us'])==s['at_us'],'wrong time-state selection')
+                    require(int(d['delay_us'])==s['delay_us'] and int(d['scheduled_delivery_us'])==due,'wrong modeled propagation delay')
+                    require((i in lost)==s['drop'],'wrong time-cell loss decision')
+                    require((i in propagating)==(not s['drop']),'propagation entry mismatch')
+                    if i in propagating:
+                        require(all(propagating[i][k]==d[k] for k in ('start_us','completion_us','trace_index','trace_at_us','delay_us','scheduled_delivery_us')),'propagation record changed')
+                if i in delivered:
+                    require(int(d['actual_send_us'])>=due,'UDP sent before propagation complete')
+                    require(int(d['event_us'])==due,'wrong logical delivery timestamp')
+                if i in lost:require(int(d['event_us'])==end,'loss evaluated at wrong time')
+                if i in propagation_cancelled:require(int(d['event_us'])<due,'overdue propagation cancellation')
             else:require(i in cancelled,'admitted packet disappeared')
         require(occupied==int(r['occupied_ip_bytes']),'incorrect queue occupancy')
         max_occupied=max(max_occupied,occupied)
-    require(set(delivered)|set(cancelled)==set(admitted) and not set(delivered)&set(cancelled),'terminal packet partition')
+    terminal_sets=[set(delivered),set(cancelled),set(lost),set(propagation_cancelled)]
+    require(set.union(*terminal_sets)==set(admitted) and sum(map(len,terminal_sets))==len(admitted),'terminal packet partition')
+    require(sum(r['event'] in ('delivered','cancelled_at_close','trace_drop','propagation_cancelled_at_close') for r in data)==len(admitted),'duplicate terminal event')
     require(len(offered)==summary['offered_packets'] and len(admitted)==summary['admitted_packets'],'summary admissions')
     require(len(delivered)==summary['delivered_packets'] and len(cancelled)==summary['cancelled_packets'],'summary completions')
     require(summary['offered_packets']==summary['admitted_packets']+summary['tail_dropped_packets'],'packet conservation')
     require(summary['offered_ip_bytes']==sum(int(r['ip_bytes']) for r in offered),'offered bytes')
-    require(summary['offered_ip_bytes']==summary['delivered_ip_bytes']+summary['tail_dropped_ip_bytes']+summary['cancelled_ip_bytes'],'byte conservation')
+    require(len(lost)==summary.get('trace_dropped_packets',0) and len(propagation_cancelled)==summary.get('propagation_cancelled_packets',0),'impairment terminal counts')
+    for records,field in [(delivered,'delivered_ip_bytes'),(cancelled,'cancelled_ip_bytes'),(lost,'trace_dropped_ip_bytes'),(propagation_cancelled,'propagation_cancelled_ip_bytes')]:
+        require(sum(int(r['ip_bytes']) for r in records.values())==summary.get(field,0),'terminal bytes '+field)
+    require(summary['offered_ip_bytes']==sum(summary.get(k,0) for k in ('delivered_ip_bytes','tail_dropped_ip_bytes','cancelled_ip_bytes','trace_dropped_ip_bytes','propagation_cancelled_ip_bytes')),'byte conservation')
     require(max_occupied==summary['maximum_occupied_ip_bytes'] and max_occupied<=summary['queue_limit_ip_bytes'],'queue maximum')
     require(not summary['error'],'relay execution error')
+    if 'service_cursor_us' in summary:
+        remaining=0;cursor=summary['service_cursor_us'];trace=summary['capacity_trace']
+        for i,c in cancelled.items():
+            arrival,start,end=admitted[i];work=int(arrival['ip_bytes'])*8000000
+            served=sum(p['bps']*max(0,min(cursor,trace[j+1]['at_us'] if j+1<len(trace) else 3601000000)-max(start,p['at_us'])) for j,p in enumerate(trace))
+            expected=max(0,work-served);require(int(c['remaining_work'])==expected,'partial serialization work differs from integral');remaining+=expected
+        require(summary['serviced_work_bit_microseconds']==sum(int(r['ip_bytes'])*8000000 for r,_,_ in admitted.values())-remaining,'serviced bytes summary')
     if direction=='uplink':
         def identity(row):
             b=bytes.fromhex(row['wire_hex']);return (int.from_bytes(b[8:12],'big'),int.from_bytes(b[16:20],'big'),int.from_bytes(b[20:22],'big'),len(b))

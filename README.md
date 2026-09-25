@@ -1,6 +1,8 @@
 # RNVP Realtime Video Communication Engine
 
-Reach-RTはG1通過、**G2-01「双方向の容量・直列化・有限キュー」完了**です。[実装進捗](docs/Reach_RT_Implementation_Progress.md)、[G2の実装意図・構造](docs/Reach_RT_G2_Link.md)、[実通信5ケースの結果](artifacts/reach_g2_link_20260922/verification/acceptance_final_02/index.html)を参照してください。[G2画面を起動](tools/open_reach_g2.cmd)すると、実H.264映像と逆方向UDP指令に独立した容量・キューを適用します。[G1の18条件の証拠](artifacts/reach_g1_stable_20260921/verification/matrix_final_01/index.html)と[旧合格版の画面](tools/open_reach_g1.cmd)も保持しています。次はG2-02の時刻基準障害トレース・乱数分離。研究方式の優位性はまだ評価していません。
+Reach-RTは**G4-02「到着・作業価値の予測と校正」完了**です。受信済み通知と送信側の履歴から、候補別に200 ms内の画像利用・復号・参照状態・指令利用等を予測するC++実装を追加しました。学習8試行・校正4試行を分離し、新しい検証4試行・ストレス2試行で誤差と範囲外を記録しています。予測はまだ送信選択へ使いません。
+
+[実装意図・構造・限界](docs/Reach_RT_G4_Prediction.md)、[誤差の結果画面](artifacts/reach_g4_prediction_20260924/verification/final_01/index.html)、[完了判定](artifacts/reach_g4_prediction_20260924/verification/final_01/task_decision.json)、[実装進捗](docs/Reach_RT_Implementation_Progress.md)を参照してください。別試行の4,095判断中3,870が範囲内。今回の5区間校正は誤差改善を確認できず、作業全体の成功確率・Rの優位性は未実証です。予測単体37・実行層684・既存2,000検査、G4-01実UDP 7条件・B3・従来モードの回帰が合格。**G4は2/5、全体26/38項目、研究ゲート4/7。次はG4-03「ReachSchedulerと代替処理」**です。[G4-01実行層](docs/Reach_RT_G4_Actions.md)、[G3の仮説判定](docs/Reach_RT_G3_Decision.md)と旧実測は当時の証拠として保持しています。
 
 C++ / DirectX 12 / Media Foundationで構築した、低遅延映像通信エンジンです。
 独自UDPプロトコル`RNVP`により、カメラ映像または生成映像をH.264/MJPEG/Rawで送受信し、パケット欠損、ジッタ、再送期限、表示期限、エンコード負荷、デコード負荷を観測しながらQoEを守ることを目的にしています。

@@ -1,4 +1,5 @@
 #define NOMINMAX
+#include "ReachDeferredLog.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "ReachDatagramLink.h"
@@ -18,9 +19,13 @@ struct DatagramLink::Impl {
     SOCKET socket=INVALID_SOCKET,outputSocket=INVALID_SOCKET;sockaddr_in destination{};uint16_t port=0,sourcePort=0;
     bool winsock=false,finished=false;std::atomic<bool> stop=false;
     std::thread worker;mutable std::mutex mutex;std::string error;
-    LinkConfig config;LinkModel model;std::filesystem::path directory;std::string direction;
-    BufferedLog log;uint64_t origin=0,offered=0,accepted=0,dropped=0,delivered=0,cancelled=0,offeredBytes=0,deliveredBytes=0,dropBytes=0,cancelBytes=0,maxLag=0;
-    Impl(const LinkConfig& c,const std::filesystem::path& dir,const std::string& name,uint16_t target):config(c),model(c),directory(dir),direction(name){
+    LinkConfig config;LinkModel model;PropagationModel propagation;std::filesystem::path directory;std::string direction;
+    DeferredLog log;uint64_t origin=0,offered=0,accepted=0,dropped=0,delivered=0,cancelled=0,offeredBytes=0,deliveredBytes=0,dropBytes=0,cancelBytes=0,maxLag=0;
+    uint64_t traceDropped=0,traceDropBytes=0,propagationCancelled=0,propagationCancelBytes=0;
+    uint16_t feedbackPort=0;uint64_t feedbackDelivered=0;
+    uint16_t statePort=0;uint64_t stateDelivered=0;
+    uint64_t cancelledRemainingWork=0;
+    Impl(const LinkConfig& c,const std::filesystem::path& dir,const std::string& name,uint16_t target):config(c),model(c),propagation(c),directory(dir),direction(name){
         Require(name=="uplink"||name=="downlink","invalid link direction");
         try{
             WSADATA w{};Require(WSAStartup(MAKEWORD(2,2),&w)==0,"link WSAStartup failed");winsock=true;
@@ -38,20 +43,32 @@ struct DatagramLink::Impl {
                 getsockname(outputSocket,reinterpret_cast<sockaddr*>(&local),&length)==0&&ioctlsocket(outputSocket,FIONBIO,&nonblocking)==0,"link output bind failed");
             sourcePort=ntohs(local.sin_port);
             log.open(dir/(name+"_link.csv"));log.exceptions(std::ios::badbit|std::ios::failbit);
-            log<<"packet_id,event,event_us,arrival_us,start_us,completion_us,actual_send_us,payload_bytes,ip_bytes,occupied_ip_bytes,remaining_work,wire_hex\n";
+            log<<"packet_id,event,event_us,arrival_us,start_us,completion_us,actual_send_us,payload_bytes,ip_bytes,occupied_ip_bytes,remaining_work,wire_hex,trace_index,trace_at_us,delay_us,scheduled_delivery_us\n";
+            std::ofstream traceFile(dir/(name+"_trace.json"));traceFile.exceptions(std::ios::badbit|std::ios::failbit);
+            traceFile<<LinkTraceJson(config);traceFile.close();
         }catch(...){Close();throw;}
     }
     ~Impl(){stop=true;if(worker.joinable())worker.join();Close();}
     void Close(){if(socket!=INVALID_SOCKET){closesocket(socket);socket=INVALID_SOCKET;}if(outputSocket!=INVALID_SOCKET){closesocket(outputSocket);outputSocket=INVALID_SOCKET;}if(winsock){WSACleanup();winsock=false;}}
     void Record(const LinkPacket& p,const char* event,uint64_t at,uint64_t actual=0,bool bytes=false){
-        log<<p.id<<','<<event<<','<<at<<','<<p.enqueuedUs<<','<<p.startedUs<<','<<p.completedUs<<','<<actual<<','<<p.payload.size()<<','<<p.ipBytes<<','<<model.OccupiedBytes()<<','<<p.remaining<<','<<(bytes?Hex(p.payload):"")<<'\n';
+        log<<p.id<<','<<event<<','<<at<<','<<p.enqueuedUs<<','<<p.startedUs<<','<<p.completedUs<<','<<actual<<','<<p.payload.size()<<','<<p.ipBytes<<','<<model.OccupiedBytes()<<','<<p.remaining<<','<<(bytes?Hex(p.payload):"")<<','<<p.traceIndex<<','<<p.traceAtUs<<','<<p.delayUs<<','<<p.dueUs<<'\n';
     }
     void Deliver(uint64_t now){
         for(auto& p:model.Advance(now)){
-            const auto actual=MonotonicUs()-origin;Require(actual>=p.completedUs,"link delivered before serialization");
-            const int n=sendto(outputSocket,reinterpret_cast<const char*>(p.payload.data()),static_cast<int>(p.payload.size()),0,reinterpret_cast<sockaddr*>(&destination),sizeof(destination));
+            if(!propagation.Schedule(p)){++traceDropped;traceDropBytes+=p.ipBytes;Record(p,"trace_drop",p.completedUs);}
+            else Record(p,"propagating",p.completedUs);
+        }
+        for(auto& p:propagation.Advance(now)){
+            const auto actual=MonotonicUs()-origin;Require(actual>=p.dueUs,"link delivered before propagation");
+            auto target=destination;const bool feedback=feedbackPort&&p.payload.size()>=4&&std::equal(p.payload.begin(),p.payload.begin()+4,"RNVP");
+            if(feedback)target.sin_port=htons(feedbackPort);
+            const bool state=statePort&&p.payload.size()>=4&&std::equal(p.payload.begin(),p.payload.begin()+4,"RSTA");
+            if(state)target.sin_port=htons(statePort);
+            const int n=sendto(outputSocket,reinterpret_cast<const char*>(p.payload.data()),static_cast<int>(p.payload.size()),0,reinterpret_cast<sockaddr*>(&target),sizeof(target));
             Require(n==static_cast<int>(p.payload.size()),"link sendto failed");
-            ++delivered;deliveredBytes+=p.ipBytes;maxLag=std::max(maxLag,actual-p.completedUs);Record(p,"delivered",p.completedUs,actual);
+            if(feedback)++feedbackDelivered;
+            if(state)++stateDelivered;
+            ++delivered;deliveredBytes+=p.ipBytes;maxLag=std::max(maxLag,actual-p.dueUs);Record(p,"delivered",p.dueUs,actual);
         }
     }
     void Run() noexcept {
@@ -71,11 +88,12 @@ struct DatagramLink::Impl {
                     if(ok)++accepted;else{++dropped;dropBytes+=p.ipBytes;}
                     Record(p,ok?"admitted":"tail_drop",now,0,true);
                 }
-                if(closeAt&&((model.Pending()==0&&MonotonicUs()-closeAt>=20000)||MonotonicUs()-closeAt>=250000))break;
+                if(closeAt&&((model.Pending()==0&&propagation.Pending()==0&&MonotonicUs()-closeAt>=20000)||MonotonicUs()-closeAt>=250000))break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             // Bounded shutdown drain uses real elapsed time; residual work is explicit.
-            for(auto& p:model.Cancel()){++cancelled;cancelBytes+=p.ipBytes;Record(p,"cancelled_at_close",MonotonicUs()-origin);}
+            for(auto& p:model.Cancel()){++cancelled;cancelBytes+=p.ipBytes;cancelledRemainingWork+=p.remaining;Record(p,"cancelled_at_close",MonotonicUs()-origin);}
+            for(auto& p:propagation.Cancel()){++propagationCancelled;propagationCancelBytes+=p.ipBytes;Record(p,"propagation_cancelled_at_close",MonotonicUs()-origin);}
         }catch(const std::exception& e){std::lock_guard lock(mutex);error=e.what();}
     }
 };
@@ -83,6 +101,10 @@ DatagramLink::DatagramLink(const LinkConfig& c,const std::filesystem::path& dir,
 DatagramLink::~DatagramLink(){try{Finish();}catch(...){}}
 uint16_t DatagramLink::Port() const{return impl_->port;}
 uint16_t DatagramLink::SourcePort() const{return impl_->sourcePort;}
+void DatagramLink::SetFeedbackDestination(uint16_t port){Require(!impl_->origin&&impl_->direction=="downlink"&&port,"invalid feedback route");impl_->feedbackPort=port;}
+uint64_t DatagramLink::FeedbackDelivered()const{Require(impl_->finished,"feedback count before Finish");return impl_->feedbackDelivered;}
+void DatagramLink::SetStateDestination(uint16_t port){Require(!impl_->origin&&impl_->direction=="downlink"&&port,"invalid state route");impl_->statePort=port;}
+uint64_t DatagramLink::StateDelivered()const{Require(impl_->finished,"state count before Finish");return impl_->stateDelivered;}
 void DatagramLink::Start(uint64_t origin){auto& p=*impl_;Require(!p.worker.joinable()&&!p.origin,"link already started");p.origin=origin;p.worker=std::thread([&p]{p.Run();});}
 void DatagramLink::Check() const {std::lock_guard lock(impl_->mutex);if(!impl_->error.empty())throw std::runtime_error(impl_->error);}
 void DatagramLink::Finish(){
@@ -92,6 +114,13 @@ void DatagramLink::Finish(){
        <<",\"queue_limit_ip_bytes\":"<<p.config.queueBytes<<",\"maximum_occupied_ip_bytes\":"<<p.model.MaximumBytes()
        <<",\"offered_packets\":"<<p.offered<<",\"admitted_packets\":"<<p.accepted<<",\"tail_dropped_packets\":"<<p.dropped<<",\"delivered_packets\":"<<p.delivered<<",\"cancelled_packets\":"<<p.cancelled
        <<",\"offered_ip_bytes\":"<<p.offeredBytes<<",\"delivered_ip_bytes\":"<<p.deliveredBytes<<",\"tail_dropped_ip_bytes\":"<<p.dropBytes<<",\"cancelled_ip_bytes\":"<<p.cancelBytes
+       <<",\"trace_dropped_packets\":"<<p.traceDropped<<",\"trace_dropped_ip_bytes\":"<<p.traceDropBytes
+       <<",\"feedback_destination_port\":"<<p.feedbackPort<<",\"feedback_delivered_packets\":"<<p.feedbackDelivered
+       <<",\"state_destination_port\":"<<p.statePort<<",\"state_delivered_packets\":"<<p.stateDelivered
+       <<",\"serviced_work_bit_microseconds\":"<<(p.offeredBytes-p.dropBytes)*8000000-p.cancelledRemainingWork
+       <<",\"service_cursor_us\":"<<p.model.CursorUs()
+       <<",\"propagation_cancelled_packets\":"<<p.propagationCancelled<<",\"propagation_cancelled_ip_bytes\":"<<p.propagationCancelBytes
+       <<",\"trace_sha256\":"<<JsonString(Sha256(LinkTraceJson(p.config)))<<",\"trace_sample_clock\":\"serialization_completion_us\""
        <<",\"maximum_dispatch_lag_us\":"<<p.maxLag<<",\"error\":"<<JsonString(p.error)<<",\"capacity_trace\":[";
     bool first=true;for(auto point:p.config.capacity){if(!first)out<<',';first=false;out<<"{\"at_us\":"<<point.atUs<<",\"bps\":"<<point.bps<<'}';}
     out<<"]}\n";out.close();p.finished=true;Check();

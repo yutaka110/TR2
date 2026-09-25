@@ -14,6 +14,8 @@ def main():
     parser.add_argument("--build-name", default="reach_g1_visual_20260921")
     parser.add_argument("--include-command", action="store_true")
     parser.add_argument("--include-link", action="store_true")
+    parser.add_argument("--include-state", action="store_true")
+    parser.add_argument("--include-baseline", action="store_true")
     parser.add_argument("--replay-history", action="store_true")
     args = parser.parse_args()
     if not args.name.replace("_", "").replace("-", "").isalnum():
@@ -53,6 +55,10 @@ def main():
             cases.insert(0, ("command", "reach_command_tests", "reach_command_tests", [str(root / "command_braking.csv")]))
         if args.include_link:
             cases.insert(0, ("link", "reach_link_tests", "reach_link_tests", [str(root / "link_unit_result.json")]))
+        if args.include_state:
+            cases.insert(0, ("state", "reach_state_tests", "reach_state_tests", []))
+        if args.include_baseline:
+            cases.insert(0, ("baseline", "reach_baseline_tests", "reach_baseline_tests", []))
         for name, project, executable, options in cases:
             folder = root / name
             folder.mkdir()
@@ -76,6 +82,9 @@ def main():
         report["error"] = str(error)
     report["source_hashes"] = {str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
                                for folder in ("research", "tools") for p in (repo / folder).glob("*reach*" if folder == "tools" else "Reach*") if p.suffix in (".cpp", ".h", ".vcxproj")}
+    if args.include_baseline:
+        for relative in ("network/PacketPacer.cpp","network/PacketPacer.h","network/PacketProtocol.h","network/JitterBuffer.cpp","network/JitterBuffer.h","network/FrameReassembler.h"):
+            report['source_hashes'][relative]=hashlib.sha256((repo/relative).read_bytes()).hexdigest()
     (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return 0 if report["passed"] else 1
 

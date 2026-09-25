@@ -9,6 +9,10 @@
 #include "ReachJson.h"
 #include "ReachBufferedLog.h"
 #include "ReachDatagramLink.h"
+#include "ReachBudgetTransport.h"
+#include "ReachDecodeJournal.h"
+#include "ReachBaseline.h"
+#include "ReachActionExecution.h"
 #include <mfapi.h>
 #include <algorithm>
 #include <atomic>
@@ -51,6 +55,7 @@ struct RobotVideo::Impl {
     net::NetworkVideoReceiver decoder;
     std::unique_ptr<NetworkManager> sender;
     std::unique_ptr<DatagramLink> link;
+    std::shared_ptr<BudgetTransport> budget;uint16_t feedbackIngress=0;
     std::thread worker;
     std::mutex mutex;
     std::deque<CaptureFrame> queue;
@@ -59,6 +64,9 @@ struct RobotVideo::Impl {
     RobotVideoView view;
     std::unique_ptr<MarkerRecognizer> recognizer;
     BufferedLog observations;
+    std::unique_ptr<DecodeJournal> decodeJournal;
+    std::unique_ptr<Baseline> baseline;
+    std::unique_ptr<ActionExecution> actions;
     std::string error;
     std::atomic<bool> closing=false;
     bool finished=false,passed=false,hardware=false;
@@ -71,9 +79,20 @@ struct RobotVideo::Impl {
     std::atomic<int> encoderPhase=0;
     std::atomic<uint64_t> encoderPhaseStart=0;
     BufferedLog captures,encodedLog,audit,encoderTiming,decodeTiming;
-    Impl(const FoundationConfig& c,ResearchSession& s):config(c),session(s) {
+    Impl(const FoundationConfig& c,ResearchSession& s,std::shared_ptr<BudgetTransport> b):config(c),session(s),budget(std::move(b)) {
         stream=static_cast<uint32_t>(std::stoul(s.Id().substr(0,8),nullptr,16)); if(!stream) stream=1;
         view.streamId=stream; dropFrame=DiagnosticDrop();
+        decodeJournal=std::make_unique<DecodeJournal>(s.Directory());
+        udp.SetCompletedRejectionObserver([this](uint32_t id,uint32_t streamId,uint32_t witness){try{
+            const auto reason="older_than_jitter_release:"+std::to_string(witness);
+            decodeJournal->Event({"completed_rejected",id,streamId,MonotonicUs(),0,0,0,false,false,reason.c_str()});
+        }catch(const std::exception& ex){Fail(ex.what());}});
+        decoder.SetDecodeTraceObserver([this](const net::DecodeTraceEvent& e){try{decodeJournal->Event(e);}catch(const std::exception& ex){Fail(ex.what());}});
+        udp.SetReassemblyObserver([this](const net::FrameAckInfo& a,const char* event,const char* outcome,uint64_t now){try{decodeJournal->Chunks(a,event,outcome,now);}catch(const std::exception& ex){Fail(ex.what());}});
+        udp.SetCompletedObserver([this](const net::CompletedFrame& f){try{
+            net::H264AccessUnitPayloadHeader h{};net::DecodeH264AccessUnitPayloadHeader(f.data.data(),f.data.size(),h);
+            decodeJournal->Event({"reassembled",f.frameId,f.streamId,MonotonicUs(),h.cameraCaptureCompletedTimeUs,0,0,false,false,"before_au_validation"});
+        }catch(const std::exception& ex){Fail(ex.what());}});
         char delay[16]{};
         if(GetEnvironmentVariableA("TR2_REACH_DIAGNOSTIC_RECOGNITION_DELAY_MS",delay,16)){
             const auto value=std::string(delay);size_t end=0;const auto n=std::stoul(value,&end);
@@ -102,12 +121,28 @@ struct RobotVideo::Impl {
         encodedLog<<"frame_id,stream_id,capture_us,output_pts_100ns,encoder_output_us,bytes,idr,diagnostic_drop,drain\n";
         audit<<"frame_id,stream_id,pixel_id,pixel_stream,pixel_valid,capture_us,expected_capture_us,output_pts_100ns,matched_source_pts_us,decoded_us,age_ms,identity_match,duplicate\n";
         std::ofstream(s.Directory()/"world_model.json")<<RobotWorld::ModelJson(c.HasVisualControl(),c.stage=="command_udp");
+        if(budget)udp.SetDatagramSendHook([this](SOCKET socket,std::span<const uint8_t> data,const sockaddr_in& address){
+            auto target=address;target.sin_port=htons(feedbackIngress);return budget->Send(false,socket,data,target);});
         Require(udp.Start(0,true,true),"loopback UDP receiver start failed");
         udp.SetJitterBufferAutoModeEnabled(false); udp.SetJitterBufferTargetDelayMs(0);
         if(c.boundedLink)link=std::make_unique<DatagramLink>(c.uplink,s.Directory(),"uplink",udp.BoundPort());
         sender=std::make_unique<NetworkManager>("127.0.0.1",link?link->Port():udp.BoundPort());
+        if(c.baseline=="G4-01"||c.baseline=="G4-02")actions=std::make_unique<ActionExecution>(*budget,s.Directory(),c.baseline=="G4-02"?sender.get():nullptr,c.task=="T1"?1:2);
+        else if(!c.baseline.empty())baseline=std::make_unique<Baseline>(c.baseline,c.baselineLambda,static_cast<uint32_t>(std::min(c.ipBudget.total.rateBps,c.ipBudget.up.rateBps)),s.Directory());
         sender->SetPacingEnabled(false); sender->SetFecEnabled(false); sender->SetAdaptiveFecEnabled(false);
-        // Isolated transport validation: ACK receiver intentionally disabled, no repair/adaptation.
+        if(budget){
+            Require(sender->ConfigureResearchControlSocket(),"research feedback socket configuration failed");
+            sender->SetDatagramSendHook([this](SOCKET socket,std::span<const uint8_t> data,const sockaddr_in& address){return actions?actions->Send(socket,data,address):budget->Send(true,socket,data,address);});
+            sender->SetControlReceiveObserver([this](std::span<const uint8_t> data){budget->Feedback(data);if(baseline)baseline->Feedback(data);if(actions)actions->Feedback(data);});
+            sender->SetFecEnabled(c.ipBudget.fecGroup!=0);if(c.ipBudget.fecGroup)sender->SetFecGroupChunkCount(c.ipBudget.fecGroup);
+        }
+        if(baseline){sender->SetPacingEnabled(true);sender->SetPacingTargetBitrateKbps(static_cast<uint32_t>(std::min(c.ipBudget.total.rateBps,c.ipBudget.up.rateBps)/1000));
+            sender->SetAdaptiveFecEnabled(c.baseline=="B0");
+            sender->SetResearchRepairGate([this](uint32_t id,std::span<const uint16_t> chunks){return baseline->Repair(id,chunks,*sender);});}
+        if(actions){sender->SetPacingEnabled(true);sender->SetPacingTargetBitrateKbps(static_cast<uint32_t>(std::min(c.ipBudget.total.rateBps,c.ipBudget.up.rateBps)/1000));
+            sender->SetAdaptiveFecEnabled(false);sender->SetFecEnabled(false);
+            sender->SetResearchRepairGate([this](uint32_t id,std::span<const uint16_t> chunks){return actions->Repair(id,chunks);});}
+        // Without the opt-in budget model, preserve the isolated G1/G2-02 path.
         Require(decoder.Start(&udp,[]{return true;},[this](const net::DecodedVideoFrame& f){Observe(f);},true),"video decoder start failed");
         std::promise<void> ready; auto future=ready.get_future();
         worker=std::thread([this,p=std::move(ready)]()mutable{Encode(std::move(p));});
@@ -115,7 +150,8 @@ struct RobotVideo::Impl {
         session.Event("robot_video_started","loopback port="+std::to_string(udp.BoundPort())+"; stream="+std::to_string(stream)+"; diagnostic_drop="+std::to_string(dropFrame));
     }
     ~Impl() {
-        closing=true; if(worker.joinable()) worker.join(); decoder.Stop(); udp.Stop();
+        closing=true; if(worker.joinable()) worker.join(); decoder.Stop(); udp.Stop();if(sender){sender->StopRNVPControlReceiver();if(actions)sender->StopResearchPacer();}
+        if(actions)actions->Close();
     }
     void Fail(const std::string& reason) { std::lock_guard lock(mutex); if(error.empty()) error=reason; }
     void Phase(int phase){encoderPhaseStart=MonotonicUs();encoderPhase=phase;}
@@ -161,18 +197,23 @@ struct RobotVideo::Impl {
                 if(f.frameId==60&&recognitionDelayMs)std::this_thread::sleep_for(std::chrono::milliseconds(recognitionDelayMs));
                 // The receiver supplies pixels and verified capture metadata, never RobotTruth.
                 observation=recognizer->Process({luma,size_t(pitch)*360,640,360,pitch,f.frameId,f.streamId,
-                    f.cameraCaptureCompletedTimeUs,MonotonicUs(),match});
+                    f.cameraCaptureCompletedTimeUs,MonotonicUs(),match&&f.referenceTrusted});
                 const auto& o=observation;
                 observations<<o.frameId<<','<<o.streamId<<','<<o.captureUs<<','<<o.receivedUs<<','<<o.valid<<','<<o.reason<<','
                     <<o.x<<','<<o.y<<','<<o.yaw<<','<<o.speed<<','<<o.speedValid<<','<<o.positionErrorM<<','<<o.yawErrorRad<<','<<o.reprojectionRms<<','<<o.minSidePx;
                 for(auto corner:o.corners)observations<<','<<corner.u<<','<<corner.v;observations<<'\n';
             }
             const auto recognitionUs=MonotonicUs()-recognitionStart;
+            const auto adoptionUs=MonotonicUs();
+            const bool displayReady=match&&f.referenceTrusted&&adoptionUs>=f.cameraCaptureCompletedTimeUs&&adoptionUs-f.cameraCaptureCompletedTimeUs<=200000;
+            decodeJournal->Event({displayReady?"display_adopted":"display_rejected",f.frameId,f.streamId,adoptionUs,f.cameraCaptureCompletedTimeUs,f.referenceGeneration,f.decoderInputUs,false,f.referenceTrusted,displayReady?"verified_timely_image":"identity_reference_or_deadline"});
+            if(recognizer){decodeJournal->Event({observation.valid?"recognition_accepted":"recognition_rejected",f.frameId,f.streamId,adoptionUs,f.cameraCaptureCompletedTimeUs,f.referenceGeneration,f.decoderInputUs,false,f.referenceTrusted,observation.reason.c_str()});decodeJournal->Observation(observation);}
             const auto publishStart=MonotonicUs();uint64_t publishWait=0;
             { std::lock_guard lock(mutex);publishWait=MonotonicUs()-publishStart;
                 ++view.decoded;if(match)++view.matched;else++view.errors;
                 if(recognizer){view.observation=std::move(observation);if(view.observation.valid)++view.recognized;else++view.rejected;}
-                if(match){view.frameId=f.frameId;view.ageMs=age;view.bgra=std::move(bgra);}
+                if(match)view.lastDecodedFrameId=f.frameId;
+                if(displayReady){view.frameId=f.frameId;view.ageMs=age;view.bgra=std::move(bgra);}
             }
             maxRecognition=std::max(maxRecognition,recognitionUs);maxPublishWait=std::max(maxPublishWait,publishWait);
             decodeTiming<<f.frameId<<','<<callbackStart<<','<<recognitionUs<<','<<publishWait<<','<<MonotonicUs()-callbackStart<<'\n';
@@ -216,12 +257,19 @@ struct RobotVideo::Impl {
                 net::EncodeH264AccessUnitPayloadHeaderV3(payload.data(),header);
                 std::memcpy(payload.data()+header.headerBytes,output.bytes.data(),output.bytes.size());
                 const bool dropped=identity->frameId==dropFrame;
-                if(!dropped) sender->SendRNVPFragmented(payload,identity->frameId,net::CodecType::H264,stream,idr);
+                if(dropped){
+                    std::ofstream proof(session.Directory()/"diagnostic_dropped_au.h264",std::ios::binary);
+                    proof.exceptions(std::ios::badbit|std::ios::failbit);
+                    proof.write(reinterpret_cast<const char*>(output.bytes.data()),output.bytes.size());
+                }
+                NetworkManager::RnvpFrameProtectionOptions protection;
+                const bool offer=actions?actions->Plan(identity->frameId,stream,identity->captureUs,payload.size(),idr,protection):!baseline||baseline->Plan(identity->frameId,identity->captureUs,payload.size(),idr,*sender,protection);
+                if(!dropped&&offer) sender->SendRNVPFragmented(payload,identity->frameId,net::CodecType::H264,stream,idr,protection);
                 encodedLog<<identity->frameId<<','<<stream<<','<<identity->captureUs<<','<<output.pts100ns<<','<<now<<','<<output.bytes.size()<<','<<idr<<','<<dropped<<','<<drain<<'\n';
                 std::lock_guard lock(mutex); ++view.encoded; if(!dropped)++view.sent; if(drain)++encoderTail;
                 return true;
             };
-            uint64_t closeDeadline=0;
+            uint64_t closeDeadline=0,lastKeyframeRequest=0;
             for(;;) {
                 if(closing&&!closeDeadline)closeDeadline=MonotonicUs()+3000000;
                 Require(!closeDeadline||MonotonicUs()<closeDeadline,"encoder input shutdown timed out");
@@ -235,7 +283,14 @@ struct RobotVideo::Impl {
                 if(hasFrame) {
                     const auto dequeued=MonotonicUs(),queueWait=dequeued-frame.identity.captureUs;
                     maxQueueWait=std::max(maxQueueWait,queueWait);
-                    if(frame.identity.frameId==45)encoder.RequestKeyFrame();
+                    const bool requestDue=frame.identity.frameId==45||dequeued>=lastKeyframeRequest+500000;
+                    const bool requested=baseline&&requestDue&&sender->ConsumeKeyFrameRequest();
+                    const bool actionRequested=actions&&actions->Request(frame.identity.frameId,frame.identity.frameId==45||sender->ConsumeKeyFrameRequest());
+                    if(actionRequested||(!actions&&(frame.identity.frameId==45||requested))){
+                        decodeJournal->Event({"encoder_keyframe_requested",frame.identity.frameId,stream,MonotonicUs(),frame.identity.captureUs,0,0,false,false,actions?"action_refresh_arbiter":requested?"received_RNVP_request":"forced_at_input_45"});
+                        encoder.RequestKeyFrame();
+                        lastKeyframeRequest=dequeued;
+                    }
                     Phase(2);const auto submitStart=MonotonicUs();const bool submitOk=encoder.SubmitTrackedFrame(frame.nv12.data(),static_cast<UINT>(frame.nv12.size()),static_cast<int64_t>(frame.identity.ptsUs*10));Phase(0);
                     const auto submitUs=MonotonicUs()-submitStart;maxSubmit=std::max(maxSubmit,submitUs);
                     const auto timing=encoder.GetLastFrameTiming();
@@ -257,9 +312,16 @@ struct RobotVideo::Impl {
         inputCredits=encoder.TrackedInputCredits();Phase(3);encoder.Shutdown(); if(mf)MFShutdown();if(com)CoUninitialize();Phase(4);
     }
 };
-RobotVideo::RobotVideo(const FoundationConfig& c,ResearchSession& s):impl_(std::make_unique<Impl>(c,s)){}
+RobotVideo::RobotVideo(const FoundationConfig& c,ResearchSession& s,std::shared_ptr<BudgetTransport> b):impl_(std::make_unique<Impl>(c,s,std::move(b))){}
+uint16_t RobotVideo::SenderPort()const{return impl_->sender->BoundPort();}
+void RobotVideo::SetFeedbackIngress(uint16_t port){Require(port!=0,"invalid feedback ingress");impl_->feedbackIngress=port;}
+void RobotVideo::FinishFeedback(uint64_t expected){auto& p=*impl_;if(!p.budget)return;
+    const auto deadline=MonotonicUs()+1000000;while(p.budget->Received()<expected&&MonotonicUs()<deadline)Pause();
+    p.sender->StopRNVPControlReceiver();if(p.baseline)p.baseline->Close();if(p.actions){p.sender->StopResearchPacer();p.actions->Close();}Require(p.budget->Received()==expected,"feedback UDP delivery mismatch");p.budget->Check();}
 RobotVideo::~RobotVideo(){try{if(impl_&&!impl_->finished)Finish();}catch(...){}}
-void RobotVideo::StartLink(uint64_t origin){if(impl_->link)impl_->link->Start(origin);}
+void RobotVideo::StartLink(uint64_t origin){impl_->decodeJournal->Start(origin,impl_->config.durationUs);if(impl_->link)impl_->link->Start(origin);if(impl_->budget){Require(impl_->feedbackIngress!=0,"feedback route missing");Require(impl_->sender->StartRNVPControlReceiver(),"feedback receiver start failed");}}
+void RobotVideo::RecordControl(const MotionCommand& command){impl_->decodeJournal->Control(command);}
+StateReport RobotVideo::ReceiverNotification(){return impl_->decodeJournal->NotificationSnapshot(impl_->stream);}
 void RobotVideo::Capture(const RobotWorld& world) {
     Check(); auto& p=*impl_; uint32_t id;
     { std::lock_guard lock(p.mutex); id=static_cast<uint32_t>(p.view.captured+1); }
@@ -280,10 +342,11 @@ RobotVideoView RobotVideo::View() {
     std::lock_guard lock(p.mutex); return p.view;
 }
 VisualObservation RobotVideo::Observation(){std::lock_guard lock(impl_->mutex);return impl_->view.observation;}
-void RobotVideo::Check(){if(impl_->link)impl_->link->Check();std::lock_guard lock(impl_->mutex);if(!impl_->error.empty())throw std::runtime_error(impl_->error);}
+void RobotVideo::Check(){if(impl_->budget)impl_->budget->Check();if(impl_->link)impl_->link->Check();std::lock_guard lock(impl_->mutex);if(!impl_->error.empty())throw std::runtime_error(impl_->error);}
 bool RobotVideo::Finish() {
     auto& p=*impl_; if(p.finished)return p.passed;
     p.Checkpoint("encoder_join");auto stopStart=MonotonicUs();p.closing=true;if(p.worker.joinable())p.worker.join();p.encoderStopUs=MonotonicUs()-stopStart;
+    if(p.baseline||p.actions){const auto deadline=MonotonicUs()+1000000;while(p.sender->GetPacingStats().queuedPackets&&MonotonicUs()<deadline)Pause();Require(p.sender->GetPacingStats().queuedPackets==0,"research pacer did not drain");}
     if(p.link)p.link->Finish();
     p.Checkpoint("decoder_drain");
     uint64_t expected;{std::lock_guard lock(p.mutex);expected=p.view.sent;}
@@ -301,7 +364,7 @@ bool RobotVideo::Finish() {
     std::lock_guard lock(p.mutex); p.decoderTail=p.view.decoded-before;
     const bool complete=p.view.encoded==p.view.captured&&p.view.sent==p.view.captured&&p.view.decoded==p.view.sent;
     p.passed=p.error.empty()&&p.view.errors==0&&(p.link||p.view.decoded>0)&&decoderDrained&&
-        p.view.encoded==p.view.captured&&(p.link||(p.dropFrame?(p.view.sent+1==p.view.captured&&p.view.frameId==p.view.captured):complete))&&decoderStats.decodeFailures==0;
+        p.view.encoded==p.view.captured&&(p.link||(p.dropFrame?(p.view.sent+1==p.view.captured&&p.view.lastDecodedFrameId==p.view.captured):complete))&&decoderStats.decodeFailures==0;
     std::ofstream out(p.session.Directory()/"robot_video_summary.json");out.exceptions(std::ios::badbit|std::ios::failbit);
     out<<"{\"validation_passed\":"<<(p.passed?"true":"false")<<",\"complete_no_loss_delivery\":"<<(complete?"true":"false")
        <<",\"capacity_queue_model\":"<<(p.link?"true":"false")<<",\"validation_scope\":"<<JsonString(p.link?"transport_integrity_under_modeled_loss; not task success":"complete_ideal_delivery_or_explicit_G1_diagnostic")
@@ -323,6 +386,11 @@ bool RobotVideo::Finish() {
        <<",\"command_source\":"<<JsonString(p.recognizer?"received_image_v1":"time_script_v1")<<",\"closed_loop_validated\":false}\n";
     if(p.observations.is_open())p.observations.close();
     p.captures.close();p.encodedLog.close();p.audit.close();p.encoderTiming.close();p.decodeTiming.close();SaveBmp(p.session.Directory()/"last_received.bmp",p.view.bgra);
+    p.decodeJournal->Close();
     p.finished=true;return p.passed;
+}
+void RobotVideo::PublishBaselineState(const SenderStateEstimate& estimate){
+    auto& p=*impl_;if(p.baseline)p.baseline->PublishState(ProjectBaselineState(p.config.baseline,estimate));
+    if(p.actions)p.actions->PublishState(estimate);
 }
 }

@@ -762,7 +762,7 @@ void NetworkManager::SendRNVPFragmentedInternal(
     const uint16_t chunkCount = static_cast<uint16_t>(chunkCountSizeT);
     const uint64_t sendTimeUs = NowMicroseconds();
     const bool frameFecEnabled =
-        (IsFecEnabled() || protection.forceFec) &&
+        !protection.disableFec && (IsFecEnabled() || protection.forceFec) &&
         chunkCount > 1;
     const uint16_t frameFecGroupChunkCount =
         frameFecEnabled
@@ -781,7 +781,8 @@ void NetworkManager::SendRNVPFragmentedInternal(
         keyFrame,
         sendTimeUs,
         context,
-        protection
+        protection,
+        !trackFrame
     )) {
         return;
     }
@@ -809,7 +810,8 @@ bool NetworkManager::SendRNVPFramePackets(
     bool keyFrame,
     uint64_t sendTimeUs,
     const char* context,
-    const RnvpFrameProtectionOptions& protection
+    const RnvpFrameProtectionOptions& protection,
+    bool retransmit
 ) {
     if (udpSocket_ == INVALID_SOCKET || data.empty()) {
         return false;
@@ -856,6 +858,7 @@ bool NetworkManager::SendRNVPFramePackets(
         header.flags = (i == chunkCount - 1)
             ? net::PacketFlag_LastChunk
             : net::PacketFlag_None;
+        if (retransmit)header.flags=net::AddPacketFlag(header.flags,net::PacketFlag_Retransmit);
         if (keyFrame) {
             header.flags = net::AddPacketFlag(header.flags, net::PacketFlag_KeyFrame);
         }
@@ -916,7 +919,7 @@ bool NetworkManager::SendRNVPFecParity(
     const char* context,
     const RnvpFrameProtectionOptions& protection
 ) {
-    if ((!IsFecEnabled() && !protection.forceFec) ||
+    if (protection.disableFec || (!IsFecEnabled() && !protection.forceFec) ||
         udpSocket_ == INVALID_SOCKET ||
         data.empty() ||
         chunkCount <= 1) {
@@ -1170,6 +1173,7 @@ uint32_t NetworkManager::SendRNVPSelectedChunks(
     if (udpSocket_ == INVALID_SOCKET || data.empty() || chunkIndices.empty()) {
         return 0;
     }
+    if(researchRepairGate_&&!researchRepairGate_(frameId,chunkIndices))return 0;
 
     const size_t maxPayload = net::kMaxUdpPayloadSize;
     const size_t totalSize = data.size();
@@ -3145,6 +3149,7 @@ void NetworkManager::RNVPControlReceiveLoop() {
             const int error = WSAGetLastError();
 
             // タイムアウトは正常。Stop待ちのために定期的に抜ける。
+            if(error==WSAEWOULDBLOCK){std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}
             if (error == WSAETIMEDOUT) {
                 continue;
             }
@@ -3165,6 +3170,7 @@ void NetworkManager::RNVPControlReceiveLoop() {
             NetworkDebugLog(oss.str());
         }
 
+        if(receiveObserver_)receiveObserver_(std::span(buffer.data(),static_cast<size_t>(received)));
         HandleRnvpControlPacket(
             buffer.data(),
             static_cast<size_t>(received)
@@ -5366,7 +5372,7 @@ bool NetworkManager::SendPacketRaw(
 
     std::lock_guard<std::mutex> lock(udpSendMutex_);
 
-    const int sent = sendto(
+    const int sent = sendHook_?sendHook_(udpSocket_,std::span(packetData,packetSize),udpAddr_):sendto(
         udpSocket_,
         reinterpret_cast<const char*>(packetData),
         static_cast<int>(packetSize),
@@ -5384,6 +5390,7 @@ bool NetworkManager::SendPacketRaw(
         return false;
     }
 
+    if(sent!=static_cast<int>(packetSize))return false; // Explicit pre-send rejection.
     if(GetEnvironmentVariableA("TR2_REACH_PACKET_TRACE",nullptr,0)) {
         net::RnvpHeaderV1 h{};
         if(net::DecodeRnvpHeaderV1(packetData,packetSize,h))

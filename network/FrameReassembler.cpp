@@ -1794,6 +1794,8 @@ namespace net {
     ) const {
         FrameAckInfo ack{};
         ack.valid = true;
+        ack.firstReceiveUs=frame.firstReceiveTimeUs;ack.sendUs=frame.sendTimeUs;
+        ack.recoveryDeadlineUs=frame.recoveryExpireTimeUs;
 
         ack.frameId = frame.frameId;
         ack.streamId = frame.streamId;
@@ -1839,6 +1841,8 @@ namespace net {
         if (stats_ == nullptr || frame.chunkCount == 0) {
             return;
         }
+
+        if(observer_)observer_(BuildAckInfoFromPendingFrame(frame),eventName,outcome,eventTimeUs);
 
         const bool recentArrival =
             frame.lastUpdateTimeUs != 0 &&

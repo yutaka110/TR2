@@ -8,6 +8,8 @@ namespace net {
 struct FrameIdentity {
     uint32_t frameId=0, streamId=0, width=0, height=0;
     uint64_t ptsUs=0, captureUs=0, encoderOutputUs=0, sendUs=0, receiveUs=0;
+    uint64_t referenceGeneration=0,decoderInputUs=0;
+    bool idr=false;
 };
 // Owned by one codec worker. Entries exist only for accepted input samples.
 // A missing/duplicate identity is an error, never a reason to use current input.
@@ -24,6 +26,7 @@ public:
     }
     void Clear() { entries_.clear(); }
     size_t Size() const { return entries_.size(); }
+    const auto& Entries() const { return entries_; }
 private:
     std::map<int64_t,FrameIdentity> entries_;
 };

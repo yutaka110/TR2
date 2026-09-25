@@ -8,6 +8,7 @@
 #include "FrameReassembler.h"
 #include "JitterBuffer.h"
 #include "NetworkStats.h"
+#include "DatagramSendHook.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -24,6 +25,10 @@ namespace net {
     public:
         UdpReceiver();
         ~UdpReceiver();
+        void SetDatagramSendHook(DatagramSendHook hook){sendHook_=std::move(hook);}
+        void SetReassemblyObserver(FrameReassembler::Observer observer){reassembler_.SetObserver(std::move(observer));}
+        void SetCompletedObserver(std::function<void(const CompletedFrame&)> observer){completedObserver_=std::move(observer);}
+        void SetCompletedRejectionObserver(std::function<void(uint32_t,uint32_t,uint32_t)> observer){completedRejectionObserver_=std::move(observer);}
 
         bool Start(uint16_t listenPort, bool loopbackOnly = false, bool orderedDecodeQueue = false);
         uint16_t BoundPort() const { return boundPort_; }
@@ -52,6 +57,9 @@ namespace net {
             bool syncRisk = false
         );
     private:
+        DatagramSendHook sendHook_;
+        std::function<void(const CompletedFrame&)> completedObserver_;
+        std::function<void(uint32_t,uint32_t,uint32_t)> completedRejectionObserver_;
         void ReceiveLoop();
 
         void PushCompletedFrameToJitterBuffer(

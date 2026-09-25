@@ -4,6 +4,7 @@
 #include "NetworkStats.h"
 
 #include <cstdint>
+#include <functional>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -39,6 +40,8 @@ namespace net {
         CodecType codecType = CodecType::Unknown;
         bool keyFrame = false;
         bool largeFrame = false;
+        // Local audit metadata, not serialized into the wire ACK.
+        uint64_t firstReceiveUs=0,sendUs=0,recoveryDeadlineUs=0;
         std::vector<uint16_t> missingChunkIndices;
     };
 
@@ -76,6 +79,8 @@ namespace net {
     class FrameReassembler {
     public:
         explicit FrameReassembler(NetworkStats* stats = nullptr);
+        using Observer=std::function<void(const FrameAckInfo&,const char*,const char*,uint64_t)>;
+        void SetObserver(Observer observer){observer_=std::move(observer);}
 
         void SetStats(NetworkStats* stats);
 
@@ -341,6 +346,7 @@ namespace net {
         std::unordered_map<uint64_t, size_t> retiredFrameIndex_;
 
         NetworkStats* stats_ = nullptr;
+        Observer observer_;
 
         // RNVP sequence観測用
         bool hasLastRnvpSequence_ = false;

@@ -5,6 +5,7 @@
 #include "ReachFoundation.h"
 #include "ReachJson.h"
 #include "ReachDatagramLink.h"
+#include "ReachBudgetTransport.h"
 #include <fstream>
 #include <map>
 #include <stdexcept>
@@ -28,6 +29,8 @@ struct CommandUdp::Impl {
     sockaddr_in source{},destination{};
     sockaddr_in sendDestination{};
     std::unique_ptr<DatagramLink> link;
+    std::shared_ptr<BudgetTransport> budget;
+    uint64_t budgetRejected=0;
     bool winsock=false,finished=false;
     CommandSessionId session;
     std::filesystem::path directory;
@@ -54,7 +57,13 @@ struct CommandUdp::Impl {
     ~Impl(){Close();}
     void Queue(std::span<const uint8_t> data,uint64_t due){Require(pending.size()<64,"command diagnostic queue overflow");pending.emplace(due,std::vector<uint8_t>(data.begin(),data.end()));}
 };
-CommandUdp::CommandUdp(const std::string& id,const std::filesystem::path& dir,const std::string& scenario,const LinkConfig* link):impl_(std::make_unique<Impl>(id,dir,scenario,link)){}
+CommandUdp::CommandUdp(const std::string& id,const std::filesystem::path& dir,const std::string& scenario,const LinkConfig* link,std::shared_ptr<BudgetTransport> budget):impl_(std::make_unique<Impl>(id,dir,scenario,link)){impl_->budget=std::move(budget);}
+uint16_t CommandUdp::IngressPort()const{return impl_->link?impl_->link->Port():0;}
+void CommandUdp::SetFeedbackDestination(uint16_t port){Require(impl_->link!=nullptr,"feedback requires link");impl_->link->SetFeedbackDestination(port);}
+uint64_t CommandUdp::FeedbackDelivered()const{return impl_->link?impl_->link->FeedbackDelivered():0;}
+void CommandUdp::SetStateDestination(uint16_t port){Require(impl_->link!=nullptr,"state requires link");impl_->link->SetStateDestination(port);}
+uint16_t CommandUdp::RelaySourcePort()const{Require(impl_->link!=nullptr,"state requires link");return impl_->link->SourcePort();}
+uint64_t CommandUdp::StateDelivered()const{return impl_->link?impl_->link->StateDelivered():0;}
 CommandUdp::~CommandUdp(){try{Finish();}catch(...){}}
 void CommandUdp::Start(uint64_t origin){
     auto& p=*impl_;Require(!p.guard,"command UDP already started");p.origin=origin;p.guard=std::make_unique<CommandGuard>(p.session,origin);
@@ -86,8 +95,9 @@ void CommandUdp::Pump(){
     if(p.link)p.link->Check();
     while(!p.pending.empty()&&p.pending.begin()->first<=MonotonicUs()){
         auto item=p.pending.extract(p.pending.begin());const auto& bytes=item.mapped();const auto now=MonotonicUs();
+        const int n=p.budget?p.budget->Send(false,p.tx,bytes,p.sendDestination):sendto(p.tx,reinterpret_cast<const char*>(bytes.data()),static_cast<int>(bytes.size()),0,reinterpret_cast<sockaddr*>(&p.sendDestination),sizeof(p.sendDestination));
+        if(p.budget&&n==0){++p.budgetRejected;p.txLog<<now<<','<<item.key()<<",budget_rejected,"<<bytes.size()<<",0,"<<Hex(bytes)<<'\n';continue;}
         p.ipBytes+=bytes.size()+28;
-        const int n=sendto(p.tx,reinterpret_cast<const char*>(bytes.data()),static_cast<int>(bytes.size()),0,reinterpret_cast<sockaddr*>(&p.sendDestination),sizeof(p.sendDestination));
         const bool ok=n==static_cast<int>(bytes.size());if(ok)++p.sent;else++p.sendFailures;
         p.txLog<<now<<','<<item.key()<<','<<(ok?"sent":"send_error")<<','<<bytes.size()<<','<<bytes.size()+28<<','<<Hex(bytes)<<'\n';
         Require(ok,"command sendto failed");
@@ -109,7 +119,7 @@ void CommandUdp::Finish(){
     if(p.link){p.link->Finish();if(p.guard)Pump();}
     std::ofstream out(p.directory/"command_udp_summary.json");out.exceptions(std::ios::badbit|std::ios::failbit);
     out<<"{\"scenario\":"<<JsonString(p.scenario)<<",\"offered\":"<<p.offered<<",\"sent_datagrams\":"<<p.sent<<",\"received_datagrams\":"<<p.received
-       <<",\"diagnostic_dropped\":"<<p.dropped<<",\"pending_on_close\":"<<p.pending.size()<<",\"send_errors\":"<<p.sendFailures<<",\"attempted_ip_bytes\":"<<p.ipBytes<<",\"statuses\":{";
+       <<",\"diagnostic_dropped\":"<<p.dropped<<",\"budget_rejected\":"<<p.budgetRejected<<",\"pending_on_close\":"<<p.pending.size()<<",\"send_errors\":"<<p.sendFailures<<",\"attempted_ip_bytes\":"<<p.ipBytes<<",\"statuses\":{";
     bool first=true;for(const auto& [key,count]:p.statuses){if(!first)out<<',';first=false;out<<JsonString(key)<<':'<<count;}
     out<<"},\"command_udp\":true,\"closed_loop_validated\":false}\n";p.txLog.close();p.rxLog.close();p.finished=true;
 }

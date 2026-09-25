@@ -13,6 +13,7 @@ namespace net {
         uint32_t bufferedFrames = 0;
         uint32_t droppedFrames = 0;
         uint32_t targetDelayMs = 0;
+        uint32_t incomingOlderThanReleasedFrame = 0; // Observed under the jitter lock; zero if not this rejection.
     };
 
     // ============================================================

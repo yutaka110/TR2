@@ -1,0 +1,6 @@
+{
+  "total": {"rate_bps": 4000000, "burst_ip_bytes": 65536, "max_ip_bytes": 20000000},
+  "uplink": {"rate_bps": 3500000, "burst_ip_bytes": 65536, "max_ip_bytes": 19000000},
+  "downlink": {"rate_bps": 500000, "burst_ip_bytes": 16384, "max_ip_bytes": 1000000},
+  "fec_group_chunks": 4
+}

@@ -26,6 +26,15 @@ def main() -> int:
     parser.add_argument("--command-scenario", choices=["normal", "duplicate", "reorder", "late", "outage", "recovery", "invalid"], default="normal")
     parser.add_argument("--build-name", help="Build artifact directory name")
     parser.add_argument("--link-config", type=Path, help="G2 direction settings JSON (uplink/downlink); command_udp only")
+    parser.add_argument("--trace-bundle", type=Path, help="G2-02 frozen link.json + manifest.json; verifies seed, hash and horizon")
+    parser.add_argument("--budget-config", type=Path, help="G2-03 shared/directional IP budget and FEC configuration")
+    parser.add_argument("--state-feedback", action="store_true", help="G2-05 receiver/task reports over budgeted downlink")
+    parser.add_argument("--baseline", choices=['B0','B1','B2','B3','G4-01','G4-02'])
+    parser.add_argument("--prediction-model",type=Path,help="G4-02 empirical paths; frozen model and optional .cal copied into invocation")
+    parser.add_argument("--process-priority", choices=['normal','above_normal'], default='normal')
+    parser.add_argument("--precise-wait",action='store_true')
+    parser.add_argument("--baseline-lambda",type=float,default=.1)
+    parser.add_argument("--state-diagnostic", choices=['normal','duplicate','invalid'], default='normal')
     parser.add_argument("--duration", type=float, help="Override observation interval in seconds")
     parser.add_argument("--task", choices=["T1", "T2"])
     parser.add_argument("--encoder", choices=["auto", "software"], default="auto")
@@ -37,6 +46,7 @@ def main() -> int:
     parser.add_argument("--show", action="store_true", help="Display dashboard; close it to return")
     parser.add_argument("--timeout", type=float, default=90, help="Headless timeout only")
     args = parser.parse_args()
+    if args.link_config and args.trace_bundle:parser.error('choose link-config or trace-bundle')
     if not 0 <= args.diagnostic_recognition_delay_ms <= 500:
         parser.error("diagnostic recognition delay must be 0..500 ms")
     if not args.name.replace("_", "").replace("-", "").isalnum():
@@ -69,20 +79,48 @@ def main() -> int:
     if args.link_config:
         if args.stage != "command_udp":parser.error("link config requires command_udp")
         config["link_model"] = json.loads(args.link_config.read_text(encoding="utf-8"))
+    trace_metadata = None
+    if args.trace_bundle:
+        if args.stage != 'command_udp':parser.error('trace bundle requires command_udp')
+        from generate_reach_trace import load_bundle
+        config['link_model'],trace_metadata=load_bundle(args.trace_bundle,round(config['duration_s']*1000000))
+        saved_bundle=invocation/'trace_bundle';saved_bundle.mkdir()
+        for filename in ('link.json','manifest.json'):
+            (saved_bundle/filename).write_bytes((args.trace_bundle/filename).read_bytes())
     config_path = invocation / "requested_config.json"
+    if args.budget_config:
+        if args.stage!='command_udp' or 'link_model' not in config:parser.error('budget requires command_udp and a link configuration')
+        config['ip_budget']=json.loads(args.budget_config.read_text(encoding='utf-8'))
     write_json(config_path, config)
+    if args.state_feedback:
+        if args.stage!='command_udp' or 'ip_budget' not in config:parser.error('state feedback requires budget and link configuration')
+        config['state_feedback']=True;write_json(config_path,config)
+    if args.baseline:
+        if not args.state_feedback:parser.error('baseline requires --state-feedback')
+        config['baseline']=dict(mode=args.baseline,**{'lambda':args.baseline_lambda});write_json(config_path,config)
     env = {key: value for key, value in os.environ.items()
            if not key.upper().startswith(("RNVP_", "TR2_NETWORK_", "TR2_REACH_", "TR2_RESEARCH_"))}
     overrides = {"TR2_RESEARCH_MODE": "reach_rt", "TR2_REACH_CONFIG": str(config_path),
                  "TR2_REACH_OUTPUT_ROOT": str(invocation / "sessions"),
                  "TR2_REACH_HEADLESS": "0" if args.show else "1"}
     env.update(overrides)
+    if args.prediction_model:
+        if args.baseline!='G4-02':parser.error('prediction model requires G4-02')
+        model=invocation/'prediction_paths.csv';model.write_bytes(args.prediction_model.read_bytes())
+        cal=Path(str(args.prediction_model)+'.cal')
+        if cal.exists():Path(str(model)+'.cal').write_bytes(cal.read_bytes())
+        overrides['TR2_REACH_PREDICTION_MODEL']=str(model);env.update(overrides)
+    if args.state_diagnostic!='normal':
+        if not args.state_feedback:parser.error('state diagnostic requires state feedback')
+        overrides['TR2_REACH_STATE_DIAGNOSTIC']=args.state_diagnostic;env.update(overrides)
     if args.packet_trace:
         overrides["TR2_REACH_PACKET_TRACE"] = "1"
         env.update(overrides)
     if args.diagnostic_drop_frame:
         overrides["TR2_REACH_DIAGNOSTIC_DROP_FRAME"] = str(args.diagnostic_drop_frame)
         env.update(overrides)
+    if args.precise_wait:
+        overrides['TR2_REACH_PRECISE_WAIT']='1';env.update(overrides)
     if args.diagnostic_recognition_delay_ms:
         overrides["TR2_REACH_DIAGNOSTIC_RECOGNITION_DELAY_MS"] = str(args.diagnostic_recognition_delay_ms)
         env.update(overrides)
@@ -97,12 +135,13 @@ def main() -> int:
         path = repo / relative
         if relative and path.is_file() and path.suffix in {".h", ".cpp", ".vcxproj", ".props", ".py", ".json"}:
             source_hashes[relative] = digest(path)
-            if relative.startswith(("research/", "network/", "config/reach_rt_g1")) or (relative.startswith("tools/") and "reach" in relative.lower()):
+            if relative.startswith(("research/", "network/", "config/reach_rt_")) or (relative.startswith("tools/") and "reach" in relative.lower()):
                 saved = snapshot / relative
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 saved.write_bytes(path.read_bytes())
     write_json(invocation / "source_hashes.json", source_hashes)
     manifest = {"started_at": datetime.now().astimezone().isoformat(), "arguments": {k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
+                "exogenous_trace": trace_metadata,
                 "executable_sha256": digest(exe), "launcher_sha256": digest(Path(__file__)),
                 "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
                 "source_diff_sha256": hashlib.sha256(patch).hexdigest(), "environment_overrides": overrides,
@@ -112,7 +151,8 @@ def main() -> int:
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 5 if args.show else subprocess.SW_HIDE  # Win32 SW_SHOW = 5
     with (invocation / "stdout.txt").open("wb") as stdout, (invocation / "stderr.txt").open("wb") as stderr:
-        process = subprocess.Popen([str(exe)], cwd=invocation, env=env, startupinfo=startup, stdout=stdout, stderr=stderr)
+        flags=subprocess.ABOVE_NORMAL_PRIORITY_CLASS if args.process_priority=='above_normal' else 0
+        process = subprocess.Popen([str(exe)], cwd=invocation, env=env, startupinfo=startup, stdout=stdout, stderr=stderr,creationflags=flags)
         manifest["process_id"] = process.pid
         write_json(invocation / "launch.json", manifest)
         try:

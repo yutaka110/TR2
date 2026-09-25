@@ -1,0 +1,51 @@
+{
+  "algorithm": "reach-time-trace-sha256-v1",
+  "root_seed": 201,
+  "horizon_us": 60000000,
+  "slot_us": 100000,
+  "profile": {
+    "uplink": {
+      "queue_ip_bytes": 65536,
+      "capacities_bps": [
+        750000,
+        1500000,
+        3000000,
+        6000000
+      ],
+      "drop_ppm": 100000,
+      "base_delay_us": 5000,
+      "jitter_us": 15000
+    },
+    "downlink": {
+      "queue_ip_bytes": 16384,
+      "capacities_bps": [
+        500000
+      ],
+      "drop_ppm": 100000,
+      "base_delay_us": 5000,
+      "jitter_us": 15000
+    }
+  },
+  "stream_seeds": {},
+  "stream_keys": {
+    "scene": "216175c183914ad60fee100c99d5307effa4d0e2e1a7ed03d9c19cdbcff92f36",
+    "perception": "32b589708c3dbafe4931623d3933a345ce74b4249d810f2fc78c49c3a88ff2f0",
+    "policy": "de464969d478bb6742d9e8f494752bdd1303cec8c6535854fbccc2bff74daf0a",
+    "link.uplink.capacity": "d12480022b3c4da6f8a806c69934bf819379f235108898876aacb201c4d2278f",
+    "link.uplink.loss": "92dd3991f9d4bed9603e0ce3c68f557b919f2b0f38f652aadaeaeb556ecc5d91",
+    "link.uplink.jitter": "65aaab04d604779ffc5afb7c3ef4d145f323872be8a206477b89986bf319c8b5",
+    "link.downlink.capacity": "c8c1b40772f99adf799f1a0b8800059db6c4badf6dc2afbbd019ddb0bb20da09",
+    "link.downlink.loss": "225ff2c68acaf105f5c53f7b254b0ceb8ad4d18383a654cf15da0f20ae9be20a",
+    "link.downlink.jitter": "1699a1c0924deaaac43b08ca79156bca33ff6d356ede59c9fca2e66089fd2039"
+  },
+  "reserved_streams": [
+    "scene",
+    "perception",
+    "policy"
+  ],
+  "sample_clock": "serialization_completion_us",
+  "loss_semantics": "time_cell_blackout",
+  "intervals": "left_closed_right_open; normal tail held",
+  "link_sha256": "482b6d1a562ab2a0915212dcbd721c5ef5c6ceef77e0b6cd4fcfe95d9f1275de",
+  "generator_sha256": "b3208aa0b4bbc58decdeeb5e581bac82b2e8a701476ac3037834eb270a3794f1"
+}

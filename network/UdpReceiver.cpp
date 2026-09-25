@@ -547,10 +547,14 @@ namespace {
         CompletedFrame&& frame,
         uint64_t nowUs
     ) {
+        if(completedObserver_)completedObserver_(frame);
+        const auto incomingFrame=frame.frameId,incomingStream=frame.streamId;
         UpdateJitterBufferAutoMode(nowUs);
 
         JitterBufferResult result =
             jitterBuffer_.PushFrame(std::move(frame));
+        if(result.incomingOlderThanReleasedFrame&&completedRejectionObserver_)
+            completedRejectionObserver_(incomingFrame,incomingStream,result.incomingOlderThanReleasedFrame);
 
         if (result.droppedFrames > 0) {
             stats_.OnJitterBufferDropped(result.droppedFrames);
@@ -1163,7 +1167,7 @@ namespace {
         EncodeRnvpHeaderV1(packet.data(), header);
         EncodePongPayload(packet.data() + kRnvpHeaderV1Size, pong);
 
-        const int sent = sendto(
+        const int sent = sendHook_?sendHook_(socket_,std::span<const uint8_t>(packet.data(),packet.size()),toAddr):sendto(
             socket_,
             reinterpret_cast<const char*>(packet.data()),
             static_cast<int>(packet.size()),
@@ -1221,7 +1225,7 @@ namespace {
         EncodeRnvpHeaderV1(packet.data(), header);
         EncodeAckPayload(packet.data() + kRnvpHeaderV1Size, ack);
 
-        const int sent = sendto(
+        const int sent = sendHook_?sendHook_(socket_,std::span<const uint8_t>(packet.data(),packet.size()),toAddr):sendto(
             socket_,
             reinterpret_cast<const char*>(packet.data()),
             static_cast<int>(packet.size()),
@@ -1643,7 +1647,7 @@ namespace {
             feedback
         );
 
-        const int sent = sendto(
+        const int sent = sendHook_?sendHook_(socket_,std::span<const uint8_t>(packet.data(),packet.size()),toAddr):sendto(
             socket_,
             reinterpret_cast<const char*>(packet.data()),
             static_cast<int>(packet.size()),
@@ -1700,7 +1704,7 @@ namespace {
         EncodeRnvpHeaderV1(packet.data(), header);
         EncodeControlPayload(packet.data() + kRnvpHeaderV1Size, control);
 
-        const int sent = sendto(
+        const int sent = sendHook_?sendHook_(socket_,std::span<const uint8_t>(packet.data(),packet.size()),toAddr):sendto(
             socket_,
             reinterpret_cast<const char*>(packet.data()),
             static_cast<int>(packet.size()),

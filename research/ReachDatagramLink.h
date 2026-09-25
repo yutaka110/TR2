@@ -11,6 +11,10 @@ public:
     ~DatagramLink();
     uint16_t Port() const;
     uint16_t SourcePort() const;
+    void SetFeedbackDestination(uint16_t port); // Configure before Start; downlink shares FIFO with RCMD.
+    uint64_t FeedbackDelivered() const; // Read after Finish.
+    void SetStateDestination(uint16_t port);
+    uint64_t StateDelivered() const;
     void Start(uint64_t originUs);
     void Check() const;
     void Finish(); // Cancels remaining packets explicitly, never unbounded drain.

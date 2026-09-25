@@ -48,6 +48,7 @@ namespace net {
         result.targetDelayMs = targetDelayMs_;
 
         if (IsOlderThanLastReleasedLocked(frame)) {
+            result.incomingOlderThanReleasedFrame = lastReleasedFrameId_;
             result.droppedFrames++;
             result.bufferedFrames = static_cast<uint32_t>(frames_.size());
             return result;
